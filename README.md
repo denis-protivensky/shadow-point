@@ -1,4 +1,4 @@
-# shadow-point — Sync Point Hooks for Concurrent Tests
+# shadow-point — Single-Threaded Hooks for Concurrent Tests
 
 Sync points let tests inject code at linearization points of concurrent
 operations. In production they compile to nothing.
