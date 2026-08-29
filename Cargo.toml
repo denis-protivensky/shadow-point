@@ -2,7 +2,8 @@
 name = "shadow-point"
 version = "0.1.0"
 edition = "2021"
-description = "Hook points for concurrent tests — deterministic linearization-point interception"
+description = "Deterministic sync-point hooks for concurrent Rust tests — pause, inspect, and interleave at linearization points"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 paste = "1.0"
