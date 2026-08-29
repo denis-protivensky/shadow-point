@@ -1,0 +1,8 @@
+[package]
+name = "shadow-point"
+version = "0.1.0"
+edition = "2021"
+description = "Hook points for concurrent tests — deterministic linearization-point interception"
+
+[dependencies]
+paste = "1.0"
