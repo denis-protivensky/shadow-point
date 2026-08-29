@@ -1,4 +1,4 @@
-//! Synchronization points for testing concurrent scenarios at linearization
+//! Single-threaded hook points for testing concurrent scenarios at linearization
 //! points.
 //!
 //! The [`invoke!`](macro@invoke) macro compiles away to a no-op in production

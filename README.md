@@ -1,7 +1,7 @@
 # shadow-point — Single-Threaded Hooks for Concurrent Tests
 
-Sync points let tests inject code at linearization points of concurrent
-operations. In production they compile to nothing.
+Hook points let tests inject code at linearization points of concurrent
+operations. Hooks only fire on the registering thread; nested fires on that thread are silently suppressed. In production they compile to nothing.
 
 ## Quick start
 
@@ -234,7 +234,7 @@ Useful for discovering expected sequences and call counts.
 Drop assertions include the install location:
 
 ```
-sync point hook `before_insert` fired 1 time(s), expected 2
+hook hook `before_insert` fired 1 time(s), expected 2
 (installed at src/my_module.rs:142:21)
 ```
 
