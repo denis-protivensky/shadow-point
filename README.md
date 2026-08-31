@@ -250,6 +250,87 @@ guard.before_get_search(|_map, root| {
 });
 ```
 
+## What you can test
+
+Hooks turn rare thread interleavings into deterministic, reproducible
+scenarios: at the exact linearization point, the closure runs the operation
+that the *other* thread would have run. Each example below assumes a map
+with the hook set from the Quick start (the third also declares
+`before_get_search(root: *const ())`).
+
+Note: a hook re-fired on the registering thread is silently suppressed, so
+the interleaving operation inside the closure runs without recursing into
+its own hooks.
+
+### The inserting thread loses the race
+
+Between the map's lookup ("key 1 is free") and its write, sneak in the
+*same* key. The outer insert must now report a duplicate instead of
+committing on top of the winner:
+
+```rust,ignore
+#[test]
+fn insert_race_loser() {
+    let guard = MyModuleSp::install_guard(my_map());
+
+    guard.before_insert(|map, key| {
+        // Lookup already passed; the commit has not. Steal the slot.
+        map.insert(*key, "rival");
+    }).expect(1);
+
+    // The outer insert now hits a taken key — it must return Err,
+    // not overwrite the value the hook just wrote.
+    assert!(guard.insert(1, "mine").is_err());
+    assert_eq!(guard.get(&1), Some(&"rival"));
+}
+```
+
+### The key vanishes under an in-flight remove
+
+The remove has resolved the bucket and is about to unlink the entry. Clear
+the map at that instant: the outer remove must return `false` — and, if it
+retires the entry it no longer owns, that is the use-after-free the test
+exists to catch.
+
+```rust,ignore
+#[test]
+fn remove_after_clear() {
+    let guard = MyModuleSp::install_guard(my_map_with(&[(1, "a"), (2, "b")]));
+
+    guard.before_remove(|map, _key| {
+        // The entry the outer remove is about to unlink no longer exists.
+        map.clear();
+    }).expect(1);
+
+    assert!(!guard.remove(1));    // nothing left to remove
+    assert!(guard.is_empty());
+}
+```
+
+### A reader pinned a node the remover detaches
+
+The get has pinned the root and is mid-search when the node it holds is
+removed. If the implementation trusts the pinned root without revalidating,
+it returns a value from retired memory — this is exactly the bug class hook
+tests exist for:
+
+```rust,ignore
+#[test]
+fn get_survives_detach_underneath() {
+    let guard = MyModuleSp::install_guard(my_map_with(&[(1, "a")]));
+
+    guard.before_get_search(|map, _root| {
+        // Fires while the get holds a pinned root: detach and retire it.
+        // The nested remove's own hooks are suppressed on this thread.
+        map.remove(1);
+    }).expect(1);
+
+    // The get must revalidate against the new root and report absence —
+    // never resurrect the value from the retired node.
+    assert_eq!(guard.get(&1), None);
+}
+```
+
 ## Debugging
 
 ### SP_TRACE
