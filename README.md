@@ -60,6 +60,46 @@ mod tests {
 No `use` imports needed — hook names are associated constants on the
 entry-point struct.
 
+## Using as a dev-dependency
+
+As a *regular* dependency, `invoke!` compiles away in production but the
+crate is still linked. To drop that coupling too, declare shadow-point under
+`[dev-dependencies]`. The catch: a dev-dependency is only in the extern
+prelude when building tests, so any plain `shadow_point::...` path in a
+non-test build fails to resolve (`E0433`) — even inside `invoke!`, whose own
+body is `#[cfg(test)]`-gated, because the *invocation path* is resolved
+before the macro expands and cfg-strips.
+
+The fix is a *seam*: a locally-defined `macro_rules!` that hides the crate
+path behind a `#[cfg(test)]` statement. In production builds the seam
+expands to a statement that is stripped before `::shadow_point` is ever
+resolved — the crate is not referenced at all:
+
+```rust
+// src/sp.rs — plain macro_rules; nothing here depends on the crate
+macro_rules! sp_invoke {
+    ($($t:tt)*) => {
+        #[cfg(test)]
+        ::shadow_point::invoke!($($t)*);
+    };
+}
+```
+
+```rust
+// src/lib.rs — textual macro scope: the seam module must precede every
+// module that calls sp_invoke! (an explicit `use` in each module works too)
+#[macro_use]
+mod sp;
+```
+
+Call sites then drop the crate path entirely:
+`sp_invoke!(MyModuleSp, before_insert(&key));`. `define_sp!` needs no seam —
+it is already `#[cfg(test)]`-gated by the caller and only ever expands in
+test builds.
+
+Check the seam holds with `cargo build` (must compile while the dev-dep is
+unresolvable) and `cargo test` (must dispatch to the real hooks).
+
 ## What `define_sp!` generates
 
 Given `prefix MyModule`, the macro generates:
