@@ -177,10 +177,12 @@ pub struct FireInfo {
     pub thread_name: Option<String>,
 }
 
+// `const {}` would be the idiomatic modern form, but inline const blocks
+// are experimental until 1.79 and the crate targets MSRV 1.65.
 thread_local! {
-    static CURRENT_FIRE: std::cell::RefCell<Option<FireInfo>> = const {
-        std::cell::RefCell::new(None)
-    };
+    #[allow(clippy::missing_const_for_thread_local)]
+    static CURRENT_FIRE: std::cell::RefCell<Option<FireInfo>> =
+        std::cell::RefCell::new(None);
 }
 
 /// Metadata about the hook fire currently being dispatched on this thread,
@@ -224,14 +226,15 @@ impl Drop for CurrentFire {
 /// hook) — failing is better than hanging.
 pub const PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+// See CURRENT_FIRE: inline `const {}` blocks are experimental until 1.79.
 thread_local! {
     // Addresses of `__Sp` instances currently dispatching a hook on this
     // thread. Per-thread: a genuinely concurrent fire from another thread is
     // never suppressed, and `contains` still gives per-sync-point re-entry
     // suppression that survives transitive nesting (A -> B -> A).
-    static EXEC_STACK: std::cell::RefCell<Vec<*const ()>> = const {
-        std::cell::RefCell::new(Vec::new())
-    };
+    #[allow(clippy::missing_const_for_thread_local)]
+    static EXEC_STACK: std::cell::RefCell<Vec<*const ()>> =
+        std::cell::RefCell::new(Vec::new());
 }
 
 /// Whether the sync point at `sp` is currently dispatching a hook on THIS
@@ -335,16 +338,16 @@ macro_rules! define_sp {
             impl $crate::SyncPoint for __SpDefault {}
             impl [<$prefix SyncPoint>] for __SpDefault {}
 
-            static __SP_DEFAULT: __SpDefault = const { __SpDefault };
+            static __SP_DEFAULT: __SpDefault = __SpDefault;
 
             thread_local! {
+                // Plain const-evaluable initializers: inline `const {}`
+                // blocks (experimental until 1.79) would break MSRV 1.65.
                 static __SP_TL: ::std::cell::Cell<
                     &'static dyn [<$prefix SyncPoint>]
-                > = const {
-                    ::std::cell::Cell::new(
-                        &__SP_DEFAULT as &'static dyn [<$prefix SyncPoint>]
-                    )
-                };
+                > = ::std::cell::Cell::new(
+                    &__SP_DEFAULT as &'static dyn [<$prefix SyncPoint>]
+                );
             }
 
             // ── Entry-point struct ────────────────────────────────────
