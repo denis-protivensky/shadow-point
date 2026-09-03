@@ -1,5 +1,6 @@
-//! Single-threaded hook points for testing concurrent scenarios at linearization
-//! points.
+//! Hook points for testing concurrent scenarios at linearization points —
+//! single-threaded via guards, or shared across threads via
+//! `install_shared` (see [`define_sp!`](macro@define_sp)).
 //!
 //! The [`invoke!`](macro@invoke) macro compiles away to a no-op in production
 //! builds (when `cfg(test)` is `false` on the consuming crate), so this crate
@@ -35,9 +36,21 @@ macro_rules! invoke {
 /// variable. When set, every hook fire prints its name and call index to
 /// stderr — useful for discovering expected sequences and call counts.
 pub fn trace_enabled() -> bool {
-    use std::sync::OnceLock;
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os("SP_TRACE").is_some())
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // Tri-state: 0 = uninitialized, 1 = off, 2 = on. The environment is
+    // process-global, so a racy double-initialization is benign (both
+    // threads observe the same `SP_TRACE` value).
+    static SP_TRACE: AtomicU8 = AtomicU8::new(0);
+    let state = SP_TRACE.load(Ordering::Acquire);
+    match state {
+        0 => {
+            let on = std::env::var_os("SP_TRACE").is_some();
+            SP_TRACE.store(if on { 2 } else { 1 }, Ordering::Release);
+            on
+        }
+        2 => true,
+        _ => false,
+    }
 }
 
 // --- HookId trait ---
@@ -52,6 +65,170 @@ pub trait HookId {
     fn id(&self) -> u64;
     #[must_use]
     fn name(&self) -> &'static str;
+}
+
+// --- Gate ---
+
+/// A simple boolean gate for coordinating threads in concurrent tests.
+///
+/// Threads block in [`wait`](Self::wait) (or
+/// [`must_wait`](Self::must_wait)) until another thread calls
+/// [`set`](Self::set). Reusable: [`clear`](Self::clear) arms it for the
+/// next wait.
+///
+/// The gate is panic-safe: a poisoned lock (a panicking waiter) is
+/// transparently recovered via [`into_inner`](std::sync::PoisonError::into_inner).
+#[derive(Debug, Default)]
+pub struct Gate {
+    flag: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+impl Gate {
+    /// Create a new, unset gate.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the gate, waking every thread blocked in
+    /// [`wait`](Self::wait) / [`wait_timeout`](Self::wait_timeout).
+    pub fn set(&self) {
+        let mut flag = self.flag.lock().unwrap_or_else(|e| e.into_inner());
+        *flag = true;
+        self.cv.notify_all();
+    }
+
+    /// Clear the gate so a subsequent [`wait`](Self::wait) blocks again.
+    pub fn clear(&self) {
+        *self.flag.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    }
+
+    /// Whether the gate is currently set.
+    #[must_use]
+    pub fn is_set(&self) -> bool {
+        *self.flag.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Block until the gate is set. May hang forever if the gate is never
+    /// set — prefer [`must_wait`](Self::must_wait) where a hang would be
+    /// indistinguishable from a test bug.
+    pub fn wait(&self) {
+        let mut flag = self.flag.lock().unwrap_or_else(|e| e.into_inner());
+        while !*flag {
+            flag = self.cv.wait(flag).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// Block until the gate is set or `timeout` elapses. Returns `true` if
+    /// the gate was set.
+    pub fn wait_timeout(&self, timeout: std::time::Duration) -> bool {
+        let flag = self.flag.lock().unwrap_or_else(|e| e.into_inner());
+        if *flag {
+            return true;
+        }
+        let (guard, _) = self
+            .cv
+            .wait_timeout(flag, timeout)
+            .unwrap_or_else(|e| e.into_inner());
+        *guard
+    }
+
+    /// Block until the gate is set, panicking with a timeout diagnostic if
+    /// `timeout` elapses first. Prefer over [`wait`](Self::wait) inside
+    /// sequence-step closures: a missed [`set`](Self::set) fails the test
+    /// with a message instead of hanging it.
+    pub fn must_wait(&self, timeout: std::time::Duration) {
+        assert!(
+            self.wait_timeout(timeout),
+            "shadow-point: gate wait timed out after {timeout:?}"
+        );
+    }
+}
+
+// --- Fire info ---
+
+/// Metadata about the hook fire currently being dispatched on this thread.
+///
+/// Returned by [`current_fire`] while a hook closure runs (fire-once, a
+/// sequence step, or an `every` closure); `None` outside of any dispatch.
+#[derive(Clone, Debug)]
+pub struct FireInfo {
+    /// Name of the hook being dispatched.
+    pub hook: &'static str,
+    /// Zero-based index of this fire on this hook (global across threads).
+    pub index: usize,
+    /// Id of the thread the hook fired on.
+    pub thread_id: std::thread::ThreadId,
+    /// Name of the thread the hook fired on, if set.
+    pub thread_name: Option<String>,
+}
+
+thread_local! {
+    static CURRENT_FIRE: std::cell::RefCell<Option<FireInfo>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Metadata about the hook fire currently being dispatched on this thread,
+/// or `None` outside of a hook dispatch (e.g. in the main thread before any
+/// hook fired, or after a dispatch finished).
+#[must_use]
+pub fn current_fire() -> Option<FireInfo> {
+    CURRENT_FIRE.with(|c| c.borrow().clone())
+}
+
+/// RAII guard that installs [`FireInfo`] as the current fire on this thread
+/// and restores the previous value on drop (panic-safe and nesting-safe).
+/// Hidden: used only from macro expansions generated by [`define_sp!`].
+#[doc(hidden)]
+#[must_use]
+pub struct CurrentFire {
+    prev: Option<FireInfo>,
+}
+
+impl CurrentFire {
+    #[doc(hidden)]
+    pub fn install(info: FireInfo) -> Self {
+        let prev = CURRENT_FIRE.with(|c| c.borrow_mut().replace(info));
+        Self { prev }
+    }
+}
+
+impl Drop for CurrentFire {
+    fn drop(&mut self) {
+        CURRENT_FIRE.with(|c| *c.borrow_mut() = self.prev.take());
+    }
+}
+
+// --- Timeouts ---
+
+/// Maximum time a thread parks in shared mode while the sequence head is a
+/// different hook. Parking is a mutual-deadlock guard, not a synchronization
+/// mechanism: threads re-check the sequence after every wake and park only
+/// as long as the head still blocks them. A timeout therefore means the
+/// test's sequence can never advance (no thread will ever fire the head
+/// hook) — failing is better than hanging.
+pub const PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// RAII guard that clears a hook re-entry flag on drop (panic-safe).
+/// Hidden: used only from macro expansions generated by [`define_sp!`].
+#[doc(hidden)]
+#[must_use]
+pub struct ExecSink<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl<'a> ExecSink<'a> {
+    #[doc(hidden)]
+    #[inline]
+    pub fn new(flag: &'a std::sync::atomic::AtomicBool) -> Self {
+        Self(flag)
+    }
+}
+
+impl Drop for ExecSink<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 // --- define_sp! macro ---
