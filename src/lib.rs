@@ -134,17 +134,23 @@ impl Gate {
     }
 
     /// Block until the gate is set or `timeout` elapses. Returns `true` if
-    /// the gate was set.
+    /// the gate was set. Spurious condvar wakeups do not terminate the wait
+    /// early: the condition is re-checked against a deadline.
     pub fn wait_timeout(&self, timeout: std::time::Duration) -> bool {
-        let flag = self.flag.lock().unwrap_or_else(|e| e.into_inner());
-        if *flag {
-            return true;
+        let deadline = std::time::Instant::now() + timeout;
+        let mut flag = self.flag.lock().unwrap_or_else(|e| e.into_inner());
+        while !*flag {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (guard, _) = self
+                .cv
+                .wait_timeout(flag, deadline - now)
+                .unwrap_or_else(|e| e.into_inner());
+            flag = guard;
         }
-        let (guard, _) = self
-            .cv
-            .wait_timeout(flag, timeout)
-            .unwrap_or_else(|e| e.into_inner());
-        *guard
+        true
     }
 
     /// Block until the gate is set, panicking with a timeout diagnostic if
@@ -675,6 +681,10 @@ macro_rules! define_sp {
                                 .sequence
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner());
+                            // Becomes true when a park times out; the panic
+                            // fires only if the re-derived head STILL blocks
+                            // this hook (see the shared park arm below).
+                            let mut __timed_out_last = false;
                             loop {
                                 match __seq.front() {
                                     None => break (false, None),
@@ -710,6 +720,26 @@ macro_rules! define_sp {
                                             break (false, None);
                                         }
                                         if self.shared {
+                                            // Timeout panic only when the head
+                                            // STILL does not match: the head may
+                                            // have advanced (pop + notify_all)
+                                            // between this thread's deadline
+                                            // expiring and its re-acquisition of
+                                            // the sequence mutex — a raced
+                                            // timeout must re-check, not panic
+                                            // on a stale condition.
+                                            if __timed_out_last {
+                                                panic!(
+                                                    "shadow-point: sequence park \
+                                                     timeout ({:?}): thread waiting \
+                                                     for `{}`, head is `{}` \
+                                                     (installed at {})",
+                                                    $crate::PARK_TIMEOUT,
+                                                    __hook.name(),
+                                                    __front.name(),
+                                                    self.installed_at,
+                                                );
+                                            }
                                             let (__g, __w) = self
                                                 .sequence_cv
                                                 .wait_timeout(
@@ -718,21 +748,7 @@ macro_rules! define_sp {
                                                 )
                                                 .unwrap_or_else(|e| e.into_inner());
                                             __seq = __g;
-                                            if __w.timed_out() {
-                                                panic!(
-                                                    "shadow-point: sequence park \
-                                                     timeout ({:?}): thread waiting \
-                                                     for `{}`, head is `{}` \
-                                                     (installed at {})",
-                                                    $crate::PARK_TIMEOUT,
-                                                    __hook.name(),
-                                                    __seq.front().map_or(
-                                                        "<none>",
-                                                        SeqEntry::name,
-                                                    ),
-                                                    self.installed_at,
-                                                );
-                                            }
+                                            __timed_out_last = __w.timed_out();
                                             continue;
                                         }
                                         panic!(
@@ -889,6 +905,11 @@ macro_rules! define_sp {
             ///
             /// Derefs to the guarded value. Drop asserts that all registered
             /// sequences were consumed and all `expect_calls` counts match.
+            ///
+            /// Drop the guard on the thread that installed it: the guard
+            /// restores the previously installed sync point of ITS OWN thread
+            /// (TLS). Moving a guard across threads and dropping it there
+            /// silently clobbers the destination thread's pointer.
             #[clippy::has_significant_drop]
             #[must_use]
             $vis struct [<$prefix SpGuard>]<T: Send + Sync + 'static> {
@@ -1104,7 +1125,9 @@ macro_rules! define_sp {
                 /// Call it from the thread that will drive the hooks — a
                 /// worker must install its own guard inside the worker
                 /// closure (TLS is per-thread; the guard carries the TLS
-                /// restore for the thread it was created on). The returned
+                /// restore for the thread it was created on, so drop the
+                /// guard on the thread that installed it — never move it
+                /// across threads). The returned
                 /// guard owns an `Arc` clone of this sync point: the
                 /// `SharedSp::drop` assertions run only after every worker
                 /// has dropped its guard, so the final counts/sequence

@@ -81,6 +81,7 @@ fn sequence_out_of_order_panics() {
         r.is_err(),
         "firing `b` with `a` at the sequence head must panic"
     );
+    assert_panic_says_ordering_violation(r, "`b` before `a`");
     // Nothing was consumed by the failed fire: `a` is still consumable.
     shadow_point::invoke!(single::SingleSp, a(0));
     drop(g);
@@ -124,7 +125,29 @@ fn optional_head_not_skipped_in_private_mode() {
     // later matching entry still means ordering violation.
     let r = std::panic::catch_unwind(|| fire_b(1));
     assert!(r.is_err(), "optional head is not skipped in private mode");
+    assert_panic_says_ordering_violation(r, "`b` before optional `a`");
     drop(g);
+}
+
+/// Pins the ordering-violation panic text (frozen by the cross-thread
+/// rework) instead of accepting any panic from the dispatch.
+fn assert_panic_says_ordering_violation(r: std::thread::Result<()>, what: &str) {
+    let msg = match r {
+        Err(p) => {
+            if let Some(s) = p.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = p.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else {
+                "<non-string panic>".to_string()
+            }
+        }
+        Ok(()) => "<no panic>".to_string(),
+    };
+    assert!(
+        msg.contains("sync point ordering violation"),
+        "unexpected panic message for {what}: {msg:?}"
+    );
 }
 
 #[test]

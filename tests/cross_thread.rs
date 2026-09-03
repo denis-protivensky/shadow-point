@@ -87,8 +87,9 @@ fn sequence_order_across_threads() {
     let t1 = std::thread::spawn(move || {
         let _g = s1.install();
         shadow_point::invoke!(ct::CtSp, a(0));
-        // `c` may park at the sequence head while `b` has not been consumed
-        // yet; the sequence resolves it.
+        // `gate_b` is set inside step `b` only after `b` is consumed, so `c`
+        // always finds itself at the head and never parks (the park arm is
+        // exercised by park_until_turn instead).
         gate_b2.must_wait(PARK_TIMEOUT);
         shadow_point::invoke!(ct::CtSp, c(0));
     });
