@@ -28,23 +28,6 @@ fn mk_log() -> Log {
     Arc::new(Mutex::new(Vec::new()))
 }
 
-fn log_has(log: &Log, entry: &str) -> bool {
-    log.lock().unwrap().contains(&entry)
-}
-
-/// Poll `log` until `entry` appears, with a bounded deadline: a missed
-/// step fails the test instead of hanging it.
-fn wait_log(log: &Log, entry: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !log_has(log, entry) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for log entry `{entry}`"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
-}
-
 #[test]
 fn sequence_order_across_threads() {
     let log = mk_log();
@@ -106,45 +89,59 @@ fn sequence_order_across_threads() {
 #[test]
 fn park_until_turn() {
     let log = mk_log();
-    let gate = Arc::new(Gate::new());
+    let entered = Arc::new(Gate::new());
+    let go = Arc::new(Gate::new());
+    let gate_a = Arc::new(Gate::new());
     let shared = ct::CtSp::install_shared(());
     shared.sequence(|s| {
         s.a({
             let log = log.clone();
-            let gate = gate.clone();
+            let gate_a = gate_a.clone();
             move |_, _| {
-                // Append before parking: the entry is recorded even if the
-                // gate (and this step) stays blocked.
                 log.lock().unwrap().push("a");
-                gate.must_wait(PARK_TIMEOUT);
+                gate_a.set();
             }
         });
         s.b({
             let log = log.clone();
-            let gate = gate.clone();
+            let gate_a = gate_a.clone();
             move |_, _| {
-                // The turn must complete in order; the main thread releases
-                // both steps after observing the `a` append.
-                gate.must_wait(PARK_TIMEOUT);
+                // `b`'s step may start as soon as `a` is consumed (the park
+                // wake precedes step `a`), so completion must wait for
+                // step `a` to finish.
+                gate_a.must_wait(PARK_TIMEOUT);
                 log.lock().unwrap().push("b");
             }
         });
     });
+    // `every` closures run before the sequence head check: `entered` proves
+    // T2 is inside `b`'s dispatch while `a` is still at the head, so it is
+    // deterministically parked (under a per-__Sp `executing` reversion it
+    // would hold the flag that suppresses T1's `a` dispatch instead).
+    shared.every(|e| {
+        e.b({
+            let entered = entered.clone();
+            move |_, _| entered.set()
+        });
+    });
     let s1 = shared.clone();
     let s2 = shared.clone();
+    let go_t1 = go.clone();
     let t1 = std::thread::spawn(move || {
         let _g = s1.install();
+        // Block BEFORE firing: `a` must still be at the head when T2
+        // dispatches, so the rendezvous is deterministic.
+        go_t1.must_wait(PARK_TIMEOUT);
         shadow_point::invoke!(ct::CtSp, a(0));
     });
-    // T2 fires `b` without waiting for T1: if it races ahead of `a`'s
-    // consumption, its dispatch parks at the sequence head until `a` is
-    // consumed; either interleaving yields the same log.
     let t2 = std::thread::spawn(move || {
         let _g = s2.install();
         shadow_point::invoke!(ct::CtSp, b(0));
     });
-    wait_log(&log, "a");
-    gate.set();
+    // T2 is provably inside its `b` dispatch, parked at the `a` head.
+    // Release T1: `a` is popped, T2 wakes, re-checks, consumes `b`.
+    entered.must_wait(PARK_TIMEOUT);
+    go.set();
     t1.join().unwrap();
     t2.join().unwrap();
     drop(shared);

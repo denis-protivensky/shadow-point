@@ -266,11 +266,13 @@ its own thread (TLS is per-thread):
 #[test]
 fn concurrent_writers_commit_in_order() {
     let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let log_before = Arc::clone(&log);
+    let log_after = Arc::clone(&log);
     let shared = MyModuleSp::install_shared(());
 
     shared.sequence(|s| {
-        s.before_insert(|_, _| log.lock().unwrap().push("before"));
-        s.after_commit(|_, _| log.lock().unwrap().push("after"));
+        s.before_insert(move |_, _| log_before.lock().unwrap().push("before"));
+        s.after_commit(move |_, _| log_after.lock().unwrap().push("after"));
     });
 
     let s1 = shared.clone();
