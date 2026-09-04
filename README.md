@@ -1,7 +1,10 @@
-# shadow-point — Single-Threaded Hooks for Concurrent Tests
+# shadow-point — Sync Points for Concurrent Tests
 
 Hook points let tests inject code at linearization points of concurrent
-operations. Hooks only fire on the registering thread; nested fires on that thread are silently suppressed. In production they compile to nothing.
+operations — single-threaded through guards, or shared across threads via
+`install_shared` (a parking rendezvous at the sequence head). Nested fires
+of the same sync point on the same thread are silently suppressed. In
+production they compile to nothing.
 
 ## Quick start
 
@@ -106,11 +109,13 @@ Given `prefix MyModule`, the macro generates:
 
 | Name | What |
 |---|---|
-| `MyModuleSp` | Entry-point struct — `install_guard()`, `with_dyn()`, associated hook constants |
+| `MyModuleSp` | Entry-point struct — `install_guard()`, `install_shared()`, `with_dyn()`, associated hook constants |
 | `MyModuleSyncPoint` | Extension trait (supertrait: `SyncPoint`) |
 | `MyModuleHook` | Enum with one snake_case variant per hook |
 | `MyModuleSpGuard<T>` | Guard — `Deref<Target=T>`, hook registration, `Drop` |
-| `MyModuleSeqBuilder<T>` | Builder for `guard.sequence(...)` |
+| `MyModuleSharedSp<T>` | Shared state — same registration API, `install()` per worker |
+| `MyModuleSharedGuard<T>` | Per-thread TLS install of a shared sync point |
+| `MyModuleSeqBuilder<T>` | Builder for `sequence(...)` |
 
 Associated constants on the entry-point struct let you reference hooks
 without importing the enum:
@@ -250,6 +255,91 @@ guard.before_get_search(|_map, root| {
 });
 ```
 
+## Shared sync points (cross-thread)
+
+`install_shared(value)` returns an `Arc<SharedSp<T>>` that any thread can
+drive. Register `sequence`/`every`/`expect_calls`/fire-once from the test
+thread *before* spawning workers; each worker installs the sync point on
+its own thread (TLS is per-thread):
+
+```rust,ignore
+#[test]
+fn concurrent_writers_commit_in_order() {
+    let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let log_before = Arc::clone(&log);
+    let log_after = Arc::clone(&log);
+    let shared = MyModuleSp::install_shared(());
+
+    shared.sequence(|s| {
+        s.before_insert(move |_, _| log_before.lock().unwrap().push("before"));
+        s.after_commit(move |_, _| log_after.lock().unwrap().push("after"));
+    });
+
+    let s1 = shared.clone();
+    let t1 = std::thread::spawn(move || {
+        let _guard = s1.install();
+        // ... drive real instrumented code ...
+        shadow_point::invoke!(MyModuleSp, before_insert(&42));
+    });
+    // ... more workers ...
+    t1.join().unwrap();
+    // Assertions run on the final Arc drop.
+    drop(shared);
+}
+```
+
+A worker that fires a hook whose entry is not at the sequence head
+**parks** (up to `PARK_TIMEOUT`, default 10 s) instead of panicking; it
+re-checks the head after every wake. Parking is a mutual-deadlock guard,
+not a synchronization mechanism: if the head can never advance, the worker
+panics with a `sequence park timeout` diagnostic mentioning the head hook
+and the install site — failing the test instead of hanging it.
+
+Coordinate *completion* (not just consumption) with `Gate`, a
+level-triggered boolean barrier (`set` before `wait` is not lost):
+
+```rust,ignore
+let gate = Arc::new(shadow_point::Gate::new());
+shared.sequence(|s| {
+    s.step_a({
+        let gate = gate.clone();
+        move |_, _| {
+            // Append/record first, then park: the entry is visible even if
+            // the gate is never released.
+            log.lock().unwrap().push("a");
+            gate.must_wait(shadow_point::PARK_TIMEOUT);
+        }
+    });
+});
+```
+
+Caveats:
+
+- A parked thread is inside the instrumented code path and holds
+  production locks: order `sequence` entries so the head consumer never
+  needs a lock held by a parked thread (otherwise `sequence park
+  timeout`, not a hang).
+- `sequence` orders *consumption* of entries, not completion of their
+  closures — coordinate completion with `Gate`.
+- Fire-once closures are nondeterministic in shared mode (the winner of
+  the call-counter race); use `sequence` for deterministic ordering.
+- Register before spawning workers; early fires fall through to
+  fire-once/counter.
+- Same-named entries from different threads are each consumed exactly
+  once, but wake order is not FIFO.
+- In shared mode, an `optional` entry at the head is skipped — its
+  closure never runs — when any *other* hook fires while it is at the
+  head; in private mode the mismatch leaves the entry in place, forgiven
+  at drop.
+- Join workers and drop their guards before dropping the last `Arc`.
+- `install_guard`/`install_shared` leak the per-install state
+  (`Box::leak`) by design; that is normal for test instantiation, but do
+  not call `install` in a long-lived loop.
+- Inside step closures use `Gate::must_wait`, never `Gate::wait`: a
+  missed `set` fails the test with a diagnostic instead of hanging it.
+- Predicates on gated entries must be pure — they run while the sequence
+  lock is held (no hook invocations, no blocking).
+
 ## What you can test
 
 Hooks turn rare thread interleavings into deterministic, reproducible
@@ -335,7 +425,8 @@ fn get_survives_detach_underneath() {
 
 ### SP_TRACE
 
-Set the `SP_TRACE` environment variable to print every hook fire:
+Set the `SP_TRACE` environment variable to print every hook fire (with the
+firing thread's name):
 
 ```sh
 SP_TRACE=1 cargo test -- --nocapture
@@ -343,9 +434,9 @@ SP_TRACE=1 cargo test -- --nocapture
 
 Output:
 ```
-[sp] before_insert call #1
-[sp] after_commit call #1
-[sp] after_commit call #2
+[sp] before_insert call #1 thread=worker-1
+[sp] after_commit call #1 thread=worker-1
+[sp] after_commit call #2 thread=main
 ```
 
 Useful for discovering expected sequences and call counts.

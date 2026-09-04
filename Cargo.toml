@@ -1,9 +1,13 @@
 [package]
 name = "shadow-point"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Single-threaded hook points for concurrent Rust tests — pause, inspect, and interleave at linearization points"
+rust-version = "1.65"
+description = "Hook points for concurrent Rust tests — pause, inspect, and interleave at linearization points, single-threaded or shared across threads"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/denis-protivensky/shadow-point"
+keywords = ["testing", "concurrency", "sync-point", "hooks"]
+categories = ["development-tools::testing"]
 
 [dependencies]
 paste = "1.0"
