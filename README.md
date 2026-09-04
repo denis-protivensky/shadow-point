@@ -30,6 +30,23 @@ is the most common wrong-mode mistake, so the rule of thumb is: one
 thread under test → `install_guard`; several threads → `install_shared`,
 and every worker installs.
 
+The same split has two useful readings:
+
+- **Concurrency vs parallelism.** Guard mode is concurrency without
+  parallelism: two logical actors — the operation under test and the
+  interferer — alternate at the linearization point, deterministically,
+  on one real thread; nothing actually races. Shared mode adds the
+  parallelism: real threads race for real, and `sequence`/`Gate` pin
+  the interleaving down so the chosen scenario reproduces run to run.
+- **Interior mutability.** The guard derefs to `&T`, and every hook
+  closure receives the same `&T` — never `&mut`. The operation under
+  test and the interferer therefore share one value through shared
+  references, and the instrumented API must mutate through `&self`
+  (interior mutability). That is exactly what lets a hook closure
+  perform the rival operation at the linearization point — the
+  `map.insert(*key, "rival")` pattern in the examples below — and it
+  makes such types the primary use case of the single-threaded mode.
+
 ## Quick start
 
 ### 1. Declare hooks
