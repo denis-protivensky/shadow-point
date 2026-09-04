@@ -1,10 +1,51 @@
 # shadow-point — Sync Points for Concurrent Tests
 
 Hook points let tests inject code at linearization points of concurrent
-operations — single-threaded through guards, or shared across threads via
-`install_shared` (a parking rendezvous at the sequence head). Nested fires
-of the same sync point on the same thread are silently suppressed. In
-production they compile to nothing.
+operations and *shadow* the competing one: the closure runs in place of
+what the other thread would have done. The same `invoke!` call sites
+serve two install modes — a private guard drives hooks on one thread, a
+shared sync point drives them from any thread (a parking rendezvous at
+the sequence head). Nested fires of the same sync point on the same
+thread are silently suppressed. In production they compile to nothing.
+
+## Two install modes: private guard vs shared sync point
+
+Both modes dispatch the same `invoke!` call sites — you choose per test
+by how you install, not by how you declare hooks or fire them.
+
+| | `install_guard` — private | `install_shared` — shared |
+|---|---|---|
+| Whose fires are seen | only the installing thread | every worker that called `install()` on its thread |
+| Fires from other threads | silently dropped (they hit the default no-op) | counted, sequenced, aggregated |
+| Out-of-order sequence fire | panics immediately | parks the early thread at the head, panics on `PARK_TIMEOUT` |
+| Expected counts | checked at guard drop | aggregated across threads, checked at last `Arc` drop |
+| Typical scenario | the test thread scripts the interleaving on its own value | real workers race; cross-thread order and counts are the assertion |
+
+Decision rule: hooks fire on the thread that runs the instrumented code.
+If that is the test's own thread — or a single worker whose fires it
+inspects — a guard is enough. If hooks fire on several threads, a guard
+installed on the test thread will *not* see them: a fire from a thread
+without an install dispatches to the default no-op and disappears. That
+is the most common wrong-mode mistake, so the rule of thumb is: one
+thread under test → `install_guard`; several threads → `install_shared`,
+and every worker installs.
+
+The same split has two useful readings:
+
+- **Concurrency vs parallelism.** Guard mode is concurrency without
+  parallelism: two logical actors — the operation under test and the
+  interferer — alternate at the linearization point, deterministically,
+  on one real thread; nothing actually races. Shared mode adds the
+  parallelism: real threads race for real, and `sequence`/`Gate` pin
+  the interleaving down so the chosen scenario reproduces run to run.
+- **Interior mutability.** The guard derefs to `&T`, and every hook
+  closure receives the same `&T` — never `&mut`. The operation under
+  test and the interferer therefore share one value through shared
+  references, and the instrumented API must mutate through `&self`
+  (interior mutability). That is exactly what lets a hook closure
+  perform the rival operation at the linearization point — the
+  `map.insert(*key, "rival")` pattern in the examples below — and it
+  makes such types the primary use case of the single-threaded mode.
 
 ## Quick start
 
@@ -41,7 +82,7 @@ shadow_point::invoke!(MyModuleSp, after_commit());
 `invoke!` takes the entry-point struct (`MyModuleSp`, generated from the
 prefix) and a method call. In production `invoke!` compiles to `{}`.
 
-### 3. Write tests
+### 3. Write a test (single thread)
 
 ```rust
 #[cfg(test)]
@@ -62,6 +103,12 @@ mod tests {
 
 No `use` imports needed — hook names are associated constants on the
 entry-point struct.
+
+This is the private mode: the guard sees only fires from this thread.
+For hooks fired from several threads, switch the install line to
+`install_shared` and let every worker install its own TLS guard — see
+[Shared mode](#shared-mode-one-sync-point-across-threads). Hook
+declarations and `invoke!` calls are identical in both modes.
 
 ## Using as a dev-dependency
 
@@ -127,7 +174,7 @@ MyModuleSp::after_commit    // type: MyModuleHook
 
 All names derive from the prefix via `paste!`.
 
-## Guard API
+## Guard API (private mode)
 
 `install_guard(value)` returns a guard that:
 - **Derefs** to `&T` — call methods on the value directly through the guard.
@@ -135,6 +182,9 @@ All names derive from the prefix via `paste!`.
 - **Auto-counts** every hook fire.
 - **Asserts on drop** — unconsumed sequence entries and count mismatches
   panic. Entries marked `.optional()` are exempt (see below).
+- **Leaks per-install state** (`Box::leak` by design — normal for test
+  instantiation, but do not call `install` in a long-lived loop). Applies
+  to `install_shared` too.
 
 ### Fire-once
 
@@ -224,16 +274,6 @@ guard.every(|e| {
 });
 ```
 
-The `_every` closure runs before fire-once / sequence dispatch.
-
-### expect_calls
-
-Declare expected call counts (checked at guard drop):
-
-```rust
-guard.expect_calls(MyModuleSp::after_commit, 3);
-```
-
 ## Hook arguments
 
 Hook arguments appear in the trait signature. The closure receives `&T`
@@ -255,12 +295,16 @@ guard.before_get_search(|_map, root| {
 });
 ```
 
-## Shared sync points (cross-thread)
+## Shared mode: one sync point across threads
 
-`install_shared(value)` returns an `Arc<SharedSp<T>>` that any thread can
-drive. Register `sequence`/`every`/`expect_calls`/fire-once from the test
-thread *before* spawning workers; each worker installs the sync point on
-its own thread (TLS is per-thread):
+Use it when hooks fire from more than one thread and the assertion is
+cross-thread order or total counts. `install_shared(value)` returns an
+`Arc<SharedSp<T>>` that any thread can drive. Register
+`sequence`/`every`/`expect_calls`/fire-once from the test thread *before*
+spawning workers, then have *every* worker install the sync point on its
+own thread before touching instrumented code — TLS is per-thread, and a
+worker that never calls `install()` dispatches to the default no-op, so
+its fires vanish:
 
 ```rust,ignore
 #[test]
@@ -332,9 +376,6 @@ Caveats:
   head; in private mode the mismatch leaves the entry in place, forgiven
   at drop.
 - Join workers and drop their guards before dropping the last `Arc`.
-- `install_guard`/`install_shared` leak the per-install state
-  (`Box::leak`) by design; that is normal for test instantiation, but do
-  not call `install` in a long-lived loop.
 - Inside step closures use `Gate::must_wait`, never `Gate::wait`: a
   missed `set` fails the test with a diagnostic instead of hanging it.
 - Predicates on gated entries must be pure — they run while the sequence
@@ -344,9 +385,12 @@ Caveats:
 
 Hooks turn rare thread interleavings into deterministic, reproducible
 scenarios: at the exact linearization point, the closure runs the operation
-that the *other* thread would have run. Each example below assumes a map
-with the hook set from the Quick start (the third also declares
-`before_get_search(root: *const ())`).
+that the *other* thread would have run. Each example below assumes a
+*concurrent* map — one with interior mutability, mutating through
+`&self` — with the hook set from the Quick start (the third also declares
+`before_get_search(root: *const ())`). The examples use the private
+guard; in shared mode the same interleavings are scripted as `sequence`
+steps, coordinated with `Gate`.
 
 Note: a hook re-fired on the registering thread is silently suppressed, so
 the interleaving operation inside the closure runs without recursing into
