@@ -425,6 +425,11 @@ macro_rules! define_sp {
                 ///    assertions run on the final drop, and a worker still
                 ///    parked at that point fails with a `sequence park
                 ///    timeout` panic instead of being joined.
+                /// 7. In shared mode, an `optional` entry at the head is
+                ///    skipped — its closure never runs — when any *other*
+                ///    hook fires while it is at the head. In private mode
+                ///    the same mismatch leaves the entry in place, forgiven
+                ///    at drop.
                 #[track_caller]
                 $vis fn install_shared<T: Send + Sync + 'static>(
                     value: T,
@@ -1051,6 +1056,7 @@ macro_rules! define_sp {
             /// `Arc` clone) asserts that all registered sequences were
             /// consumed and all `expect_calls` counts match — same
             /// assertions as `{$prefix}SpGuard`.
+            #[clippy::has_significant_drop]
             #[must_use]
             $vis struct [<$prefix SharedSp>]<T: Send + Sync + 'static> {
                 sp: &'static __Sp<T>,
@@ -1194,6 +1200,7 @@ macro_rules! define_sp {
             /// RAII TLS install of a shared sync point. Owns an `Arc` clone
             /// so the shared state and its drop assertions outlive every
             /// worker that installed it.
+            #[clippy::has_significant_drop]
             #[must_use]
             $vis struct [<$prefix SharedGuard>]<T: Send + Sync + 'static> {
                 _shared: ::std::sync::Arc<[<$prefix SharedSp>]<T>>,

@@ -193,7 +193,9 @@ fn gate_level_triggered() {
     assert!(!gate.is_set());
     assert!(!gate.wait_timeout(Duration::from_millis(50)));
 
-    // A set() from another thread wakes a waiter.
+    // A set() from another thread wakes a waiter — or, if the main thread
+    // is descheduled past the sleep window, is absorbed by the
+    // level-triggered flag when the wait starts (either way, true).
     let gate = Arc::new(Gate::new());
     let g2 = gate.clone();
     let t = std::thread::spawn(move || {

@@ -327,6 +327,10 @@ Caveats:
   fire-once/counter.
 - Same-named entries from different threads are each consumed exactly
   once, but wake order is not FIFO.
+- In shared mode, an `optional` entry at the head is skipped — its
+  closure never runs — when any *other* hook fires while it is at the
+  head; in private mode the mismatch leaves the entry in place, forgiven
+  at drop.
 - Join workers and drop their guards before dropping the last `Arc`.
 - `install_guard`/`install_shared` leak the per-install state
   (`Box::leak`) by design; that is normal for test instantiation, but do
