@@ -385,8 +385,9 @@ Caveats:
 
 Hooks turn rare thread interleavings into deterministic, reproducible
 scenarios: at the exact linearization point, the closure runs the operation
-that the *other* thread would have run. Each example below assumes a map
-with the hook set from the Quick start (the third also declares
+that the *other* thread would have run. Each example below assumes a
+*concurrent* map — one with interior mutability, mutating through
+`&self` — with the hook set from the Quick start (the third also declares
 `before_get_search(root: *const ())`). The examples use the private
 guard; in shared mode the same interleavings are scripted as `sequence`
 steps, coordinated with `Gate`.
