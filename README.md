@@ -99,7 +99,12 @@ shadow_point::invoke!(MyModuleSp, after_commit());
 ```
 
 `invoke!` takes the entry-point struct (`MyModuleSp`, generated from the
-prefix) and a method call. In production `invoke!` compiles to `{}`.
+prefix) and a plain `hook(args…)` call. It expands to a *statement*
+(an `#[cfg(test)]`-attributed block), so it cannot be used in
+expression position — not as a closure's expression body
+(`|| invoke!(…)`), not as a block's trailing value; write `invoke!(…);`
+as its own statement or hoist such fires into a function.
+In production `invoke!` compiles to `{}`.
 
 ### 3. Write a test (single thread)
 
@@ -265,6 +270,66 @@ All names derive from the prefix via `paste!`.
   thread that installed it: dropping a guard that was moved to another
   thread clobbers that thread's dispatch pointer.
 
+### Registration precedence and lifetime
+
+One `__Sp` state machine sits behind both install modes, so one
+dispatch order governs every fire in private and shared mode alike. A
+fire that survives re-entry suppression (a hook of the sync point
+already executing on this thread is dropped before it counts) runs
+through it:
+
+1. **Count + trace.** The fire takes its zero-based per-hook index
+   first. The counter lives on the sync point itself — one counter
+   per hook per install, shared by all threads bound to it, not
+   per-thread; this is the number `SP_TRACE` prints (1-based).
+2. **`every`.** If registered, its closure runs now — before the
+   sequence head is consulted — on every non-suppressed fire, consumed
+   or not, and even on a fire that goes on to panic (ordering
+   violation) or to park. That pre-head ordering is what lets an
+   `every` closure prove "inside dispatch, about to park" in the
+   parking example below.
+3. **Sequence.** The deque is checked next:
+   - empty deque (none registered, or fully consumed): fall through
+     to fire-once;
+   - head expects this hook and its predicate passes (or there is
+     none): the entry is popped, waiters are notified, and the step
+     closure runs — the fire is done;
+   - head expects this hook but its predicate fails: the entry stays
+     at the head for a later fire; this fire ends here and does not
+     arm fire-once;
+   - head is a *different* hook:
+     - shared mode and the head is marked `optional`: the head is
+       skipped (its closure never runs) and the check continues with
+       the next entry;
+     - no later entry matches this hook: fall through to fire-once;
+     - a later entry matches: private mode panics with the ordering
+       violation; shared mode parks on the sequence condvar and
+       re-checks after every wake (see Parking) — a parked fire
+       never arms fire-once while the head still blocks it.
+4. **Fire-once** runs at most once per hook, on the fire where this
+   hook's counter was 0 *and* the sequence fell through to it (the
+   fall-through cases above). If the hook's first fire was consumed
+   by a `sequence` entry or gated off by a failing predicate, the
+   fire-once closure never runs.
+
+Panic behavior: a panic inside a hook closure propagates from the
+`invoke!` site like any other panic and unwinds the instrumented
+operation. The state is unwind-safe — the consumed entry stays
+consumed, the fire stays counted, and every lock recovers from poison,
+so other threads keep running and reporting their own diagnostics. On
+the test thread, guard/`Arc` drop assertions run during unwinding and
+may panic on top of the first one — a double panic aborts the process;
+the first message is the real failure.
+
+- One fire-once slot per hook: a second registration for the same hook
+  replaces the first (last wins).
+- `.expect(n)` and `expect_calls(hook, n)` write the same counter
+  expectation; for the same hook the last call wins, whatever form it
+  takes.
+- A second `sequence(...)` call replaces the whole deque — it does not
+  append; likewise a second `every(...)` replaces all closures,
+  including hooks it does not mention.
+
 ### Fire-once
 
 Run a closure on the first call of a hook:
@@ -275,8 +340,11 @@ guard.before_insert(|data, key| {
 }).expect(1);
 ```
 
-`.expect(N)` asserts the hook fires exactly N times. Without `.expect()`,
+`.expect(N)` asserts the hook fires exactly N times — it checks the
+counter for *all* fires, not only for closure runs. Without `.expect()`,
 the closure runs once but no count is checked (on_first semantics).
+Fire-once and its interaction with `sequence` registrations follow the
+dispatch order above.
 
 ### Sequence
 
@@ -292,9 +360,13 @@ guard.expect_calls(MyModuleSp::after_commit, 1);
 ```
 
 Each `s.hook(closure)` pushes an entry. On fire, the front entry must match
-the hook — otherwise panic with an ordering violation message.
+the hook — otherwise panic with an ordering violation message. A second
+`sequence(...)` call replaces the whole deque, it does not append (see
+Registration precedence and lifetime above).
 
-Extra fires (after the sequence is consumed) are silently ignored.
+Extra fires (after the sequence is consumed) are silently ignored — an
+empty deque makes the fire fall through to fire-once, and with no
+fire-once pending it just counts.
 
 ### Predicate-gated entries
 
@@ -312,7 +384,8 @@ guard.sequence(|s| {
 ```
 
 Fires that fail `pred` leave the entry at the front of the sequence waiting
-for a later fire; they also do not trigger fire-once closures for that hook.
+for a later fire; they also do not trigger fire-once closures for that hook
+(the pending head already expects it — see Registration precedence).
 Ordering between different hooks stays strict — the gate only filters fires
 of its own hook by arguments.
 
@@ -364,11 +437,16 @@ the hook never fired. `.expect(n)` chained on a fire-once registration
 sets the same counter expectation; `expect_calls` exists to declare
 counts independently of closures (see the `expect_calls` line in the
 Sequence example above). A later call for the same hook replaces the
-earlier expectation.
+earlier expectation — including a `.expect()` chained onto a fresh
+fire-once registration (last write wins).
 
 In shared mode the count is aggregated across all bound threads and
 asserted at the last `Arc` drop instead (see
 [Example: counting fires across threads](#example-counting-fires-across-threads)).
+
+See **Registration precedence and lifetime** above for the full dispatch
+order: what `every`, `sequence`, and fire-once each see, and in what
+order.
 
 ### What you can test
 
@@ -569,9 +647,15 @@ fn t1_inserts_before_t2_under_gate_choreography() {
 One trap is unique to this pattern: a worker thread that installs
 nothing fires nothing — its hooks silently no-op. The guarded value can
 equally be an `Arc` shared between workers; what must *not* be shared
-is the guard, which is per-thread by construction. (Inside a tokio
-runtime, `spawn_blocking` workers are separate OS threads with their own
-TLS — install per worker there too, or use shared mode.)
+is the guard, which is per-thread by construction.
+
+The same TLS rule bites async runtimes: dispatch follows the *thread*,
+not the task — a future resumed on a different OS worker after an
+`.await` fires into whatever *that* thread has installed (usually
+nothing: the fires vanish silently, in both modes). Keep the
+instrumented section free of awaits between install and the last
+fire — or run it through `spawn_blocking` and install inside the
+closure, where the OS thread is yours.
 
 ## Shared mode: one sync point across threads
 
@@ -592,8 +676,11 @@ Each step exists to make the next one deterministic; do not reorder:
    `Arc<SharedSp<T>>` (`T: Send + Sync + 'static`, as with
    `install_guard`).
 2. **Register** — `sequence` / `every` / fire-once / `expect_calls` on
-   the `Arc`, *before spawning workers*. A fire that beats registration
-   falls through to the fire-once/counter path, not to your entry.
+   the `Arc`, *before spawning workers*. Registration is lock-guarded
+   and may safely happen from any thread at any time, but a fire that
+   beats it falls through to the fire-once/counter path instead of
+   your entry — silently — so the discipline is what keeps the
+   scenario deterministic.
 3. **Bind each worker** — clone the `Arc` into the thread; its first act
    is `let _g = shared.install();`. TLS is per-thread: this points the
    *current* thread's dispatch at the shared state. Keep the guard alive
@@ -603,8 +690,8 @@ Each step exists to make the next one deterministic; do not reorder:
    installed it — moving it across threads clobbers the destination
    thread's dispatch pointer, exactly as in private mode.
 4. **Drive** — workers call the real API; its `invoke!` sites dispatch
-   into the shared sequence. A worker whose hook is not at the sequence
-   head **parks** (see Parking).
+   into the shared sequence. A worker whose hook matches only a *later*
+   entry **parks** (see Parking).
 5. **Join every worker.**
 6. **Drop the last `Arc`** — the shared assertions (unconsumed sequence
    entries, `expect_calls` mismatches) run there. After the joins, so
@@ -617,13 +704,15 @@ do not need to bind.
 
 ### Parking: the sequence head is a rendezvous
 
-A worker that fires a hook whose entry is not at the sequence head parks
-(up to `PARK_TIMEOUT` — a crate-root `Duration` constant of 10 s, not
-per-install configurable) instead of panicking, and re-checks the head
-after every wake. This is what makes shared mode composable:
-*any* thread may arrive out of order, and the sequence sorts arrivals —
-each same-hook entry is consumed exactly once, the thread that fires the
-head hook pops it and wakes the next in line.
+A worker that fires a hook the sequence expects only at a *later*
+position parks (up to `PARK_TIMEOUT` — a crate-root `Duration` constant
+of 10 s, not per-install configurable) instead of panicking, and
+re-checks the head after every wake. This is what makes shared mode
+composable: *any* thread may arrive out of order, and the sequence
+sorts arrivals — each same-hook entry is consumed exactly once, the
+thread that fires the head hook pops it and wakes the next in line.
+Fires matching no entry at all never park; they fall through (see
+Registration precedence and lifetime).
 
 Parking is a mutual-deadlock guard, **not** a synchronization
 mechanism: if the head can never advance (no live thread will fire it),
@@ -914,8 +1003,10 @@ check is available programmatically as `shadow_point::trace_enabled()`.
 
 Inside any hook closure — fire-once, a sequence step, or an `every`
 closure — `shadow_point::current_fire()` returns the `FireInfo` of the
-dispatch running on this thread: the `hook` name, the zero-based global
-`index` of this fire, and the firing thread's `thread_id`/`thread_name`.
+dispatch running on this thread: the `hook` name, the zero-based
+`index` of this fire within its hook's count — a per-sync-point
+counter shared by all threads, the same number `SP_TRACE` prints
+(1-based) — and the firing thread's `thread_id`/`thread_name`.
 Outside a dispatch it returns `None`. Handy for helpers that must know
 which hook fired without being told:
 
@@ -929,9 +1020,11 @@ eprintln!("{} #{} on {:?}", f.hook, f.index, f.thread_id);
 Drop assertions include the install location:
 
 ```
-hook hook `before_insert` fired 1 time(s), expected 2
+sync point hook `before_insert` fired 1 time(s), expected 2
 (installed at src/my_module.rs:142:21)
 ```
+
+(In shared mode the location is marked `(shared, installed at ...)`.)
 
 ## Production safety
 
