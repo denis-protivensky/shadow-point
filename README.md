@@ -193,8 +193,10 @@ MyModuleSp::before_insert   // type: MyModuleHook
 MyModuleSp::after_commit    // type: MyModuleHook
 ```
 
-The visibility token before `prefix` applies to every generated item —
-the trait, the enum, all structs, and the associated hook constants.
+The visibility token before `prefix` applies to every generated item
+listed in the table above — the trait, the enum, the structs, and the
+associated hook constants; the internal machinery (`__Sp`,
+`SeqEntry`, the thread-local, …) stays private.
 
 Every generated type carrying `T` (`MyModuleSpGuard<T>`,
 `MyModuleSharedSp<T>`, the builders) requires `T: Send + Sync + 'static`,
