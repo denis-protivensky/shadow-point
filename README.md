@@ -112,7 +112,8 @@ in the hook call are exactly the *declared* ones — without the guarded
 expression position — not as a closure's expression body
 (`|| invoke!(…)`), not as a block's trailing value; write `invoke!(…);`
 as its own statement or hoist such fires into a function.
-In production `invoke!` compiles to `{}`.
+In production `invoke!` compiles to nothing — the `#[cfg(test)]`
+block is stripped.
 
 ### 3. Write a test (single thread)
 
@@ -217,6 +218,13 @@ The visibility token before `prefix` applies to every generated item
 listed in the table above — the trait, the enum, the structs, and the
 associated hook constants; the internal machinery (`__Sp`,
 `SeqEntry`, the thread-local, …) stays private.
+
+Each `define_sp!` must live in its own module: the macro emits
+module-private internals (`use HookId`, `__SpDefault`, the
+thread-local, …) whose names do not derive from the prefix, so two
+sync points generated side by side in one module collide at compile
+time (E0252/E0428). Wrap each in its own `mod { … }` if they share a
+file.
 
 Every generated type carrying `T` (`MyModuleSpGuard<T>`,
 `MyModuleSharedSp<T>`, the builders) requires `T: Send + Sync + 'static`,
@@ -727,9 +735,11 @@ do not need to bind.
 ### Parking: the sequence head is a rendezvous
 
 A worker that fires a hook the sequence expects only at a *later*
-position parks (up to `PARK_TIMEOUT` — a crate-root `Duration` constant
-of 10 s, not per-install configurable) instead of panicking, and
-re-checks the head after every wake. This is what makes shared mode
+position parks instead of panicking, and re-checks the head after
+every wake. The panic fires only when a full `PARK_TIMEOUT` (a
+crate-root `Duration` constant of 10 s, not per-install configurable)
+elapses with no wake and the head still blocks the fire — a thread
+that keeps getting woken can park longer than 10 s in total. This is what makes shared mode
 composable: *any* thread may arrive out of order, and the sequence
 sorts arrivals — each same-hook entry is consumed exactly once, the
 thread that fires the head hook pops it and wakes the next in line.
@@ -755,6 +765,7 @@ is not lost; `clear` re-arms it):
 
 | Call | Semantics |
 |---|---|
+| `new()` / `Default` | Fresh unset gate |
 | `set()` / `clear()` | Raise / lower the flag; wakes all waiters |
 | `must_wait(timeout)` | Block until set; **panic** on timeout — the in-hook default |
 | `wait_timeout(timeout)` -> `bool` | Block until set; report whether it happened |
@@ -1081,8 +1092,8 @@ fires the gate inside the closure — the async body awaits the threshold.
 
 ### SP_TRACE
 
-Set the `SP_TRACE` environment variable to print every hook fire (with the
-firing thread's name). Presence is what matters, not the value: any
+Set the `SP_TRACE` environment variable to print every hook fire to
+stderr (with the firing thread's name). Presence is what matters, not the value: any
 setting — including `SP_TRACE=0` — enables tracing.
 
 ```sh
@@ -1152,11 +1163,14 @@ operations; uninstalled threads dispatch to a no-op impl.
 
 ## Loom
 
-Under `loom` (`cfg(test)` + `cfg(loom)`), `define_sp!` still generates
-infrastructure and `invoke!` dispatches through `with_dyn`. However, the
-thread_local holds the default no-op impl, so all hooks are silent no-ops.
-This requires no `loom` references in `shadow-point` — the crate is
-cfg-gated solely on `cfg(test)`.
+There is no loom integration: nothing in `shadow-point` is gated on
+`cfg(loom)`, and dispatch runs on std `Mutex`/`Condvar`/`Cell`
+throughout. Under `--cfg loom` the macros compile and behave exactly as
+in normal test builds — `define_sp!` generates the full infrastructure
+and `invoke!` dispatches through `with_dyn`, with guards installing for
+real — but loom does not model std synchronization, so the hook-dispatch
+path contributes nothing to loom's race detection. What loom still
+checks is the instrumented code itself; the sync-point machinery is
+invisible to its model.
 
-Full loom integration (replacing `Cell`/`RefCell` with loom analogs) is
-future work.
+Modeling the dispatch state with loom analogs is future work.

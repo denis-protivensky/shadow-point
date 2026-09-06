@@ -5,8 +5,11 @@
 //! The [`invoke!`](macro@invoke) macro compiles away to a no-op in production
 //! builds (when `cfg(test)` is `false` on the consuming crate), so this crate
 //! has zero cost in production builds.
-//! Under loom (`cfg(test)` + `cfg(loom)`) the full infrastructure compiles
-//! but hooks resolve to the default no-op impl — equivalent to production.
+//! There is no loom integration: nothing is gated on `cfg(loom)`, and
+//! under `--cfg loom` (with `cfg(test)`) dispatch behaves exactly as in
+//! normal test builds. Loom does not model the std synchronization the
+//! dispatch uses, so hook fires contribute nothing to loom's race
+//! detection.
 
 // --- Marker trait ---
 
