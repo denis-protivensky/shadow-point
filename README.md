@@ -5,13 +5,22 @@ operations and *shadow* the competing one: the closure runs in place of
 what the other thread would have done. The same `invoke!` call sites
 serve two install modes — a private guard drives hooks on one thread, a
 shared sync point drives them from any thread (a parking rendezvous at
-the sequence head). Nested fires of the same sync point on the same
-thread are silently suppressed. In production they compile to nothing.
+the sequence head). Under the two modes sit three usage patterns: one
+guard on the test thread, one guard per worker thread, and one shared
+sync point bound by every worker. Nested fires of the same sync point
+on the same thread are silently suppressed. In production they compile
+to nothing.
 
-## Two install modes: private guard vs shared sync point
+## Install modes and usage patterns
 
-Both modes dispatch the same `invoke!` call sites — you choose per test
-by how you install, not by how you declare hooks or fire them.
+There are two install *modes* — how the `invoke!` dispatch is bound to
+threads — but three *usage patterns* people actually write, and the
+mapping is not one-to-one: the private mode serves both the
+single-thread test and the per-worker-guard choreography. Both modes
+dispatch the same `invoke!` call sites — you choose per test by how you
+install, not by how you declare hooks or fire them.
+
+The two modes:
 
 | | `install_guard` — private | `install_shared` — shared |
 |---|---|---|
@@ -19,20 +28,26 @@ by how you install, not by how you declare hooks or fire them.
 | Fires from other threads | silently dropped (they hit the default no-op) | counted, sequenced, aggregated |
 | Out-of-order sequence fire | panics immediately | parks the early thread at the head, panics on `PARK_TIMEOUT` |
 | Expected counts | checked at guard drop | aggregated across threads, checked at last `Arc` drop |
-| Typical scenario | the test thread scripts the interleaving on its own value | real workers race; cross-thread order and counts are the assertion |
 
-Decision rule: hooks fire on the thread that runs the instrumented code.
-If that is the test's own thread — or a single worker whose fires it
-inspects — a guard is enough. If hooks fire on several threads, a guard
-installed on the test thread will *not* see them: a fire from a thread
-without an install dispatches to the default no-op and disappears. That
-is the most common wrong-mode mistake, so the rule of thumb is: one
-thread under test → `install_guard`; several threads → `install_shared`,
-and every worker installs. The trigger is *what the test asserts*, not
-the thread count: if each worker's fires are checked locally and the
-cross-thread ordering lives in your own gates, give every worker its own
-`install_guard` on its own thread instead — shared state and its parking
-mechanics buy you nothing there.
+The three patterns:
+
+| Pattern | Mode | Threads | Where cross-thread order is asserted | Count checks | Typical scenario |
+|---|---|---|---|---|---|
+| 1. Scripted interferer | private guard on the test thread | one | n/a — one thread scripts everything | guard Drop | shadow a rival operation at the linearization point (see [What you can test](#what-you-can-test)) |
+| 2. Per-worker guards | private guard installed **in each worker thread** | several | your own gates/atomics, in the test's code | each guard's Drop, per thread | each worker's hook behavior is a local contract; workers must merely not overlap |
+| 3. Shared sync point | `install_shared` + `install()` per worker | several | the macro: `sequence` parks out-of-order arrivals | aggregated at last `Arc` drop | cross-thread order/counts *are* the assertion |
+
+Decision rule: hooks fire on the thread that runs the instrumented
+code, and a private guard is a thread-local — it sees only its own
+thread. A guard installed on the *test* thread will not see worker
+fires: a thread without an install dispatches to the default no-op and
+its fires disappear — the most common wrong-mode mistake. One thread
+under test → pattern 1. Several threads → the trigger is *what you
+assert*: if the cross-thread ordering lives in your own gates and each
+worker's counts are local, use pattern 2 (shared state and its parking
+mechanics buy nothing there); if the ordering *is* the assertion, use
+pattern 3 and every worker installs.
+
 
 The same split has two useful readings:
 
@@ -298,6 +313,96 @@ guard.before_get_search(|_map, root| {
     // ... use node ...
 });
 ```
+
+## Per-worker guards: private mode on real threads
+
+Pattern 2 runs the private mode across several real threads: *each*
+worker installs its own `install_guard` as its first act, registers its
+hooks there, and lets the guard's Drop assert *that thread's* counts.
+No shared state, no parking. Cross-thread ordering is not the macro's
+job — you hold it in your own `Gate`s (or atomics/channels) in the
+test body, exactly as you would without shadow-point at all.
+
+Choose it when:
+
+- each worker's hook behavior is a **local contract** (what fires,
+  with what arguments, how many times, on this thread);
+- workers must not overlap at specific points, and you can express
+  that with plain gate handoffs;
+- you want Drop-time `expect` checks per thread without coordinating
+  them through the shared last-`Arc` drop;
+- a shared `sequence` would park a worker **inside** the instrumented
+  path while it holds locks the head consumer needs (see shared-mode
+  caveats) — per-worker guards never park in the macro.
+
+The trade: the macro never sees across threads. A wrong global order
+your own gates failed to enforce will not be caught by a sequence
+assertion; per-thread hooks can use `expect` precisely because each
+thread's log is complete on its own.
+
+```rust,ignore
+use shadow_point::{Gate, PARK_TIMEOUT};
+
+/// The instrumented API (stands in for the real one under test): its
+/// `invoke!` sites dispatch into whichever guard is bound on the
+/// calling thread.
+fn real_insert(key: i32) {
+    shadow_point::invoke!(MyModuleSp, before_insert(&key));
+    // ... the actual insert happens here ...
+    shadow_point::invoke!(MyModuleSp, after_commit());
+}
+
+#[test]
+fn t1_inserts_before_t2_under_gate_choreography() {
+    let seen = Arc::new(AtomicUsize::new(0));
+    // Cross-thread ORDER is enforced by the test's own gates, not by a
+    // shared sequence. `first_done` proves T1's before_insert completed.
+    let first_done = Arc::new(Gate::new());
+
+    let seen_t1 = seen.clone();
+    let done_t1 = first_done.clone();
+    let t1 = std::thread::spawn(move || {
+        // Each worker binds its OWN private guard: hooks registered
+        // here fire only on this thread, and Drop asserts this thread's
+        // counts.
+        let guard = MyModuleSp::install_guard(());
+        guard
+            .before_insert(move |_, key| {
+                assert_eq!(key, &1, "T1 inserts first");
+                seen_t1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                done_t1.set(); // completion signal for T2's turn
+            })
+            .expect(1); // T1's own hook count, checked at this guard's Drop
+        real_insert(1); // the instrumented API fires this thread's hooks
+    });
+
+    let seen_t2 = seen.clone();
+    let wait_t2 = first_done.clone();
+    let t2 = std::thread::spawn(move || {
+        let guard = MyModuleSp::install_guard(());
+        guard
+            .before_insert(move |_, key| {
+                assert_eq!(key, &2, "T2 inserts second");
+                seen_t2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .expect(1);
+        // Ordered *after* T1's hook completes — the gate does what a
+        // shared sequence's parking would, without shared state.
+        real_insert(2);
+    });
+
+    t1.join().unwrap(); // each guard — and its expect(1) — drops in-thread
+    t2.join().unwrap();
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+```
+
+One trap is unique to this pattern: a worker thread that installs
+nothing fires nothing — its hooks silently no-op. The guarded value can
+equally be an `Arc` shared between workers; what must *not* be shared
+is the guard, which is per-thread by construction. (Inside a tokio
+runtime, `spawn_blocking` workers are separate OS threads with their own
+TLS — install per worker there too, or use shared mode.)
 
 ## Shared mode: one sync point across threads
 
