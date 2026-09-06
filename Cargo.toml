@@ -1,6 +1,6 @@
 [package]
 name = "shadow-point"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.65"
 description = "Deterministic testing of concurrent Rust code — hooks at linearization points, single-threaded via guards or shared sync points across threads"
@@ -11,3 +11,7 @@ categories = ["development-tools::testing"]
 
 [dependencies]
 paste = "1.0"
+tokio = { version = "1.21", optional = true, default-features = false, features = ["rt", "sync", "macros"] }
+
+[features]
+tokio-async = ["dep:tokio"]

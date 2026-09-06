@@ -165,6 +165,89 @@ impl Gate {
     }
 }
 
+// --- TokioAsyncGate (feature = "tokio-async") ---
+
+/// Non-parking async milestone counter for tests whose instrumented code
+/// runs on a tokio `current_thread` runtime.
+///
+/// This is the async half of the [`Gate`] contract and complements it, it
+/// does not replace it: [`Gate`] is a level-triggered boolean rendezvous
+/// for *synchronous* hook choreography (it parks the OS thread — fatal on
+/// a single-thread executor, which must not lose its only thread), while
+/// `TokioAsyncGate` is a monotonic fire-counter that the async test body waits
+/// on cooperatively.
+///
+/// Contract: call [`fire`](Self::fire) from hook closures (non-blocking,
+/// safe mid-dispatch on the executor thread); await
+/// [`wait_at_least`](Self::wait_at_least) from the test body. Only pulls
+/// `tokio` in when the `tokio-async` feature is enabled — default builds resolve
+/// neither tokio nor this type.
+#[cfg(feature = "tokio-async")]
+#[derive(Clone, Debug)]
+pub struct TokioAsyncGate(std::sync::Arc<Inner>);
+
+#[cfg(feature = "tokio-async")]
+#[derive(Default, Debug)]
+struct Inner {
+    count: std::sync::atomic::AtomicUsize,
+    woke: tokio::sync::Notify,
+}
+
+#[cfg(feature = "tokio-async")]
+impl Default for TokioAsyncGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "tokio-async")]
+impl TokioAsyncGate {
+    /// Create a new gate at count zero.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(std::sync::Arc::new(Inner::default()))
+    }
+
+    /// Increment the milestone count and wake all registered waiters.
+    /// Non-blocking — designed to be called from a hook closure running on
+    /// the executor thread.
+    pub fn fire(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.0.count.fetch_add(1, SeqCst);
+        self.0.woke.notify_waiters();
+    }
+
+    /// Current fire count.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.0.count.load(SeqCst)
+    }
+
+    /// Await until `count >= n`.
+    ///
+    /// Registers the `Notify` wait slot (`enable()`) BEFORE reading the
+    /// counter: a `fire()` racing into that window still wakes this waiter
+    /// instead of losing the wakeup (the loop re-checks after waking).
+    ///
+    /// Each fire wakes every registered waiter, including ones whose
+    /// threshold is not reached yet: they re-check and sleep again.
+    ///
+    /// Hangs if fewer than `n` fires ever occur (no timeout by design —
+    /// CI job timeouts own that case); `count` wraps on usize overflow.
+    pub async fn wait_at_least(&self, n: usize) {
+        loop {
+            let w = self.0.woke.notified();
+            tokio::pin!(w);
+            w.as_mut().enable();
+            if self.count() >= n {
+                return;
+            }
+            w.await;
+        }
+    }
+}
+
 // --- Fire info ---
 
 /// Metadata about the hook fire currently being dispatched on this thread.
