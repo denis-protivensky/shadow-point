@@ -1031,8 +1031,8 @@ rt.block_on(async move {
     // Fire milestones from a spawned future, await the threshold.
     let waiting = gate.wait_at_least(2);
     let firing = async {
-        invoke!(MySp, some_hook(0));
-        invoke!(MySp, some_hook(1));
+        shadow_point::invoke!(MySp, some_hook(0));
+        shadow_point::invoke!(MySp, some_hook(1));
     };
     tokio::join!(waiting, firing);
     assert_eq!(gate.count(), 2);
