@@ -1,4 +1,4 @@
-# shadow-point — Sync Points for Concurrent Tests
+# shadow-point — Deterministic testing of concurrent Rust code
 
 Hook points let tests inject code at linearization points of concurrent
 operations and *shadow* the competing one: the closure runs in place of
