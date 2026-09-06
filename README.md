@@ -385,7 +385,7 @@ guard.sequence(|s| {
 
 Fires that fail `pred` leave the entry at the front of the sequence waiting
 for a later fire; they also do not trigger fire-once closures for that hook
-(the pending head already expects it — see Registration precedence).
+(the pending head already expects it — see Registration precedence and lifetime).
 Ordering between different hooks stays strict — the gate only filters fires
 of its own hook by arguments.
 
