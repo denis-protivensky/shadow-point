@@ -11,6 +11,22 @@ sync point bound by every worker. Nested fires of the same sync point
 on the same thread are silently suppressed. In production they compile
 to nothing.
 
+## Contents
+
+- [Install modes and usage patterns](#install-modes-and-usage-patterns)
+- [Quick start](#quick-start)
+- [Using as a dev-dependency](#using-as-a-dev-dependency)
+- [What `define_sp!` generates](#what-define_sp-generates)
+- [Guard API (private mode)](#guard-api-private-mode)
+- [Hook arguments](#hook-arguments)
+- [Per-worker guards: private mode on real threads](#per-worker-guards-private-mode-on-real-threads)
+- [Shared mode: one sync point across threads](#shared-mode-one-sync-point-across-threads)
+- [Async (tokio) consumers](#async-tokio-consumers)
+- [Debugging](#debugging)
+- [Production safety](#production-safety)
+- [Compatibility](#compatibility)
+- [Loom](#loom)
+
 ## Install modes and usage patterns
 
 There are two install *modes* — how the `invoke!` dispatch is bound to
@@ -89,6 +105,7 @@ At module level, gate with `#[cfg(test)]` and call `define_sp!`:
 shadow_point::define_sp! {
     pub(crate) prefix MyModule
     {
+        // `K` is this module's key type — use yours or a concrete type.
         before_insert(key: &K),
         before_remove(id: usize),
         after_commit(),
@@ -112,7 +129,7 @@ shadow_point::invoke!(MyModuleSp, after_commit());
 The struct's name is the `define_sp!` `prefix` with `Sp` appended —
 `prefix MyModule` generates `MyModuleSp` (every generated name derives
 from the prefix that way; see
-[What `define_sp!` generates](#what-definesp-generates)). The arguments
+[What `define_sp!` generates](#what-define_sp-generates)). The arguments
 in the hook call are exactly the *declared* ones — without the guarded
 `&T`: dispatch prepends it to the closure parameters, so
 `invoke!(MyModuleSp, before_insert(&key))` fires the hook declared
@@ -276,9 +293,11 @@ MyModuleSp::with_dyn(|sp| sp.before_insert(&key));
 ```
 
 With no install on the thread, `f` receives the default no-op impl, so
-the call is safe and does nothing. `with_dyn` has the same visibility
-rules as `invoke!` (a private guard is seen only by its own thread) and
-exists only where `define_sp!` exists — in test builds.
+the call is safe and does nothing. Like `invoke!`, `with_dyn`
+dispatches to the calling thread's install — a private guard is seen
+only by its own thread — and the method carries the `define_sp!`
+visibility token. It exists only where `define_sp!` exists — in test
+builds.
 
 The `MyModule*` names above derive from the prefix via `paste!`;
 `EveryBuilder` and `SpExpect` are shared machinery — they carry `T`
@@ -500,9 +519,10 @@ that the *other* thread would have run. Each example below assumes a
 guard; in shared mode the same interleavings are scripted as `sequence`
 steps, coordinated with `Gate`.
 
-Note: a hook re-fired on the registering thread is silently suppressed, so
-the interleaving operation inside the closure runs without recursing into
-its own hooks.
+Note: while a hook closure is executing on a thread, any further fire of
+the *same sync point* on that thread is silently suppressed (suppression
+is per-thread, per-sync-point) — so the interleaving operation inside the
+closure runs without recursing into its own hooks.
 
 #### The inserting thread loses the race
 
@@ -580,7 +600,11 @@ and `invoke!` expands to a statement. A hook closure can observe and
 mutate through `&T` (and assert), but cannot change what the
 instrumented operation returns.
 
-Hook arguments appear in the trait signature. The closure receives `&T`
+Hook arguments appear in the trait signature and are passed *by value*
+through the dispatch: for a non-`Copy` type, `invoke!` moves the
+argument, so declare the hook with a reference (`key: &K`) or a raw
+pointer (`root: *const ()`) when the call site must keep the value.
+The closure receives `&T`
 (the guarded value) as the first parameter, followed by the hook arguments:
 
 ```rust
@@ -703,7 +727,7 @@ closure, where the OS thread is yours.
 A private guard sees only the installing thread's fires. When the
 assertion is *cross-thread* — the global order of interleaving steps, or
 total counts across workers — install one sync point instead:
-`install_shared(value)` returns an `Arc<SharedSp<T>>` whose state every
+`install_shared(value)` returns an `Arc<MyModuleSharedSp<T>>` whose state every
 bound thread drives. The `Arc` derefs to `&T`, so the shared value is
 readable through it everywhere. This mode adds real parallelism:
 workers race for real, and `sequence` + `Gate` pin the chosen
@@ -714,7 +738,7 @@ interleaving down so it reproduces run to run.
 Each step exists to make the next one deterministic; do not reorder:
 
 1. **Install** — `install_shared(value)` on the test thread →
-   `Arc<SharedSp<T>>` (`T: Send + Sync + 'static`, as with
+   `Arc<MyModuleSharedSp<T>>` (`T: Send + Sync + 'static`, as with
    `install_guard`).
 2. **Register** — `sequence` / `every` / fire-once / `expect_calls` on
    the `Arc`, *before spawning workers*. Registration is lock-guarded
@@ -726,7 +750,9 @@ Each step exists to make the next one deterministic; do not reorder:
    first act is `let _g = shared.install();`. TLS is per-thread: this
    points the *current* thread's dispatch at the shared state — and
    *every* thread that fires must bind this way, the test thread
-   included. Keep the guard alive
+   included. The returned `MyModuleSharedGuard<T>` owns an `Arc` clone
+   of the shared state, so the step-6 assertions cannot run while any
+   worker guard is alive. Keep the guard alive
    for as long as the worker touches instrumented code; once it drops,
    the thread's dispatch falls back to the previously installed sync
    point (usually the default no-op). Drop the guard on the thread that
@@ -1069,31 +1095,34 @@ flags of both entries for test builds.
 use shadow_point::TokioAsyncGate;
 use tokio::runtime::Builder;
 
-// A shared sync point drives hook closures; gates coordinate
-// deterministically across threads.
-let gate = TokioAsyncGate::new();
-let g = gate.clone();
-let shared = MyModuleSp::install_shared(());
+#[test]
+fn async_milestone_gate() {
+    // A shared sync point drives hook closures; the gate coordinates
+    // milestones without parking the executor.
+    let gate = TokioAsyncGate::new();
+    let g = gate.clone();
+    let shared = MyModuleSp::install_shared(());
 
-// Register the hook closure: fire the gate on every invocation.
-shared.every(|e| {
-    e.before_remove(move |_, _| g.fire());
-});
+    // Register the hook closure: fire the gate on every invocation.
+    shared.every(|e| {
+        e.before_remove(move |_, _| g.fire());
+    });
 
-let bound = shared.clone();
-let rt = Builder::new_current_thread().build().unwrap();
-rt.block_on(async move {
-    let _guard = bound.install();
+    let bound = shared.clone();
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async move {
+        let _guard = bound.install();
 
-    // Await the threshold while firing milestones concurrently.
-    let waiting = gate.wait_at_least(2);
-    let firing = async {
-        shadow_point::invoke!(MyModuleSp, before_remove(0));
-        shadow_point::invoke!(MyModuleSp, before_remove(1));
-    };
-    tokio::join!(waiting, firing);
-    assert_eq!(gate.count(), 2);
-});
+        // Await the threshold while firing milestones concurrently.
+        let waiting = gate.wait_at_least(2);
+        let firing = async {
+            shadow_point::invoke!(MyModuleSp, before_remove(0));
+            shadow_point::invoke!(MyModuleSp, before_remove(1));
+        };
+        tokio::join!(waiting, firing);
+        assert_eq!(gate.count(), 2);
+    });
+}
 ```
 
 For work running on blocking threads (e.g. `tokio::task::spawn_blocking`),
@@ -1106,7 +1135,8 @@ fires the gate inside the closure — the async body awaits the threshold.
 ### SP_TRACE
 
 Set the `SP_TRACE` environment variable to print every hook fire to
-stderr (with the firing thread's name). Presence is what matters, not the value: any
+stderr (with the firing thread's name — `<unnamed>` for unnamed
+threads). Presence is what matters, not the value: any
 setting — including `SP_TRACE=0` — enables tracing.
 
 ```sh
@@ -1149,6 +1179,13 @@ sync point hook `before_insert` fired 1 time(s), expected 2
 ```
 
 (In shared mode the location is marked `(shared, installed at ...)`.)
+
+A private-mode ordering violation names the expected head and the fire
+that arrived:
+
+```
+sync point ordering violation: expected `before_insert` next but `after_commit` fired
+```
 
 The shared-mode park timeout names the waiting hook, the head hook, and
 the install site:
