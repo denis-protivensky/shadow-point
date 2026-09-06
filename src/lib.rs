@@ -11,6 +11,14 @@
 //! dispatch uses, so hook fires contribute nothing to loom's race
 //! detection.
 
+// Re-export so `define_sp!` can reach `paste!` through `$crate`: without
+// it the expansion's `::paste` path lands in the CONSUMING crate's extern
+// prelude, forcing every user to declare `paste` in their own manifest
+// (and breaking the dev-dependency seam setup, where a transitive dep is
+// not in the prelude at all).
+#[doc(hidden)]
+pub use paste::paste;
+
 // --- Marker trait ---
 
 /// Marker trait for sync-point implementations. Supertrait of the extension
@@ -415,7 +423,7 @@ macro_rules! define_sp {
             $( $method:ident ( $( $arg:ident : $arg_ty:ty ),* $(,)? ) ),+ $(,)?
         }
     ) => {
-        ::paste::paste! {
+        $crate::paste! {
             use $crate::HookId;
 
             // ── Extension trait ───────────────────────────────────────
