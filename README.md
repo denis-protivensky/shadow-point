@@ -717,8 +717,8 @@ Registration precedence and lifetime).
 Parking is a mutual-deadlock guard, **not** a synchronization
 mechanism: if the head can never advance (no live thread will fire it),
 the parked worker panics at `PARK_TIMEOUT` with a `sequence park
-timeout` diagnostic naming the head hook and the install site. The test
-fails loudly; it does not hang.
+timeout` diagnostic naming the waiting hook, the head hook, and the
+install site. The test fails loudly; it does not hang.
 
 `Gate::must_wait` / `wait_timeout` take any `Duration` — the examples
 reuse `PARK_TIMEOUT` merely as a convenient budget.
@@ -1025,6 +1025,14 @@ sync point hook `before_insert` fired 1 time(s), expected 2
 ```
 
 (In shared mode the location is marked `(shared, installed at ...)`.)
+
+The shared-mode park timeout names the waiting hook, the head hook, and
+the install site:
+
+```
+shadow-point: sequence park timeout (10s): thread waiting for `after_commit`,
+head is `before_insert` (installed at src/my_module.rs:95:35)
+```
 
 ## Production safety
 
