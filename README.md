@@ -978,6 +978,75 @@ first example is a simplified variant of `sequence_order_across_threads`
 (two steps, gate wait moved out of the instrumented path) — run the
 real tests with `cargo test --test cross_thread`.
 
+## Async (tokio) consumers
+
+On a `current_thread` tokio runtime, the single executor thread must
+never park — the wake it is waiting for can never run because it *is*
+the executor thread. That makes [`Gate::wait`] unusable inside or
+alongside async choreography: parking the executor stalls all work
+until a timeout panic. (The existing async / TLS caveat in
+["Per-worker guards"](#per-worker-guards) already warns that the
+instrumented section under a guard on the tokio runtime must stay
+await-free — or the worker must use `spawn_blocking` + install inside
+the closure.)
+
+`TokioAsyncGate` — behind the non-default `tokio-async` feature — is the async
+complement to [`Gate`]: a monotonic fire-counter that the test body
+waits on cooperatively via `.await`. Call `fire()` (non-blocking, safe
+from hook closures on the executor thread), `count()`, or
+`wait_at_least(n).await` from the async test body. The type is
+`Clone + Default`. Default builds never resolve tokio — the feature
+is off by default:
+
+```toml
+# Cargo.toml
+[dependencies]
+shadow-point = { version = "0.3", features = ["tokio-async"] }
+```
+
+The feature requires tokio ≥ 1.21 (encoded in the crate's dependency
+requirement) and a toolchain at least tokio's own MSRV; the crate's
+own MSRV stays 1.65 for default builds. Enable `tokio-async` as a
+**dev**-dependency in your project — production builds keep the
+seam-cfg-stripped zero-cost property.
+
+**Example** (simplified; the full tests live in
+[`tests/tokio_async_gate.rs`](tests/tokio_async_gate.rs)):
+
+```rust,ignore
+use shadow_point::TokioAsyncGate;
+use tokio::runtime::Builder;
+
+// A shared sync point drives hook closures; gates coordinate
+// deterministically across threads.
+let gate: TokioAsyncGate = TokioAsyncGate::new();
+let shared = MySp::install_shared(());
+
+// Register the hook closure: fire the gate on every invocation.
+shared.every(|e| {
+    e.some_hook(move |_, _| gate.fire());
+});
+
+let bound = shared.clone();
+let rt = Builder::new_current_thread().build().unwrap();
+rt.block_on(async move {
+    let _guard = bound.install();
+
+    // Fire milestones from a spawned future, await the threshold.
+    let waiting = gate.wait_at_least(2);
+    let firing = async {
+        invoke!(MySp, some_hook(0));
+        invoke!(MySp, some_hook(1));
+    };
+    tokio::join!(waiting, firing);
+    assert_eq!(gate.count(), 2);
+});
+```
+
+For work running on blocking threads (e.g. `tokio::task::spawn_blocking`),
+each worker installs its own guard and fires the gate inside the
+closure — the async body awaits the threshold.
+
 ## Debugging
 
 ### SP_TRACE
@@ -1042,10 +1111,12 @@ head is `before_insert` (installed at src/my_module.rs:95:35)
 
 ## Compatibility
 
-MSRV is Rust 1.65 (edition 2021). The only dependency is `paste`, used
-at macro-expansion time. In test builds a hook fire costs a TLS read
-plus a few mutex operations; uninstalled threads dispatch to a no-op
-impl.
+MSRV is Rust 1.65 (edition 2021). The only default dependency is `paste`, used
+at macro-expansion time. Behind the non-default `tokio-async` feature, optional
+`tokio` (default-features off, `rt` + `sync` features, MSRV ≥ 1.21) is added
+— default builds never resolve tokio; enabling `tokio-async` requires a toolchain
+at least tokio's own MSRV. In test builds a hook fire costs a TLS read plus
+a few mutex operations; uninstalled threads dispatch to a no-op impl.
 
 ## Loom
 
