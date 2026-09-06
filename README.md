@@ -68,6 +68,16 @@ The same split has two useful readings:
 
 ## Quick start
 
+```toml
+# Cargo.toml
+[dependencies]
+shadow-point = "0.3"
+```
+
+`paste` does not need to be declared: `define_sp!` reaches it through
+shadow-point's own re-export (`$crate::paste`), which also keeps the
+dev-dependency seam setup (below) self-contained.
+
 ### 1. Declare hooks
 
 At module level, gate with `#[cfg(test)]` and call `define_sp!`:
@@ -203,8 +213,8 @@ Given `prefix MyModule`, the macro generates:
 | `MyModuleSharedSp<T>` | Shared state — same registration API, `install()` per worker |
 | `MyModuleSharedGuard<T>` | Per-thread TLS install of a shared sync point |
 | `MyModuleSeqBuilder<T>` | Builder for `sequence(...)` |
-| `MyModuleEveryBuilder<T>` | Builder for `every(...)` |
-| `MyModuleSpExpect<'_, T>` | Return value of a fire-once registration — chain `.expect(n)` |
+| `EveryBuilder<T>` | Builder for `every(...)` |
+| `SpExpect<'_, T>` | Return value of a fire-once registration — chain `.expect(n)` |
 
 Associated constants on the entry-point struct let you reference hooks
 without importing the enum:
@@ -270,7 +280,10 @@ the call is safe and does nothing. `with_dyn` has the same visibility
 rules as `invoke!` (a private guard is seen only by its own thread) and
 exists only where `define_sp!` exists — in test builds.
 
-All names derive from the prefix via `paste!`.
+The `MyModule*` names above derive from the prefix via `paste!`;
+`EveryBuilder` and `SpExpect` are shared machinery — they carry `T`
+instead of a prefix, and are also why one module cannot hold two
+`define_sp!` invocations.
 
 ## Guard API (private mode)
 
@@ -1154,8 +1167,10 @@ head is `before_insert` (installed at src/my_module.rs:95:35)
 ## Compatibility
 
 MSRV is Rust 1.65 (edition 2021). The only default dependency is `paste`, used
-at macro-expansion time. Behind the non-default `tokio-async` feature, optional
-`tokio` (default-features off, `rt` + `sync` + `macros` features, ≥ 1.21) is added
+at macro-expansion time and re-exported by the crate — `define_sp!` reaches it
+via `$crate::paste`, so consumers never declare it themselves. Behind the
+non-default `tokio-async` feature, optional `tokio` (default-features off,
+`rt` + `sync` + `macros` features, ≥ 1.21) is added
 — default builds never resolve tokio; tokio ≤ 1.38 is within the crate's
 MSRV (tokio 1.38 requires Rust ≥ 1.63), while tokio ≥ 1.39 requires
 Rust ≥ 1.70. In test builds a hook fire costs a TLS read plus a few mutex
