@@ -124,10 +124,12 @@ No `use` imports needed — hook names are associated constants on the
 entry-point struct.
 
 This is the private mode: the guard sees only fires from this thread.
-For hooks fired from several threads, switch the install line to
-`install_shared` and let every worker install its own TLS guard — see
-[Shared mode](#shared-mode-one-sync-point-across-threads). Hook
-declarations and `invoke!` calls are identical in both modes.
+For hooks fired from several threads there are two ways to go — per-worker
+private guards when each thread's contract is what you assert, or one
+`install_shared` sync point when the cross-thread order/counts *are* the
+assertion (see the pattern table and
+[Shared mode](#shared-mode-one-sync-point-across-threads)). Hook
+declarations and `invoke!` calls are identical in all of them.
 
 ## Using as a dev-dependency
 
@@ -342,6 +344,8 @@ thread's log is complete on its own.
 
 ```rust,ignore
 use shadow_point::{Gate, PARK_TIMEOUT};
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 /// The instrumented API (stands in for the real one under test): its
 /// `invoke!` sites dispatch into whichever guard is bound on the
@@ -388,6 +392,7 @@ fn t1_inserts_before_t2_under_gate_choreography() {
             .expect(1);
         // Ordered *after* T1's hook completes — the gate does what a
         // shared sequence's parking would, without shared state.
+        wait_t2.must_wait(PARK_TIMEOUT); // fails loudly if T1 never fired
         real_insert(2);
     });
 
@@ -481,6 +486,7 @@ before firing, so it holds no production locks):
 
 ```rust,ignore
 use shadow_point::{Gate, PARK_TIMEOUT};
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn commit_never_overtakes_insert() {
@@ -539,6 +545,9 @@ check — records that T2 is inside its dispatch, so the test releases
 T1 only once the park is determinate:
 
 ```rust,ignore
+use shadow_point::{Gate, PARK_TIMEOUT};
+use std::sync::{Arc, Mutex};
+
 #[test]
 fn out_of_order_fire_waits_its_turn() {
     let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
@@ -595,9 +604,13 @@ fn out_of_order_fire_waits_its_turn() {
 }
 ```
 
-Had the release order been flipped, or `before_insert` never fired, T2's
-park ends in a `sequence park timeout` panic at `PARK_TIMEOUT` — the
-wrong choreography fails the test; it never hangs it.
+The `parked` gate is what makes this run the *park* path: without it
+(releasing T1 right away) the test still passes — T2 may simply consume
+`after_commit` in order and never park — so the choreography would
+silently stop exercising the rendezvous. The failure mode the gate
+guards against is a head that never advances: if `before_insert` never
+fires, T2's park ends in a `sequence park timeout` panic at
+`PARK_TIMEOUT`. A wrong choreography fails the test; it never hangs it.
 
 ### Example: counting fires across threads
 
@@ -606,7 +619,8 @@ When order is not the assertion — only "every thread reached the point"
 drop. Pair it with `every` to observe each fire without sequencing:
 
 ```rust,ignore
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 #[test]
 fn all_workers_reach_the_hook() {
@@ -666,9 +680,9 @@ either flakiness or a parking hazard:
   and coordination still needs `Gate` (`every` proves "reached", the
   gate proves "now").
 
-Default to `sequence` when the order IS the bug class (the park-until
-example above). Reach for the trace when the scenario churns
-unboundedly, when parking inside the instrumented path would hold
+Default to `sequence` when the order IS the bug class (the "parking is
+the rendezvous" example above). Reach for the trace when the scenario
+churns unboundedly, when parking inside the instrumented path would hold
 locks the head consumer needs, or when you only need reachability
 ("this decision site was reached, and the state was X when it was").
 
@@ -694,11 +708,12 @@ Caveats:
 - Predicates on gated entries must be pure — they run while the sequence
   lock is held (no hook invocations, no blocking).
 
-The three choreographies above are transcriptions of
-[`tests/cross_thread.rs`](tests/cross_thread.rs)
-(`sequence_order_across_threads`, `park_until_turn`,
-`expect_calls_aggregates_threads`) with the domain names swapped for
-this crate's examples — run them with `cargo test --test cross_thread`.
+The examples above follow [`tests/cross_thread.rs`](tests/cross_thread.rs):
+the parking and counting examples are transcriptions of `park_until_turn`
+and `expect_calls_aggregates_threads` with the domain names swapped; the
+first example is a simplified variant of `sequence_order_across_threads`
+(two steps, gate wait moved out of the instrumented path) — run the
+real tests with `cargo test --test cross_thread`.
 
 ## What you can test
 
