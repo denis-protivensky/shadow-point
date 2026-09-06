@@ -193,6 +193,53 @@ MyModuleSp::before_insert   // type: MyModuleHook
 MyModuleSp::after_commit    // type: MyModuleHook
 ```
 
+The visibility token before `prefix` applies to every generated item —
+the trait, the enum, all structs, and the associated hook constants.
+
+Every generated type carrying `T` (`MyModuleSpGuard<T>`,
+`MyModuleSharedSp<T>`, the builders) requires `T: Send + Sync + 'static`,
+and `install_guard` / `install_shared` carry the same bounds: the state
+is leaked (`Box::leak`) and may cross threads. Registered closures must
+be `Send + 'static` (`every` closures additionally `Sync`).
+
+`MyModuleHook` derives `Debug, Clone, Copy, PartialEq, Eq`; the hook
+list must contain at least one hook.
+
+### The extension trait: generic code over a sync point
+
+`MyModuleSyncPoint` has one method per hook (taking the declared
+arguments) with a default no-op body; its supertrait `SyncPoint` is a
+`Send + Sync` marker. The thread-local dispatch holds
+`&'static dyn MyModuleSyncPoint`, and a thread without an install is the
+default no-op impl — which is why firing a hook on an uninstalled thread
+is always safe. Concrete impls are generated internally; you interact
+with the trait through `&dyn MyModuleSyncPoint`, which lets you write
+test helpers generic over the sync point:
+
+```rust
+/// Works on the installed state, on the default no-op impl, or on any
+/// `&dyn MyModuleSyncPoint` your own code passes around.
+fn probe_insert(sp: &dyn MyModuleSyncPoint, key: &K) {
+    sp.before_insert(key);
+}
+```
+
+### `with_dyn`: manual dispatch
+
+`MyModuleSp::with_dyn(f)` runs `f(&dyn MyModuleSyncPoint)` with the sync
+point currently installed **on the calling thread** — `invoke!` is
+exactly this:
+
+```rust
+MyModuleSp::with_dyn(|sp| sp.before_insert(&key));
+// identical to: invoke!(MyModuleSp, before_insert(&key));
+```
+
+With no install on the thread, `f` receives the default no-op impl, so
+the call is safe and does nothing. `with_dyn` has the same visibility
+rules as `invoke!` (a private guard is seen only by its own thread) and
+exists only where `define_sp!` exists — in test builds.
+
 All names derive from the prefix via `paste!`.
 
 ## Guard API (private mode)
@@ -206,6 +253,15 @@ All names derive from the prefix via `paste!`.
 - **Leaks per-install state** (`Box::leak` by design — normal for test
   instantiation, but do not call `install` in a long-lived loop). Applies
   to `install_shared` too.
+- **Requires `T: Send + Sync + 'static`** — and registered closures must
+  be `Send + 'static` (`every` closures additionally `Sync`): the state
+  is leaked and may cross threads.
+- **Restores on drop** — the guard binds this thread's dispatch for its
+  lifetime and, on drop, restores the previously installed sync point
+  (stacked installs unwind LIFO; after the drop, fires on this thread
+  hit the previous install or the default no-op). Drop the guard on the
+  thread that installed it: dropping a guard that was moved to another
+  thread clobbers that thread's dispatch pointer.
 
 ### Fire-once
 
@@ -295,6 +351,23 @@ guard.every(|e| {
 });
 ```
 
+### Call counts (`expect_calls`)
+
+Every fire is counted per hook — registered or not, consumed by a
+sequence or not (re-entrant suppressed fires are the only exception:
+they are dropped before counting). `guard.expect_calls(hook, n)`
+declares a hook's total count without registering any closure; it works
+for hooks you never registered too — `expect_calls(hook, 0)` asserts
+the hook never fired. `.expect(n)` chained on a fire-once registration
+sets the same counter expectation; `expect_calls` exists to declare
+counts independently of closures (see the `expect_calls` line in the
+Sequence example above). A later call for the same hook replaces the
+earlier expectation.
+
+In shared mode the count is aggregated across all bound threads and
+asserted at the last `Arc` drop instead (see
+[Example: counting fires across threads](#example-counting-fires-across-threads)).
+
 ### What you can test
 
 Hooks turn rare thread interleavings into deterministic, reproducible
@@ -380,6 +453,11 @@ fn get_survives_detach_underneath() {
 ```
 
 ## Hook arguments
+
+Hooks return nothing: the generated trait methods have no return type,
+and `invoke!` expands to a statement. A hook closure can observe and
+mutate through `&T` (and assert), but cannot change what the
+instrumented operation returns.
 
 Hook arguments appear in the trait signature. The closure receives `&T`
 (the guarded value) as the first parameter, followed by the hook arguments:
@@ -499,23 +577,29 @@ A private guard sees only the installing thread's fires. When the
 assertion is *cross-thread* — the global order of interleaving steps, or
 total counts across workers — install one sync point instead:
 `install_shared(value)` returns an `Arc<SharedSp<T>>` whose state every
-bound thread drives. This mode adds real parallelism: workers race for
-real, and `sequence` + `Gate` pin the chosen interleaving down so it
-reproduces run to run.
+bound thread drives. The `Arc` derefs to `&T`, so the shared value is
+readable through it everywhere. This mode adds real parallelism:
+workers race for real, and `sequence` + `Gate` pin the chosen
+interleaving down so it reproduces run to run.
 
 ### Lifecycle — six steps, in this order
 
 Each step exists to make the next one deterministic; do not reorder:
 
 1. **Install** — `install_shared(value)` on the test thread →
-   `Arc<SharedSp<T>>`.
+   `Arc<SharedSp<T>>` (`T: Send + Sync + 'static`, as with
+   `install_guard`).
 2. **Register** — `sequence` / `every` / fire-once / `expect_calls` on
    the `Arc`, *before spawning workers*. A fire that beats registration
    falls through to the fire-once/counter path, not to your entry.
 3. **Bind each worker** — clone the `Arc` into the thread; its first act
    is `let _g = shared.install();`. TLS is per-thread: this points the
    *current* thread's dispatch at the shared state. Keep the guard alive
-   for as long as the worker touches instrumented code.
+   for as long as the worker touches instrumented code; once it drops,
+   the thread's dispatch falls back to the previously installed sync
+   point (usually the default no-op). Drop the guard on the thread that
+   installed it — moving it across threads clobbers the destination
+   thread's dispatch pointer, exactly as in private mode.
 4. **Drive** — workers call the real API; its `invoke!` sites dispatch
    into the shared sequence. A worker whose hook is not at the sequence
    head **parks** (see Parking).
@@ -532,8 +616,9 @@ do not need to bind.
 ### Parking: the sequence head is a rendezvous
 
 A worker that fires a hook whose entry is not at the sequence head parks
-(up to `PARK_TIMEOUT`, default 10 s) instead of panicking, and re-checks
-the head after every wake. This is what makes shared mode composable:
+(up to `PARK_TIMEOUT` — a crate-root `Duration` constant of 10 s, not
+per-install configurable) instead of panicking, and re-checks the head
+after every wake. This is what makes shared mode composable:
 *any* thread may arrive out of order, and the sequence sorts arrivals —
 each same-hook entry is consumed exactly once, the thread that fires the
 head hook pops it and wakes the next in line.
@@ -543,6 +628,9 @@ mechanism: if the head can never advance (no live thread will fire it),
 the parked worker panics at `PARK_TIMEOUT` with a `sequence park
 timeout` diagnostic naming the head hook and the install site. The test
 fails loudly; it does not hang.
+
+`Gate::must_wait` / `wait_timeout` take any `Duration` — the examples
+reuse `PARK_TIMEOUT` merely as a convenient budget.
 
 ### `Gate`: coordinating completion, not just consumption
 
@@ -817,7 +905,22 @@ Output:
 [sp] after_commit call #2 thread=main
 ```
 
-Useful for discovering expected sequences and call counts.
+Useful for discovering expected sequences and call counts. The same
+check is available programmatically as `shadow_point::trace_enabled()`.
+
+### `current_fire()`
+
+Inside any hook closure — fire-once, a sequence step, or an `every`
+closure — `shadow_point::current_fire()` returns the `FireInfo` of the
+dispatch running on this thread: the `hook` name, the zero-based global
+`index` of this fire, and the firing thread's `thread_id`/`thread_name`.
+Outside a dispatch it returns `None`. Handy for helpers that must know
+which hook fired without being told:
+
+```rust
+let f = shadow_point::current_fire().expect("inside a hook");
+eprintln!("{} #{} on {:?}", f.hook, f.index, f.thread_id);
+```
 
 ### Panic messages
 
@@ -833,6 +936,13 @@ hook hook `before_insert` fired 1 time(s), expected 2
 - `invoke!` compiles to `{}` outside `#[cfg(test)]`.
 - `define_sp!` is gated with `#[cfg(test)]` by the caller.
 - Zero cost — verified with `cargo build --release`.
+
+## Compatibility
+
+MSRV is Rust 1.65 (edition 2021). The only dependency is `paste`, used
+at macro-expansion time. In test builds a hook fire costs a TLS read
+plus a few mutex operations; uninstalled threads dispatch to a no-op
+impl.
 
 ## Loom
 
