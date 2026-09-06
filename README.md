@@ -98,8 +98,16 @@ shadow_point::invoke!(MyModuleSp, before_insert(&key));
 shadow_point::invoke!(MyModuleSp, after_commit());
 ```
 
-`invoke!` takes the entry-point struct (`MyModuleSp`, generated from the
-prefix) and a plain `hook(args…)` call. It expands to a *statement*
+`invoke!` takes the entry-point struct and a plain `hook(args…)` call.
+The struct's name is the `define_sp!` `prefix` with `Sp` appended —
+`prefix MyModule` generates `MyModuleSp` (every generated name derives
+from the prefix that way; see
+[What `define_sp!` generates](#what-definesp-generates)). The arguments
+in the hook call are exactly the *declared* ones — without the guarded
+`&T`: dispatch prepends it to the closure parameters, so
+`invoke!(MyModuleSp, before_insert(&key))` fires the hook declared
+`before_insert(key: &K)` as the closure `|data, key|`. It expands to a
+*statement*
 (an `#[cfg(test)]`-attributed block), so it cannot be used in
 expression position — not as a closure's expression body
 (`|| invoke!(…)`), not as a block's trailing value; write `invoke!(…);`
@@ -127,6 +135,11 @@ mod tests {
 
 No `use` imports needed — hook names are associated constants on the
 entry-point struct.
+
+Nothing in the example beyond `install_guard` and the registration
+methods is shadow-point API: `setup()` is yours, and
+`guard.insert(42, "hello")` is *your* `T::insert` — the guard derefs to
+`&T`, so the guarded value's own methods are callable through it.
 
 This is the private mode: the guard sees only fires from this thread.
 For hooks fired from several threads there are two ways to go — per-worker
@@ -681,9 +694,11 @@ Each step exists to make the next one deterministic; do not reorder:
    beats it falls through to the fire-once/counter path instead of
    your entry — silently — so the discipline is what keeps the
    scenario deterministic.
-3. **Bind each worker** — clone the `Arc` into the thread; its first act
-   is `let _g = shared.install();`. TLS is per-thread: this points the
-   *current* thread's dispatch at the shared state. Keep the guard alive
+3. **Bind each firing thread** — clone the `Arc` into the thread; its
+   first act is `let _g = shared.install();`. TLS is per-thread: this
+   points the *current* thread's dispatch at the shared state — and
+   *every* thread that fires must bind this way, the test thread
+   included. Keep the guard alive
    for as long as the worker touches instrumented code; once it drops,
    the thread's dispatch falls back to the previously installed sync
    point (usually the default no-op). Drop the guard on the thread that
@@ -982,19 +997,23 @@ real tests with `cargo test --test cross_thread`.
 
 On a `current_thread` tokio runtime, the single executor thread must
 never park — the wake it is waiting for can never run because it *is*
-the executor thread. That makes [`Gate::wait`] unusable inside or
+the executor thread. That makes `Gate::wait` unusable inside or
 alongside async choreography: parking the executor stalls all work
 until a timeout panic. (The existing async / TLS caveat in
-["Per-worker guards"](#per-worker-guards) already warns that the
+[Per-worker guards](#per-worker-guards-private-mode-on-real-threads) already warns that the
 instrumented section under a guard on the tokio runtime must stay
 await-free — or the worker must use `spawn_blocking` + install inside
 the closure.)
 
 `TokioAsyncGate` — behind the non-default `tokio-async` feature — is the async
-complement to [`Gate`]: a monotonic fire-counter that the test body
+complement to `Gate`: a monotonic fire-counter that the test body
 waits on cooperatively via `.await`. Call `fire()` (non-blocking, safe
 from hook closures on the executor thread), `count()`, or
-`wait_at_least(n).await` from the async test body. The type is
+`wait_at_least(n).await` from the async test body. `wait_at_least` has
+**no timeout by design**: a threshold the scenario never reaches hangs
+until the CI job timeout — unlike `Gate::must_wait` and sequence
+parking, which fail loudly; await only a count the scenario guarantees
+to fire. The type is
 `Clone + Default`. Default builds never resolve tokio — the feature
 is off by default:
 
@@ -1017,11 +1036,11 @@ use tokio::runtime::Builder;
 // deterministically across threads.
 let gate = TokioAsyncGate::new();
 let g = gate.clone();
-let shared = MySp::install_shared(());
+let shared = MyModuleSp::install_shared(());
 
 // Register the hook closure: fire the gate on every invocation.
 shared.every(|e| {
-    e.some_hook(move |_, _| g.fire());
+    e.before_remove(move |_, _| g.fire());
 });
 
 let bound = shared.clone();
@@ -1029,11 +1048,11 @@ let rt = Builder::new_current_thread().build().unwrap();
 rt.block_on(async move {
     let _guard = bound.install();
 
-    // Fire milestones from a spawned future, await the threshold.
+    // Await the threshold while firing milestones concurrently.
     let waiting = gate.wait_at_least(2);
     let firing = async {
-        shadow_point::invoke!(MySp, some_hook(0));
-        shadow_point::invoke!(MySp, some_hook(1));
+        shadow_point::invoke!(MyModuleSp, before_remove(0));
+        shadow_point::invoke!(MyModuleSp, before_remove(1));
     };
     tokio::join!(waiting, firing);
     assert_eq!(gate.count(), 2);
