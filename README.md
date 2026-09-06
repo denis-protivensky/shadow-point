@@ -1004,11 +1004,7 @@ is off by default:
 shadow-point = { version = "0.3", features = ["tokio-async"] }
 ```
 
-The feature requires tokio ≥ 1.21 (encoded in the crate's dependency
-requirement) and a toolchain at least tokio's own MSRV; the crate's
-own MSRV stays 1.65 for default builds. Enable `tokio-async` as a
-**dev**-dependency in your project — production builds keep the
-seam-cfg-stripped zero-cost property.
+The feature depends on tokio ≥ 1.21 (the crate version floor: `Notified::enable` was added in 1.21). Tokio ≤ 1.38 requires Rust ≥ 1.63, which is satisfied by the crate's own MSRV 1.65. Newer tokio (≥ 1.39) requires Rust ≥ 1.70 — if Cargo resolves a version past that boundary while the toolchain is below it, the build fails. Pin tokio in your lockfile or bump the toolchain. Enable `tokio-async` as a **dev**-dependency in your project — production builds keep the seam-cfg-stripped zero-cost property.
 
 **Example** (simplified; the full tests live in
 [`tests/tokio_async_gate.rs`](tests/tokio_async_gate.rs)):
@@ -1113,10 +1109,11 @@ head is `before_insert` (installed at src/my_module.rs:95:35)
 
 MSRV is Rust 1.65 (edition 2021). The only default dependency is `paste`, used
 at macro-expansion time. Behind the non-default `tokio-async` feature, optional
-`tokio` (default-features off, `rt` + `sync` features, MSRV ≥ 1.21) is added
-— default builds never resolve tokio; enabling `tokio-async` requires a toolchain
-at least tokio's own MSRV. In test builds a hook fire costs a TLS read plus
-a few mutex operations; uninstalled threads dispatch to a no-op impl.
+`tokio` (default-features off, `rt` + `sync` features, ≥ 1.21) is added
+— default builds never resolve tokio; tokio ≤ 1.38 is within the crate's
+MSRV (tokio 1.38 requires Rust ≥ 1.63), while tokio ≥ 1.39 requires
+Rust ≥ 1.70. In test builds a hook fire costs a TLS read plus a few mutex
+operations; uninstalled threads dispatch to a no-op impl.
 
 ## Loom
 
