@@ -1004,7 +1004,7 @@ is off by default:
 shadow-point = { version = "0.3", features = ["tokio-async"] }
 ```
 
-The feature depends on tokio ≥ 1.21 (the crate version floor: `Notified::enable` was added in 1.21). Tokio ≤ 1.38 requires Rust ≥ 1.63, which is satisfied by the crate's own MSRV 1.65. Newer tokio (≥ 1.39) requires Rust ≥ 1.70 — if Cargo resolves a version past that boundary while the toolchain is below it, the build fails. Pin tokio in your lockfile or bump the toolchain. Enable `tokio-async` as a **dev**-dependency in your project — production builds keep the seam-cfg-stripped zero-cost property.
+The feature depends on tokio (specified as ≥ 1.21 in Cargo.toml; `Notified::enable` needed by `wait_at_least` shipped in 1.19, so the manifest floor is conservative). Tokio ≤ 1.38 requires Rust ≥ 1.63, which is satisfied by the crate's own MSRV 1.65. Newer tokio (≥ 1.39) requires Rust ≥ 1.70 — if Cargo resolves a version past that boundary while the toolchain is below it, the build fails. Pin tokio in your lockfile or bump the toolchain. Enable `tokio-async` as a **dev**-dependency in your project — production builds keep the seam-cfg-stripped zero-cost property.
 
 **Example** (simplified; the full tests live in
 [`tests/tokio_async_gate.rs`](tests/tokio_async_gate.rs)):
@@ -1015,12 +1015,13 @@ use tokio::runtime::Builder;
 
 // A shared sync point drives hook closures; gates coordinate
 // deterministically across threads.
-let gate: TokioAsyncGate = TokioAsyncGate::new();
+let gate = TokioAsyncGate::new();
+let g = gate.clone();
 let shared = MySp::install_shared(());
 
 // Register the hook closure: fire the gate on every invocation.
 shared.every(|e| {
-    e.some_hook(move |_, _| gate.fire());
+    e.some_hook(move |_, _| g.fire());
 });
 
 let bound = shared.clone();
@@ -1109,7 +1110,7 @@ head is `before_insert` (installed at src/my_module.rs:95:35)
 
 MSRV is Rust 1.65 (edition 2021). The only default dependency is `paste`, used
 at macro-expansion time. Behind the non-default `tokio-async` feature, optional
-`tokio` (default-features off, `rt` + `sync` features, ≥ 1.21) is added
+`tokio` (default-features off, `rt` + `sync` + `macros` features, ≥ 1.21) is added
 — default builds never resolve tokio; tokio ≤ 1.38 is within the crate's
 MSRV (tokio 1.38 requires Rust ≥ 1.63), while tokio ≥ 1.39 requires
 Rust ≥ 1.70. In test builds a hook fire costs a TLS read plus a few mutex

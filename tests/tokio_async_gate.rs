@@ -1,7 +1,7 @@
 //! TokioAsyncGate tests (feature = "tokio-async"): milestone coordination on a
 //! tokio current_thread runtime, where the std `Gate` would deadlock the
-//! executor. Runtimes are built via `Builder` (no `#[tokio::test]`, which
-//! would need the `macros` feature).
+//! executor. Runtimes are built via `Builder` (not `#[tokio::test]`) to keep
+//! the runtime setup explicit.
 
 #![cfg(feature = "tokio-async")]
 
