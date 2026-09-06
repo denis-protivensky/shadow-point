@@ -26,7 +26,7 @@ The two modes:
 |---|---|---|
 | Whose fires are seen | only the installing thread | every worker that called `install()` on its thread |
 | Fires from other threads | silently dropped (they hit the default no-op) | counted, sequenced, aggregated |
-| Out-of-order sequence fire | panics immediately | parks the early thread at the head, panics on `PARK_TIMEOUT` |
+| Out-of-order sequence fire | panics immediately if a later entry expects the hook (otherwise the fire falls through) | parks the early thread at the head, panics on `PARK_TIMEOUT` |
 | Expected counts | checked at guard drop | aggregated across threads, checked at last `Arc` drop |
 
 The three patterns:
@@ -202,6 +202,8 @@ Given `prefix MyModule`, the macro generates:
 | `MyModuleSharedSp<T>` | Shared state — same registration API, `install()` per worker |
 | `MyModuleSharedGuard<T>` | Per-thread TLS install of a shared sync point |
 | `MyModuleSeqBuilder<T>` | Builder for `sequence(...)` |
+| `MyModuleEveryBuilder<T>` | Builder for `every(...)` |
+| `MyModuleSpExpect<'_, T>` | Return value of a fire-once registration — chain `.expect(n)` |
 
 Associated constants on the entry-point struct let you reference hooks
 without importing the enum:
@@ -401,6 +403,11 @@ for a later fire; they also do not trigger fire-once closures for that hook
 (the pending head already expects it — see Registration precedence and lifetime).
 Ordering between different hooks stays strict — the gate only filters fires
 of its own hook by arguments.
+
+The predicate runs while the sequence lock is held — in *both* modes, not
+only shared (see the shared-mode caveats): it must be pure, with no hook
+invocations and no blocking. A blocking predicate deadlocks the fire even
+in private mode.
 
 A gated entry must still be consumed: if it remains at guard drop, the
 "sequence not fully consumed" assertion fails, so a scenario whose gate
@@ -1025,6 +1032,12 @@ shadow-point = { version = "0.3", features = ["tokio-async"] }
 
 The feature depends on tokio (specified as ≥ 1.21 in Cargo.toml; `Notified::enable` needed by `wait_at_least` shipped in 1.19, so the manifest floor is conservative). Tokio ≤ 1.38 requires Rust ≥ 1.63, which is satisfied by the crate's own MSRV 1.65. Newer tokio (≥ 1.39) requires Rust ≥ 1.70 — if Cargo resolves a version past that boundary while the toolchain is below it, the build fails. Pin tokio in your lockfile or bump the toolchain. Enable `tokio-async` as a **dev**-dependency in your project — production builds keep the seam-cfg-stripped zero-cost property.
 
+Concretely: if shadow-point is only a dev-dependency, add
+`features = ["tokio-async"]` to that entry; if it is also a regular
+dependency (the seam setup), keep that entry untouched and add a second
+`[dev-dependencies]` entry with the feature — Cargo unifies the feature
+flags of both entries for test builds.
+
 **Example** (simplified; the full tests live in
 [`tests/tokio_async_gate.rs`](tests/tokio_async_gate.rs)):
 
@@ -1060,15 +1073,17 @@ rt.block_on(async move {
 ```
 
 For work running on blocking threads (e.g. `tokio::task::spawn_blocking`),
-each worker installs its own guard and fires the gate inside the
-closure — the async body awaits the threshold.
+each worker installs the sync point on its own thread (the reference test
+uses a shared install; a per-worker private guard works the same) and
+fires the gate inside the closure — the async body awaits the threshold.
 
 ## Debugging
 
 ### SP_TRACE
 
 Set the `SP_TRACE` environment variable to print every hook fire (with the
-firing thread's name):
+firing thread's name). Presence is what matters, not the value: any
+setting — including `SP_TRACE=0` — enables tracing.
 
 ```sh
 SP_TRACE=1 cargo test -- --nocapture
