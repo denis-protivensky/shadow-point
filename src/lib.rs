@@ -389,8 +389,9 @@ impl Drop for ExecSink {
 /// - `struct {$prefix}SpGuard<T>` — guard with `Deref`, fire-once / sequence
 ///   / every registration, `expect_calls`, and `Drop` assertions
 /// - `struct {$prefix}SeqBuilder<T>` — builder for `guard.sequence(...)`
+/// - Un-prefixed (carry the visibility token): `EveryBuilder`, `SpExpect`
 /// - Internal: `__Sp<T>` (state), `__SpDefault`, `__SP_DEFAULT`, `SeqEntry`,
-///   `EveryClosures`, `EveryBuilder`, `SpExpect`, `__SP_TL` (thread-local)
+///   `EveryClosures`, `__SP_TL` (thread-local)
 ///
 /// # Limitations
 ///

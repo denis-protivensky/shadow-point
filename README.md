@@ -340,9 +340,10 @@ visibility token. It exists only where `define_sp!` exists — in test
 builds.
 
 The `MyModule*` names above derive from the prefix via `paste!`;
-`EveryBuilder` and `SpExpect` are shared machinery — they carry `T`
-instead of a prefix, which is why they (like the private names above)
-limit each module to a single `define_sp!` invocation.
+`EveryBuilder` and `SpExpect` are shared machinery — unlike the `MyModule*`
+items their names do not derive from the prefix, which is why they (like
+the private names above) limit each module to a single `define_sp!`
+invocation.
 
 ## Guard API (private mode)
 
