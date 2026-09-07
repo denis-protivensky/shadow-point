@@ -403,9 +403,11 @@ impl Drop for ExecSink {
 /// E0034/E0592/E0119/E0308 cascade).
 /// The fix is scoping: separate modules have separate scopes, so wrap each
 /// `define_sp!` in its own `mod { … }` — one module per sync point, even
-/// when several share a file. The scoped entry struct also changes
-/// `invoke!` call sites: reference the path (`invoke!(writer_sp::WriterSp,
-/// …)`) rather than a bare name.
+/// when several share a file (the usual layout, one sync point per file,
+/// avoids the issue by construction). The scoped entry struct also changes
+/// `invoke!` call sites outside that module: reference the path
+/// (`invoke!(writer_sp::WriterSp, …)`); inside the module the bare name
+/// still resolves.
 ///
 /// # Specification syntax
 ///
