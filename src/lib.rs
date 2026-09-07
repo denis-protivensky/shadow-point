@@ -389,8 +389,26 @@ impl Drop for ExecSink {
 /// - `struct {$prefix}SpGuard<T>` — guard with `Deref`, fire-once / sequence
 ///   / every registration, `expect_calls`, and `Drop` assertions
 /// - `struct {$prefix}SeqBuilder<T>` — builder for `guard.sequence(...)`
-/// - Internal: `__Sp<T>` (state), `__SpDefault`, `SeqEntry`, `EveryClosures`,
-///   `EveryBuilder`, `SpExpect`, `__SP_TL` (thread-local)
+/// - Un-prefixed (carry the visibility token): `EveryBuilder`, `SpExpect`
+/// - Internal: `__Sp<T>` (state), `__SpDefault`, `__SP_DEFAULT`, `SeqEntry`,
+///   `EveryClosures`, `__SP_TL` (thread-local)
+///
+/// # Limitations
+///
+/// One invocation per module. Besides the prefixed names, the macro emits
+/// names that do not derive from the prefix — the `use HookId` import, the
+/// private machinery (`__Sp`, `__SpDefault`, `__SP_DEFAULT`, `__SP_TL`,
+/// `SeqEntry`, `EveryClosures`) and the two un-prefixed types that carry
+/// the visibility token, `EveryBuilder` / `SpExpect` — so two invocations
+/// in one module collide on those names (E0252/E0428, then an
+/// E0034/E0592/E0119/E0308 cascade).
+/// The fix is scoping: separate modules have separate scopes, so wrap each
+/// `define_sp!` in its own `mod { … }` — one module per sync point, even
+/// when several share a file (the usual layout, one sync point per file,
+/// avoids the issue by construction). The scoped entry struct also changes
+/// `invoke!` call sites outside that module: reference the path
+/// (`invoke!(writer_sp::WriterSp, …)`); inside the module the bare name
+/// still resolves.
 ///
 /// # Specification syntax
 ///

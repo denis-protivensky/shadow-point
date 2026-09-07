@@ -111,6 +111,15 @@ shadow_point::define_sp! {
 
 In production builds `#[cfg(test)]` removes the call entirely.
 
+One `define_sp!` per module: the macro emits prefix-free names
+(`__Sp`, `EveryBuilder`, …) that collide when two invocations share a
+module — keep sync points in separate files, or give each its own
+`mod { … }` inside one file. Scoping the declaration also scopes its
+entry point, so `invoke!` call sites outside that module must name the
+module path (`invoke!(writer_sp::WriterSp, …)`) — see
+[What `define_sp!` generates](#what-define_sp-generates) for the full
+picture.
+
 ### 2. Insert `invoke!` calls
 
 At the points in your production code where tests need to hook in:
@@ -242,12 +251,47 @@ listed in the table above — the trait, the enum, the structs, and the
 associated hook constants; the internal machinery (`__Sp`,
 `SeqEntry`, the thread-local, …) stays private.
 
-Each `define_sp!` must live in its own module: the macro emits
-module-private internals (`use HookId`, `__SpDefault`, the
-thread-local, …) whose names do not derive from the prefix, so two
-sync points generated side by side in one module collide at compile
-time (E0252/E0428). Wrap each in its own `mod { … }` if they share a
-file.
+One `define_sp!` per module. Besides the prefixed names in the table,
+the macro emits a set of names that do not derive from the prefix: the
+`use HookId` import, the module-private machinery (`__Sp`, `__SpDefault`,
+`__SP_DEFAULT`, `__SP_TL`, `SeqEntry`, `EveryClosures`), and two
+un-prefixed types that carry the visibility token — `EveryBuilder` and
+`SpExpect` (both already in the table above). Two sync points generated
+side by side in one module collide on each of those names — E0252 for
+the duplicate `HookId` import, E0428 for each redefined name, then a
+cascade as the second invocation binds to the first one's types:
+E0034 (multiple applicable items), E0592 (duplicate impls),
+E0119/E0308 (conflicting impls, mismatched types).
+
+The usual layout avoids the issue by construction — one sync point per
+file, declared at the top of the production module it instruments. When
+two must share a file, separate modules give separate scopes, and that
+is the fix — each `define_sp!` in its own `mod { … }`:
+
+```rust
+#[cfg(test)]
+mod writer_sp {
+    shadow_point::define_sp! { pub(crate) prefix Writer { commit(), } }
+}
+
+#[cfg(test)]
+mod reader_sp {
+    shadow_point::define_sp! { pub(crate) prefix Reader { read(), } }
+}
+```
+
+Each namespace exports its own entry point (`WriterSp`, `ReaderSp`);
+dispatch, guards, and `.expect(n)` behave exactly as with a single
+declaration — the prefix already keeps every public API name distinct;
+only the prefix-free ones collide.
+
+Because the entry struct now lives inside its submodule, `invoke!` call
+sites *outside* it must name the scoped path — `invoke!(writer_sp::WriterSp,
+commit())` (a `use writer_sp::WriterSp;` works too); inside the module the
+bare name still resolves. The path is written in production code but only
+resolves in test builds, where the `#[cfg(test)]` submodule exists — in
+production the `invoke!` body is cfg-stripped before the path is ever
+resolved.
 
 Every generated type carrying `T` (`MyModuleSpGuard<T>`,
 `MyModuleSharedSp<T>`, the builders) requires `T: Send + Sync + 'static`,
@@ -296,9 +340,10 @@ visibility token. It exists only where `define_sp!` exists — in test
 builds.
 
 The `MyModule*` names above derive from the prefix via `paste!`;
-`EveryBuilder` and `SpExpect` are shared machinery — they carry `T`
-instead of a prefix, and are also why one module cannot hold two
-`define_sp!` invocations.
+`EveryBuilder` and `SpExpect` are shared machinery — unlike the `MyModule*`
+items their names do not derive from the prefix, which is why they (like
+the private names above) limit each module to a single `define_sp!`
+invocation.
 
 ## Guard API (private mode)
 
