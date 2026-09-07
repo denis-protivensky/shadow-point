@@ -1232,27 +1232,30 @@ either **inject failures**, **explore/simulate schedules**, **detect
 whatever race the run happens to produce**, or **rebuild the API**
 (mocks, ad-hoc barriers) to force the interleaving. None of them lets a
 test say
-"run this closure *in place of* the rival operation, on this thread, at
-this argument".
+"run this closure *in place of* the rival operation, on this thread, with
+these call arguments".
 
 | | what it does | pick it when |
 |---|---|---|
-| [failpoints (`fail`)](#failpoints-the-fail-crate) | named points with a per-name runtime action (per-hit conditionals only via `cfg_callback`) | an injected failure (EIO, crash, sleep) on a composed path is the whole property |
+| [failpoints (`fail`)](#failpoints-the-fail-crate) | named points with a per-name runtime action: panic, early `return(value)`, sleep, probabilistic `p%` triggers; per-hit conditionals only via `cfg_callback` | an injected failure (EIO, crash, sleep) on a composed path is the whole property |
 | [loom](#loom-and-shuttle-exploring-schedulers) | exhaustive interleaving exploration of instrumented primitives | you want to *find* which order breaks the code |
-| [shuttle](#loom-and-shuttle-exploring-schedulers) | randomized scheduler with deterministic replay | same, at schedules too large to explore exhaustively |
+| [shuttle](#loom-and-shuttle-exploring-schedulers) | randomized scheduler over replacement thread/sync primitives, with deterministic replay | same, at schedules too large to explore exhaustively |
 | [Miri / ThreadSanitizer](#detectors-miri-and-threadsanitizer) | run real (Miri: interpreted) schedules and report the data race or UB they hit | you want to *catch* an unscripted race: Miri for small all-Rust units, TSan for real threads |
 | [madsim](#deterministic-simulators) | swaps tokio for a simulated deterministic runtime (tasks, timers, RNG, network) | reproducibility of an entire distributed run is the property, and the runtime swap is acceptable |
 | [turmoil](#deterministic-simulators) | deterministic network hardship, every host on one simulated thread | same property, without swapping the runtime |
 | [mockall and hand-rolled barriers](#hand-rolled-mocks-and-barriers) | trait doubles, ad-hoc channels at call sites | you accept shipping the test seam in the permanent API (a trait already exists there) |
 
-### failpoints (the [`fail`](https://docs.rs/fail) crate)
+### Failpoints (the [`fail`](https://docs.rs/fail) crate)
 
 A fail point is an *unnamed-in-code, named-by-string* hook: `fail_point!("wal-fsync")`
 consults a global registry configured at runtime (`fail::cfg("wal-fsync", "sleep(10)")`
-or the `FAILPOINTS` env var). The action is blind to call arguments; under
-plain `fail::cfg` every caller of the name takes it, and hitting only one
-participant means hand-rolling that logic in a `cfg_callback` — evaluated
-per fire, still with no access to the call's arguments. Under the
+or the `FAILPOINTS` env var). The action is blind to call
+arguments; under plain `fail::cfg` every caller of the name takes it, and
+hitting only one participant means hand-rolling that logic in a
+`cfg_callback` — evaluated per fire, but still global: the callback gets
+neither the call's arguments nor any per-thread context for free, so
+per-participant behavior means rebuilding that state inside it by hand.
+Under the
 `failpoints` feature the macro is live; with the feature off
 it generates nothing, so the instrumentation costs the public API nothing.
 That combination — zero API surface, env-controllable, works from
@@ -1267,7 +1270,13 @@ only threads that called `install()`), and can be *conditional*: a
 predicate gate, fire-once, a `sequence` that parks an out-of-order arrival
 at the rendezvous. Properties like "T1 blocks on its first acquire and T2
 does not", "the third call sees the rival already inserted", "count fires
-per key" are not writable against a global name-keyed action.
+per key" are not writable against a global name-keyed action without
+rebuilding that state inside a `cfg_callback`.
+
+The asymmetry is not only in shadow-point's favor: a failpoint acts on
+control flow — `panic`, an early `return(value)` from the instrumented
+function, `sleep` — where a shadow hook is side-effect only and cannot
+change what the call returns ([Hook arguments](#hook-arguments)).
 
 Decision rule:
 
@@ -1302,14 +1311,17 @@ a default: land it with its justification. The two tools coexist happily —
 failpoints for the environment misbehaving, shadow-points for the rival
 thread behaving in a scripted way.
 
-### loom and shuttle: exploring schedulers
+### Loom and shuttle: exploring schedulers
 
 [loom](https://docs.rs/loom) exhaustively model-checks interleavings of
 its own synchronization primitives;
 [shuttle](https://github.com/awslabs/shuttle) explores the schedule
 space of std-style threads with a randomized scheduler, replaying a
-failing run deterministically from its seed. Both
-answer "does *some* order break this code?" and find the order for you.
+failing run deterministically from its seed. Both run the exploration
+over their own primitives (`loom::sync`, `shuttle::thread`,
+`shuttle::sync`): the code under test must be ported away from the std
+types, and anything left uninstrumented is invisible to the exploration.
+Both answer "does *some* order break this code?" and find the order for you.
 shadow-point answers "does the code survive *this* order?" and the test
 *is* the order — named, reviewed, reproducible run to run without a seed.
 The workflows compose: loom/shuttle discover an interleaving that fails,
@@ -1333,7 +1345,7 @@ cost asymmetry keeps both useful: Miri is orders of magnitude slower
 than real threads and cannot run FFI, so it fits small all-Rust units;
 TSan runs near-native but reports only what that one run produced.
 
-### deterministic simulators
+### Deterministic simulators
 
 [`madsim`](https://docs.rs/madsim) and
 [`turmoil`](https://docs.rs/turmoil) achieve reproducibility by
@@ -1352,7 +1364,7 @@ simulator's control surface is the wrong shape — the code under test
 runs through the simulator's runtime and shims, not through production
 I/O.
 
-### hand-rolled mocks and barriers
+### Hand-rolled mocks and barriers
 
 The most common alternative is not purpose-built for concurrency:
 [`mockall`](https://docs.rs/mockall) and friends generate trait doubles,
