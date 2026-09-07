@@ -11,6 +11,22 @@ sync point bound by every worker. Nested fires of the same sync point
 on the same thread are silently suppressed. In production they compile
 to nothing.
 
+## Contents
+
+- [Install modes and usage patterns](#install-modes-and-usage-patterns)
+- [Quick start](#quick-start)
+- [Using as a dev-dependency](#using-as-a-dev-dependency)
+- [What `define_sp!` generates](#what-define_sp-generates)
+- [Guard API (private mode)](#guard-api-private-mode)
+- [Hook arguments](#hook-arguments)
+- [Per-worker guards: private mode on real threads](#per-worker-guards-private-mode-on-real-threads)
+- [Shared mode: one sync point across threads](#shared-mode-one-sync-point-across-threads)
+- [Async (tokio) consumers](#async-tokio-consumers)
+- [Debugging](#debugging)
+- [Production safety](#production-safety)
+- [Compatibility](#compatibility)
+- [Loom](#loom)
+
 ## Install modes and usage patterns
 
 There are two install *modes* — how the `invoke!` dispatch is bound to
@@ -26,7 +42,7 @@ The two modes:
 |---|---|---|
 | Whose fires are seen | only the installing thread | every worker that called `install()` on its thread |
 | Fires from other threads | silently dropped (they hit the default no-op) | counted, sequenced, aggregated |
-| Out-of-order sequence fire | panics immediately | parks the early thread at the head, panics on `PARK_TIMEOUT` |
+| Out-of-order sequence fire | panics immediately if a later entry expects the hook (otherwise the fire falls through) | parks the early thread at the head, panics on `PARK_TIMEOUT` |
 | Expected counts | checked at guard drop | aggregated across threads, checked at last `Arc` drop |
 
 The three patterns:
@@ -68,6 +84,16 @@ The same split has two useful readings:
 
 ## Quick start
 
+```toml
+# Cargo.toml
+[dependencies]
+shadow-point = "0.3"
+```
+
+`paste` does not need to be declared: `define_sp!` reaches it through
+shadow-point's own re-export (`$crate::paste`), which also keeps the
+dev-dependency seam setup (below) self-contained.
+
 ### 1. Declare hooks
 
 At module level, gate with `#[cfg(test)]` and call `define_sp!`:
@@ -79,6 +105,7 @@ At module level, gate with `#[cfg(test)]` and call `define_sp!`:
 shadow_point::define_sp! {
     pub(crate) prefix MyModule
     {
+        // `K` is this module's key type — use yours or a concrete type.
         before_insert(key: &K),
         before_remove(id: usize),
         after_commit(),
@@ -98,13 +125,22 @@ shadow_point::invoke!(MyModuleSp, before_insert(&key));
 shadow_point::invoke!(MyModuleSp, after_commit());
 ```
 
-`invoke!` takes the entry-point struct (`MyModuleSp`, generated from the
-prefix) and a plain `hook(args…)` call. It expands to a *statement*
+`invoke!` takes the entry-point struct and a plain `hook(args…)` call.
+The struct's name is the `define_sp!` `prefix` with `Sp` appended —
+`prefix MyModule` generates `MyModuleSp` (every generated name derives
+from the prefix that way; see
+[What `define_sp!` generates](#what-define_sp-generates)). The arguments
+in the hook call are exactly the *declared* ones — without the guarded
+`&T`: dispatch prepends it to the closure parameters, so
+`invoke!(MyModuleSp, before_insert(&key))` fires the hook declared
+`before_insert(key: &K)` as the closure `|data, key|`. It expands to a
+*statement*
 (an `#[cfg(test)]`-attributed block), so it cannot be used in
 expression position — not as a closure's expression body
 (`|| invoke!(…)`), not as a block's trailing value; write `invoke!(…);`
 as its own statement or hoist such fires into a function.
-In production `invoke!` compiles to `{}`.
+In production `invoke!` compiles to nothing — the `#[cfg(test)]`
+block is stripped.
 
 ### 3. Write a test (single thread)
 
@@ -127,6 +163,11 @@ mod tests {
 
 No `use` imports needed — hook names are associated constants on the
 entry-point struct.
+
+Nothing in the example beyond `install_guard` and the registration
+methods is shadow-point API: `setup()` is yours, and
+`guard.insert(42, "hello")` is *your* `T::insert` — the guard derefs to
+`&T`, so the guarded value's own methods are callable through it.
 
 This is the private mode: the guard sees only fires from this thread.
 For hooks fired from several threads there are two ways to go — per-worker
@@ -189,6 +230,8 @@ Given `prefix MyModule`, the macro generates:
 | `MyModuleSharedSp<T>` | Shared state — same registration API, `install()` per worker |
 | `MyModuleSharedGuard<T>` | Per-thread TLS install of a shared sync point |
 | `MyModuleSeqBuilder<T>` | Builder for `sequence(...)` |
+| `EveryBuilder<T>` | Builder for `every(...)` |
+| `SpExpect<'_, T>` | Return value of a fire-once registration — chain `.expect(n)` |
 
 Associated constants on the entry-point struct let you reference hooks
 without importing the enum:
@@ -202,6 +245,13 @@ The visibility token before `prefix` applies to every generated item
 listed in the table above — the trait, the enum, the structs, and the
 associated hook constants; the internal machinery (`__Sp`,
 `SeqEntry`, the thread-local, …) stays private.
+
+Each `define_sp!` must live in its own module: the macro emits
+module-private internals (`use HookId`, `__SpDefault`, the
+thread-local, …) whose names do not derive from the prefix, so two
+sync points generated side by side in one module collide at compile
+time (E0252/E0428). Wrap each in its own `mod { … }` if they share a
+file.
 
 Every generated type carrying `T` (`MyModuleSpGuard<T>`,
 `MyModuleSharedSp<T>`, the builders) requires `T: Send + Sync + 'static`,
@@ -243,11 +293,16 @@ MyModuleSp::with_dyn(|sp| sp.before_insert(&key));
 ```
 
 With no install on the thread, `f` receives the default no-op impl, so
-the call is safe and does nothing. `with_dyn` has the same visibility
-rules as `invoke!` (a private guard is seen only by its own thread) and
-exists only where `define_sp!` exists — in test builds.
+the call is safe and does nothing. Like `invoke!`, `with_dyn`
+dispatches to the calling thread's install — a private guard is seen
+only by its own thread — and the method carries the `define_sp!`
+visibility token. It exists only where `define_sp!` exists — in test
+builds.
 
-All names derive from the prefix via `paste!`.
+The `MyModule*` names above derive from the prefix via `paste!`;
+`EveryBuilder` and `SpExpect` are shared machinery — they carry `T`
+instead of a prefix, and are also why one module cannot hold two
+`define_sp!` invocations.
 
 ## Guard API (private mode)
 
@@ -389,6 +444,11 @@ for a later fire; they also do not trigger fire-once closures for that hook
 Ordering between different hooks stays strict — the gate only filters fires
 of its own hook by arguments.
 
+The predicate runs while the sequence lock is held — in *both* modes, not
+only shared (see the shared-mode caveats): it must be pure, with no hook
+invocations and no blocking. A blocking predicate deadlocks the fire even
+in private mode.
+
 A gated entry must still be consumed: if it remains at guard drop, the
 "sequence not fully consumed" assertion fails, so a scenario whose gate
 never passes cannot complete silently. If an entry may legitimately never
@@ -459,9 +519,10 @@ that the *other* thread would have run. Each example below assumes a
 guard; in shared mode the same interleavings are scripted as `sequence`
 steps, coordinated with `Gate`.
 
-Note: a hook re-fired on the registering thread is silently suppressed, so
-the interleaving operation inside the closure runs without recursing into
-its own hooks.
+Note: while a hook closure is executing on a thread, any further fire of
+the *same sync point* on that thread is silently suppressed (suppression
+is per-thread, per-sync-point) — so the interleaving operation inside the
+closure runs without recursing into its own hooks.
 
 #### The inserting thread loses the race
 
@@ -539,7 +600,11 @@ and `invoke!` expands to a statement. A hook closure can observe and
 mutate through `&T` (and assert), but cannot change what the
 instrumented operation returns.
 
-Hook arguments appear in the trait signature. The closure receives `&T`
+Hook arguments appear in the trait signature and are passed *by value*
+through the dispatch: for a non-`Copy` type, `invoke!` moves the
+argument, so declare the hook with a reference (`key: &K`) or a raw
+pointer (`root: *const ()`) when the call site must keep the value.
+The closure receives `&T`
 (the guarded value) as the first parameter, followed by the hook arguments:
 
 ```rust
@@ -662,7 +727,7 @@ closure, where the OS thread is yours.
 A private guard sees only the installing thread's fires. When the
 assertion is *cross-thread* — the global order of interleaving steps, or
 total counts across workers — install one sync point instead:
-`install_shared(value)` returns an `Arc<SharedSp<T>>` whose state every
+`install_shared(value)` returns an `Arc<MyModuleSharedSp<T>>` whose state every
 bound thread drives. The `Arc` derefs to `&T`, so the shared value is
 readable through it everywhere. This mode adds real parallelism:
 workers race for real, and `sequence` + `Gate` pin the chosen
@@ -673,7 +738,7 @@ interleaving down so it reproduces run to run.
 Each step exists to make the next one deterministic; do not reorder:
 
 1. **Install** — `install_shared(value)` on the test thread →
-   `Arc<SharedSp<T>>` (`T: Send + Sync + 'static`, as with
+   `Arc<MyModuleSharedSp<T>>` (`T: Send + Sync + 'static`, as with
    `install_guard`).
 2. **Register** — `sequence` / `every` / fire-once / `expect_calls` on
    the `Arc`, *before spawning workers*. Registration is lock-guarded
@@ -681,9 +746,13 @@ Each step exists to make the next one deterministic; do not reorder:
    beats it falls through to the fire-once/counter path instead of
    your entry — silently — so the discipline is what keeps the
    scenario deterministic.
-3. **Bind each worker** — clone the `Arc` into the thread; its first act
-   is `let _g = shared.install();`. TLS is per-thread: this points the
-   *current* thread's dispatch at the shared state. Keep the guard alive
+3. **Bind each firing thread** — clone the `Arc` into the thread; its
+   first act is `let _g = shared.install();`. TLS is per-thread: this
+   points the *current* thread's dispatch at the shared state — and
+   *every* thread that fires must bind this way, the test thread
+   included. The returned `MyModuleSharedGuard<T>` owns an `Arc` clone
+   of the shared state, so the step-6 assertions cannot run while any
+   worker guard is alive. Keep the guard alive
    for as long as the worker touches instrumented code; once it drops,
    the thread's dispatch falls back to the previously installed sync
    point (usually the default no-op). Drop the guard on the thread that
@@ -705,9 +774,11 @@ do not need to bind.
 ### Parking: the sequence head is a rendezvous
 
 A worker that fires a hook the sequence expects only at a *later*
-position parks (up to `PARK_TIMEOUT` — a crate-root `Duration` constant
-of 10 s, not per-install configurable) instead of panicking, and
-re-checks the head after every wake. This is what makes shared mode
+position parks instead of panicking, and re-checks the head after
+every wake. The panic fires only when a full `PARK_TIMEOUT` (a
+crate-root `Duration` constant of 10 s, not per-install configurable)
+elapses with no wake and the head still blocks the fire — a thread
+that keeps getting woken can park longer than 10 s in total. This is what makes shared mode
 composable: *any* thread may arrive out of order, and the sequence
 sorts arrivals — each same-hook entry is consumed exactly once, the
 thread that fires the head hook pops it and wakes the next in line.
@@ -733,6 +804,7 @@ is not lost; `clear` re-arms it):
 
 | Call | Semantics |
 |---|---|
+| `new()` / `Default` | Fresh unset gate |
 | `set()` / `clear()` | Raise / lower the flag; wakes all waiters |
 | `must_wait(timeout)` | Block until set; **panic** on timeout — the in-hook default |
 | `wait_timeout(timeout)` -> `bool` | Block until set; report whether it happened |
@@ -978,12 +1050,94 @@ first example is a simplified variant of `sequence_order_across_threads`
 (two steps, gate wait moved out of the instrumented path) — run the
 real tests with `cargo test --test cross_thread`.
 
+## Async (tokio) consumers
+
+On a `current_thread` tokio runtime, the single executor thread must
+never park — the wake it is waiting for can never run because it *is*
+the executor thread. That makes `Gate::wait` unusable inside or
+alongside async choreography: parking the executor stalls all work
+until a timeout panic. (The existing async / TLS caveat in
+[Per-worker guards](#per-worker-guards-private-mode-on-real-threads) already warns that the
+instrumented section under a guard on the tokio runtime must stay
+await-free — or the worker must use `spawn_blocking` + install inside
+the closure.)
+
+`TokioAsyncGate` — behind the non-default `tokio-async` feature — is the async
+complement to `Gate`: a monotonic fire-counter that the test body
+waits on cooperatively via `.await`. Call `fire()` (non-blocking, safe
+from hook closures on the executor thread), `count()`, or
+`wait_at_least(n).await` from the async test body. `wait_at_least` has
+**no timeout by design**: a threshold the scenario never reaches hangs
+until the CI job timeout — unlike `Gate::must_wait` and sequence
+parking, which fail loudly; await only a count the scenario guarantees
+to fire. The type is
+`Clone + Default`. Default builds never resolve tokio — the feature
+is off by default:
+
+```toml
+# Cargo.toml
+[dependencies]
+shadow-point = { version = "0.3", features = ["tokio-async"] }
+```
+
+The feature depends on tokio (specified as ≥ 1.21 in Cargo.toml; `Notified::enable` needed by `wait_at_least` shipped in 1.19, so the manifest floor is conservative). Tokio ≤ 1.38 requires Rust ≥ 1.63, which is satisfied by the crate's own MSRV 1.65. Newer tokio (≥ 1.39) requires Rust ≥ 1.70 — if Cargo resolves a version past that boundary while the toolchain is below it, the build fails. Pin tokio in your lockfile or bump the toolchain. Enable `tokio-async` as a **dev**-dependency in your project — production builds keep the seam-cfg-stripped zero-cost property.
+
+Concretely: if shadow-point is only a dev-dependency, add
+`features = ["tokio-async"]` to that entry; if it is also a regular
+dependency (the seam setup), keep that entry untouched and add a second
+`[dev-dependencies]` entry with the feature — Cargo unifies the feature
+flags of both entries for test builds.
+
+**Example** (simplified; the full tests live in
+[`tests/tokio_async_gate.rs`](tests/tokio_async_gate.rs)):
+
+```rust,ignore
+use shadow_point::TokioAsyncGate;
+use tokio::runtime::Builder;
+
+#[test]
+fn async_milestone_gate() {
+    // A shared sync point drives hook closures; the gate coordinates
+    // milestones without parking the executor.
+    let gate = TokioAsyncGate::new();
+    let g = gate.clone();
+    let shared = MyModuleSp::install_shared(());
+
+    // Register the hook closure: fire the gate on every invocation.
+    shared.every(|e| {
+        e.before_remove(move |_, _| g.fire());
+    });
+
+    let bound = shared.clone();
+    let rt = Builder::new_current_thread().build().unwrap();
+    rt.block_on(async move {
+        let _guard = bound.install();
+
+        // Await the threshold while firing milestones concurrently.
+        let waiting = gate.wait_at_least(2);
+        let firing = async {
+            shadow_point::invoke!(MyModuleSp, before_remove(0));
+            shadow_point::invoke!(MyModuleSp, before_remove(1));
+        };
+        tokio::join!(waiting, firing);
+        assert_eq!(gate.count(), 2);
+    });
+}
+```
+
+For work running on blocking threads (e.g. `tokio::task::spawn_blocking`),
+each worker installs the sync point on its own thread (the reference test
+uses a shared install; a per-worker private guard works the same) and
+fires the gate inside the closure — the async body awaits the threshold.
+
 ## Debugging
 
 ### SP_TRACE
 
-Set the `SP_TRACE` environment variable to print every hook fire (with the
-firing thread's name):
+Set the `SP_TRACE` environment variable to print every hook fire to
+stderr (with the firing thread's name — `<unnamed>` for unnamed
+threads). Presence is what matters, not the value: any
+setting — including `SP_TRACE=0` — enables tracing.
 
 ```sh
 SP_TRACE=1 cargo test -- --nocapture
@@ -1026,6 +1180,13 @@ sync point hook `before_insert` fired 1 time(s), expected 2
 
 (In shared mode the location is marked `(shared, installed at ...)`.)
 
+A private-mode ordering violation names the expected head and the fire
+that arrived:
+
+```
+sync point ordering violation: expected `before_insert` next but `after_commit` fired
+```
+
 The shared-mode park timeout names the waiting hook, the head hook, and
 the install site:
 
@@ -1042,18 +1203,26 @@ head is `before_insert` (installed at src/my_module.rs:95:35)
 
 ## Compatibility
 
-MSRV is Rust 1.65 (edition 2021). The only dependency is `paste`, used
-at macro-expansion time. In test builds a hook fire costs a TLS read
-plus a few mutex operations; uninstalled threads dispatch to a no-op
-impl.
+MSRV is Rust 1.65 (edition 2021). The only default dependency is `paste`, used
+at macro-expansion time and re-exported by the crate — `define_sp!` reaches it
+via `$crate::paste`, so consumers never declare it themselves. Behind the
+non-default `tokio-async` feature, optional `tokio` (default-features off,
+`rt` + `sync` + `macros` features, ≥ 1.21) is added
+— default builds never resolve tokio; tokio ≤ 1.38 is within the crate's
+MSRV (tokio 1.38 requires Rust ≥ 1.63), while tokio ≥ 1.39 requires
+Rust ≥ 1.70. In test builds a hook fire costs a TLS read plus a few mutex
+operations; uninstalled threads dispatch to a no-op impl.
 
 ## Loom
 
-Under `loom` (`cfg(test)` + `cfg(loom)`), `define_sp!` still generates
-infrastructure and `invoke!` dispatches through `with_dyn`. However, the
-thread_local holds the default no-op impl, so all hooks are silent no-ops.
-This requires no `loom` references in `shadow-point` — the crate is
-cfg-gated solely on `cfg(test)`.
+There is no loom integration: nothing in `shadow-point` is gated on
+`cfg(loom)`, and dispatch runs on std `Mutex`/`Condvar`/`Cell`
+throughout. Under `--cfg loom` the macros compile and behave exactly as
+in normal test builds — `define_sp!` generates the full infrastructure
+and `invoke!` dispatches through `with_dyn`, with guards installing for
+real — but loom does not model std synchronization, so the hook-dispatch
+path contributes nothing to loom's race detection. What loom still
+checks is the instrumented code itself; the sync-point machinery is
+invisible to its model.
 
-Full loom integration (replacing `Cell`/`RefCell` with loom analogs) is
-future work.
+Modeling the dispatch state with loom analogs is future work.
