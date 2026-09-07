@@ -111,6 +111,11 @@ shadow_point::define_sp! {
 
 In production builds `#[cfg(test)]` removes the call entirely.
 
+One `define_sp!` per module: the macro emits prefix-free names
+(`__Sp`, `EveryBuilder`, …) that collide when two invocations share a
+module — give each its own `mod { … }` if they share a file (see
+[What `define_sp!` generates](#what-define_sp-generates)).
+
 ### 2. Insert `invoke!` calls
 
 At the points in your production code where tests need to hook in:
@@ -242,12 +247,36 @@ listed in the table above — the trait, the enum, the structs, and the
 associated hook constants; the internal machinery (`__Sp`,
 `SeqEntry`, the thread-local, …) stays private.
 
-Each `define_sp!` must live in its own module: the macro emits
-module-private internals (`use HookId`, `__SpDefault`, the
-thread-local, …) whose names do not derive from the prefix, so two
-sync points generated side by side in one module collide at compile
-time (E0252/E0428). Wrap each in its own `mod { … }` if they share a
-file.
+One `define_sp!` per module. Besides the prefixed names in the table,
+the macro emits a set of names that do not derive from the prefix: the
+`use HookId` import, the module-private machinery (`__Sp`, `__SpDefault`,
+`__SP_DEFAULT`, `__SP_TL`, `SeqEntry`, `EveryClosures`), and two
+un-prefixed public types — `EveryBuilder` and `SpExpect` (both already
+in the table above). Two sync points generated side by side in one
+module collide on each of those names — E0252 for the duplicate
+`HookId` import, E0428 for each redefined name, then a cascade as the
+second invocation binds to the first one's types: E0034 (multiple
+applicable items), E0592 (duplicate impls), E0119/E0308 (conflicting
+impls, mismatched types). Separate modules give separate scopes, and
+that is the fix — each `define_sp!` may stay in its own `mod { … }`
+inside one file:
+
+```rust
+#[cfg(test)]
+mod writer_sp {
+    shadow_point::define_sp! { pub(crate) prefix Writer { commit(), } }
+}
+
+#[cfg(test)]
+mod reader_sp {
+    shadow_point::define_sp! { pub(crate) prefix Reader { read(), } }
+}
+```
+
+Each namespace exports its own entry point (`WriterSp`, `ReaderSp`);
+dispatch, guards, and `.expect(n)` behave exactly as with a single
+declaration — the prefix already keeps every public API name distinct;
+only the prefix-free ones collide.
 
 Every generated type carrying `T` (`MyModuleSpGuard<T>`,
 `MyModuleSharedSp<T>`, the builders) requires `T: Send + Sync + 'static`,
@@ -297,8 +326,8 @@ builds.
 
 The `MyModule*` names above derive from the prefix via `paste!`;
 `EveryBuilder` and `SpExpect` are shared machinery — they carry `T`
-instead of a prefix, and are also why one module cannot hold two
-`define_sp!` invocations.
+instead of a prefix, which is why they (like the private names above)
+limit each module to a single `define_sp!` invocation.
 
 ## Guard API (private mode)
 
