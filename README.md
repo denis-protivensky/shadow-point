@@ -1235,7 +1235,7 @@ interleaving. None of them lets a test say
 "run this closure *in place of* the rival operation, on this thread, with
 these call arguments".
 
-| | what it does | pick it when |
+| tool | what it does | pick it when |
 |---|---|---|
 | [failpoints (`fail`)](#failpoints-the-fail-crate) | named points with a per-name runtime action: panic, early `return(value)`, sleep, probabilistic `p%` and repeat-limited `cnt*` triggers; per-hit conditionals via `cfg_callback` or a fixed call-site predicate | an injected failure (EIO, crash, sleep) on a composed path is the whole property |
 | [loom](#loom-and-shuttle-exploring-schedulers) | exhaustive interleaving exploration of instrumented primitives | you want to *find* which order breaks the code |
@@ -1298,23 +1298,17 @@ Decision rule:
   a `cfg_callback` conditional at most) → **failpoint**; prefer it, the
   API price is zero.
 - A *conditional per-thread* stop is needed on a path only reachable
-  through the public API → shadow-point, and you pay a feature tax for it,
-  because a test in `tests/` compiles the lib **without** `cfg(test)` and
-  `invoke!` is `#[cfg(test)]`-gated at the use site:
-  - the Sp type and its guards must become `pub` — the seam leaks into
-    the crate's public API (and the generated items need `missing_docs`
-    allowances);
-  - the declaration must live behind your own feature (a normal-dep, not
-    dev-dep — see [Using as a dev-dependency](#using-as-a-dev-dependency)),
-    and keeping hooks live in the feature build means dispatching
-    through `with_dyn` directly instead of `invoke!` — a fork that drifts
-    as the macro evolves;
-  - guards are thread-local, so the async caveat applies unchanged
-    ([Per-worker guards](#per-worker-guards-private-mode-on-real-threads)):
-    on tokio, install inside the `spawn_blocking` closure and coordinate
-    the async body through `TokioAsyncGate`
-    ([Async (tokio) consumers](#async-tokio-consumers); fire/count/await,
-    no parking) rather than parking a guard across an `.await`.
+  through the public API → shadow-point, and you pay a feature tax for it
+  (a test in `tests/` compiles the lib **without** `cfg(test)`, and
+  `invoke!` is `#[cfg(test)]`-gated at the use site): the Sp type and its
+  guards go `pub` with `missing_docs` allowances; the declaration moves
+  behind your own feature and dispatches through `with_dyn` instead of
+  `invoke!` ([Using as a dev-dependency](#using-as-a-dev-dependency));
+  and the thread-local guards keep the async caveat
+  ([Per-worker guards](#per-worker-guards-private-mode-on-real-threads)) —
+  on tokio, `spawn_blocking` + `TokioAsyncGate` ([Async (tokio)
+  consumers](#async-tokio-consumers); fire/count/await, no parking)
+  rather than parking a guard across an `.await`.
 
 An integration shadow-point seam is therefore a deliberate exception, not
 a default: land it with its justification. The two tools coexist happily —
