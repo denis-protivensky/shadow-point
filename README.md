@@ -113,8 +113,11 @@ In production builds `#[cfg(test)]` removes the call entirely.
 
 One `define_sp!` per module: the macro emits prefix-free names
 (`__Sp`, `EveryBuilder`, …) that collide when two invocations share a
-module — give each its own `mod { … }` if they share a file (see
-[What `define_sp!` generates](#what-define_sp-generates)).
+module — give each its own `mod { … }` if they share a file. Scoping
+the declaration also scopes its entry point, so `invoke!` call sites
+must name the module path (`invoke!(writer_sp::WriterSp, …)`) — see
+[What `define_sp!` generates](#what-define_sp-generates) for the full
+picture.
 
 ### 2. Insert `invoke!` calls
 
@@ -251,15 +254,15 @@ One `define_sp!` per module. Besides the prefixed names in the table,
 the macro emits a set of names that do not derive from the prefix: the
 `use HookId` import, the module-private machinery (`__Sp`, `__SpDefault`,
 `__SP_DEFAULT`, `__SP_TL`, `SeqEntry`, `EveryClosures`), and two
-un-prefixed public types — `EveryBuilder` and `SpExpect` (both already
-in the table above). Two sync points generated side by side in one
-module collide on each of those names — E0252 for the duplicate
-`HookId` import, E0428 for each redefined name, then a cascade as the
-second invocation binds to the first one's types: E0034 (multiple
-applicable items), E0592 (duplicate impls), E0119/E0308 (conflicting
-impls, mismatched types). Separate modules give separate scopes, and
-that is the fix — each `define_sp!` may stay in its own `mod { … }`
-inside one file:
+un-prefixed types that carry the visibility token — `EveryBuilder` and
+`SpExpect` (both already in the table above). Two sync points generated
+side by side in one module collide on each of those names — E0252 for
+the duplicate `HookId` import, E0428 for each redefined name, then a
+cascade as the second invocation binds to the first one's types:
+E0034 (multiple applicable items), E0592 (duplicate impls),
+E0119/E0308 (conflicting impls, mismatched types). Separate modules
+give separate scopes, and that is the fix — each `define_sp!` may stay
+in its own `mod { … }` inside one file:
 
 ```rust
 #[cfg(test)]

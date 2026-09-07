@@ -395,11 +395,12 @@ impl Drop for ExecSink {
 /// # Limitations
 ///
 /// One invocation per module. Besides the prefixed names, the macro emits
-/// names that do not derive from `{$prefix}` — the `use HookId` import, the
+/// names that do not derive from the prefix — the `use HookId` import, the
 /// private machinery (`__Sp`, `__SpDefault`, `__SP_DEFAULT`, `__SP_TL`,
-/// `SeqEntry`, `EveryClosures`) and the un-prefixed `{$vis}` types
-/// `EveryBuilder` / `SpExpect` — so two invocations in one module collide
-/// on those names (E0252/E0428, then an E0034/E0592/E0119/E0308 cascade).
+/// `SeqEntry`, `EveryClosures`) and the two un-prefixed types that carry
+/// the visibility token, `EveryBuilder` / `SpExpect` — so two invocations
+/// in one module collide on those names (E0252/E0428, then an
+/// E0034/E0592/E0119/E0308 cascade).
 /// The fix is scoping: separate modules have separate scopes, so wrap each
 /// `define_sp!` in its own `mod { … }` — one module per sync point, even
 /// when several share a file. The scoped entry struct also changes
