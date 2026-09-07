@@ -1245,19 +1245,19 @@ these call arguments".
 | [turmoil](#deterministic-simulators) | deterministic network hardship, every host on one simulated thread | same property, without swapping the runtime |
 | [mockall and hand-rolled barriers](#hand-rolled-mocks-and-barriers) | trait doubles, ad-hoc channels at call sites | you accept shipping the test seam in the permanent API (a trait already exists there) |
 
-### Failpoints (the [`fail`](https://docs.rs/fail) crate)
+### Failpoints (the `fail` crate)
 
-A fail point is an *unnamed-in-code, named-by-string* hook: `fail_point!("wal-fsync")`
-consults a global registry configured at runtime (`fail::cfg("wal-fsync", "sleep(10)")`
-or the `FAILPOINTS` env var). The action is blind to call
-arguments; under plain `fail::cfg` every caller of the name takes it, and
-hitting only one participant means hand-rolling that logic in a
+A fail point is an *unnamed-in-code, named-by-string* hook from the
+[`fail`](https://docs.rs/fail) crate: `fail_point!("wal-fsync")` consults
+a global registry configured at runtime (`fail::cfg("wal-fsync", "sleep(10)")`
+or the `FAILPOINTS` env var). The action is blind to call arguments; under
+plain `fail::cfg` every caller of the name takes it, and hitting only one
+participant means hand-rolling that logic in a
 `cfg_callback` — evaluated per fire, but still global: the callback gets
 neither the call's arguments nor any per-thread context for free, so
 per-participant behavior means rebuilding that state inside it by hand.
-Under the
-`failpoints` feature the macro is live; with the feature off
-it generates nothing, so the instrumentation costs the public API nothing.
+Under the `failpoints` feature the macro is live; with the feature off it
+generates nothing, so the instrumentation costs the public API nothing.
 That combination — zero API surface, env-controllable, works from
 integration tests and released binaries — makes failpoints the right tool
 for failure injection: fsync that returns EIO, a crash between two writes,
@@ -1335,8 +1335,8 @@ are invisible to loom's model) is in the [Loom](#loom) section above.
 interprets the MIR of an all-Rust dependency tree and flags undefined
 behavior and data races; `-Zmiri-many-seeds` reschedules the run per
 seed. [ThreadSanitizer](https://doc.rust-lang.org/unstable-book/compiler-flags/sanitizer.html)
-(`-Zsanitizer=thread`) instruments real threads and reports the races
-the actual schedule happened to produce. Both observe a run after the
+(`-Zsanitizer=thread`) instruments real threads and reports the races the
+actual schedule happened to produce. Both observe a run after the
 fact — "did this execution contain a race?" — where a sync point
 prescribes one: "run the rival operation *now*, on this thread". They
 compose the same way loom/shuttle do: a detector finds a race, a
