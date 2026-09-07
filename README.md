@@ -1231,14 +1231,13 @@ interleaving at a named sync point in real code. The alternatives below
 either **inject failures**, **explore schedules**, **replace the
 environment** (simulators), **detect whatever race the run happens to
 produce**, or **rebuild the API** (mocks, ad-hoc barriers) to force the
-interleaving. None of them lets a
-test say
+interleaving. None of them lets a test say
 "run this closure *in place of* the rival operation, on this thread, with
 these call arguments".
 
 | | what it does | pick it when |
 |---|---|---|
-| [failpoints (`fail`)](#failpoints-the-fail-crate) | named points with a per-name runtime action: panic, early `return(value)`, sleep, probabilistic `p%` triggers; per-hit conditionals via `cfg_callback` or a fixed call-site predicate | an injected failure (EIO, crash, sleep) on a composed path is the whole property |
+| [failpoints (`fail`)](#failpoints-the-fail-crate) | named points with a per-name runtime action: panic, early `return(value)`, sleep, probabilistic `p%` and repeat-limited `cnt*` triggers; per-hit conditionals via `cfg_callback` or a fixed call-site predicate | an injected failure (EIO, crash, sleep) on a composed path is the whole property |
 | [loom](#loom-and-shuttle-exploring-schedulers) | exhaustive interleaving exploration of instrumented primitives | you want to *find* which order breaks the code |
 | [shuttle](#loom-and-shuttle-exploring-schedulers) | randomized scheduler over replacement thread/sync primitives, with deterministic replay | same, at schedules too large to explore exhaustively |
 | [Miri / ThreadSanitizer](#detectors-miri-and-threadsanitizer) | run real (Miri: interpreted) schedules and report the data race or UB they hit | you want to *catch* an unscripted race: Miri for small all-Rust units, TSan for real threads |
@@ -1265,6 +1264,14 @@ That combination — zero API surface, env-controllable, works from
 integration tests and released binaries — makes failpoints the right tool
 for failure injection: fsync that returns EIO, a crash between two writes,
 a sleep that widens a race window.
+
+The global registry is also the tax: fail points are process-wide, and
+cargo runs test threads in parallel, so one test's configured action can
+fire inside another test's code path — hence the `fail` crate's own
+guidance to hold a `FailScenario` lock and move failpoint tests into a
+dedicated test binary. shadow-point's state is thread-local and
+per-`define_sp!` type, so parallel tests in one binary never see each
+other's fires.
 
 A shadow point is the other half of that expressiveness. Hooks are typed
 closures that receive the call's arguments, are installed per-thread
@@ -1319,8 +1326,9 @@ thread behaving in a scripted way.
 [loom](https://docs.rs/loom) exhaustively model-checks interleavings of
 its own synchronization primitives;
 [shuttle](https://github.com/awslabs/shuttle) explores the schedule
-space of std-style threads with a randomized scheduler, replaying a
-failing run deterministically from its seed. Both run the exploration
+space of std-style threads with a randomized (PCT, or bounded-DFS)
+scheduler, replaying a failing run deterministically from its recorded
+schedule string. Both run the exploration
 over their own primitives (`loom::sync`, `shuttle::thread`,
 `shuttle::sync`): the code under test must be ported away from the std
 types, and anything left uninstrumented is invisible to the exploration.
@@ -1346,7 +1354,8 @@ compose the same way loom/shuttle do: a detector finds a race, a
 shadow-point test pins the interleaving that provokes it on demand. The
 cost asymmetry keeps both useful: Miri is orders of magnitude slower
 than real threads and cannot run FFI, so it fits small all-Rust units;
-TSan runs near-native but reports only what that one run produced.
+TSan pays a several-x slowdown on real threads, but reports only what
+that one run produced.
 
 ### Deterministic simulators
 
