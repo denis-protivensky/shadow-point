@@ -26,6 +26,7 @@ to nothing.
 - [Production safety](#production-safety)
 - [Compatibility](#compatibility)
 - [Loom](#loom)
+- [Comparison with similar crates](#comparison-with-similar-crates)
 
 ## Install modes and usage patterns
 
@@ -1222,3 +1223,112 @@ checks is the instrumented code itself; the sync-point machinery is
 invisible to its model.
 
 Modeling the dispatch state with loom analogs is future work.
+
+## Comparison with similar crates
+
+One axis separates the tools: shadow-point **scripts** one chosen
+interleaving at a named sync point in real code. The alternatives below
+either **inject failures** or **explore/simulate schedules**. None of
+them lets a test say "run this closure *in place of* the rival operation,
+on this thread, at this argument".
+
+| | what it does | pick it when |
+|---|---|---|
+| [failpoints (`fail`)](#failpoints-the-fail-crate) | named points with a global, unconditional runtime action | an injected failure (EIO, crash, sleep) on a composed path is the whole property |
+| [loom](#loom-and-shuttle-exploring-schedulers) | exhaustive interleaving exploration of instrumented primitives | you want to *find* which order breaks the code |
+| [shuttle](#loom-and-shuttle-exploring-schedulers) | randomized scheduler with deterministic replay | same, at schedules too large to explore exhaustively |
+| [madsim / turmoil](#deterministic-simulators) | whole-environment simulation (timers, RNG, network) | reproducibility of an entire distributed run is the property |
+| [mocks and hand-rolled barriers](#hand-rolled-mocks-and-barriers) | trait doubles, ad-hoc channels at call sites | the seam can live in the permanent API anyway |
+
+### failpoints (the `fail` crate)
+
+A fail point is an *unnamed-in-code, named-by-string* hook: `fail_point!("wal-fsync")`
+consults a global registry configured at runtime (`fail::cfg("wal-fsync", "return(...)")`
+or the `FAILPOINTS` env var). The action is blind to call arguments and
+shared by every caller of that name — one participant hit, all participants
+hit. Under the `failpoints` feature the macro is live; with the feature off
+it generates nothing, so the instrumentation costs the public API nothing.
+That combination — zero API surface, env-controllable, works from
+integration tests and released binaries — makes failpoints the right tool
+for failure injection: fsync that returns EIO, a crash between two writes,
+a sleep that widens a race window.
+
+A shadow point is the other half of that expressiveness. Hooks are typed
+closures that receive the call's arguments, are installed per-thread
+(`install_guard` intercepts only the installing thread; `install_shared`
+only threads that called `install()`), and can be *conditional*: a
+predicate gate, fire-once, a `sequence` that parks an out-of-order arrival
+at the rendezvous. Properties like "T1 blocks on its first acquire and T2
+does not", "the third call sees the rival already inserted", "count fires
+per key" are not writable against a global name-keyed action.
+
+Decision rule:
+
+- The property decomposes into local module invariants → **shadow-point
+  unit test**: `#[cfg(test)] define_sp!` in the module's own `mod tests`.
+  This is the default and costs nothing — no feature, no public items.
+- An unconditional global action on the public composed path is enough
+  (fsync fails, panic injection on a deterministic single-thread path) →
+  **failpoint**; prefer it, the API price is zero.
+- A *conditional per-thread* stop is needed on a path only reachable
+  through the public API → shadow-point, and you pay a feature tax for it,
+  because a test in `tests/` compiles the lib **without** `cfg(test)` and
+  `invoke!` is `#[cfg(test)]`-gated at the use site:
+  - the Sp type and its guards must become `pub` — the seam leaks into
+    the crate's public API (and the generated items need `missing_docs`
+    allowances);
+  - the declaration must live behind your own feature (a normal-dep, not
+    dev-dep), and keeping hooks live in the feature build means dispatching
+    through `with_dyn` directly instead of `invoke!` — a fork that drifts
+    as the macro evolves;
+  - guards are thread-local, so the async caveat applies unchanged
+    ([Per-worker guards](#per-worker-guards-private-mode-on-real-threads)):
+    on tokio, install inside the `spawn_blocking` closure and coordinate
+    the async body through `TokioAsyncGate` (fire/count/await, no parking)
+    rather than parking a guard across an `.await`.
+
+An integration shadow-point seam is therefore a deliberate exception, not
+a default: land it with its justification. The two tools coexist happily —
+failpoints for the environment misbehaving, shadow-points for the rival
+thread behaving in a scripted way.
+
+### loom and shuttle: exploring schedulers
+
+[loom](#loom) exhaustively model-checks interleavings of its own
+synchronization primitives; [shuttle](https://github.com/awslabs/shuttle)
+explores the schedule space of std-style threads with a randomized
+scheduler, replaying a failing run deterministically from its seed. Both
+answer "does *some* order break this code?" and find the order for you.
+shadow-point answers "does the code survive *this* order?" and the test
+*is* the order — named, reviewed, reproducible run to run without a seed.
+The workflows compose: loom/shuttle discover an interleaving that fails,
+you script the same scenario once as a shadow-point test to pin the fix.
+shadow-point's own loom status (no `cfg(loom)` integration; std primitives
+are invisible to loom's model) is in the [Loom](#loom) section above.
+
+### deterministic simulators
+
+`madsim` (tokio-compatible deterministic simulator for distributed
+systems) and `turmoil` (deterministic network fault simulation) achieve
+reproducibility by *replacing the environment*: tasks, timers, RNG and the
+network run on a simulated single-threaded runtime. That is a different
+layer than a sync point: simulators give you a repeatable whole-system
+run, but you steer time and messages, not "what the competing thread does
+at line N of `insert`" inside your real runtime. For a crash-safe storage
+engine or lock-free structure tested against real threads and a real tokio
+runtime, the simulator's control surface is the wrong shape — and it wants
+to own your runtime.
+
+### hand-rolled mocks and barriers
+
+The most-used "similar crate" is not a crate: trait interfaces with mock
+callbacks (`mockall` and friends), or ad-hoc channels/barriers woven into
+the code so tests can force an interleaving. Both move test structure into
+the production API — a trait object, a hook slot, a `Debug` seam that
+ships — and hand-rolled barriers re-implement, worse, what `sequence`
+parking and `expect_calls` already provide: loud failure with a
+diagnostic instead of a hang, counts checked at drop, fire-once and
+predicates as data. A sync point costs one `invoke!` line at a chosen
+linearization point and compiles to nothing in release. Use mocks for
+*substituting a collaborator's whole behavior*; use a shadow point to
+*shadow one operation at one point* without reshaping the API.
