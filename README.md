@@ -278,6 +278,13 @@ dispatch, guards, and `.expect(n)` behave exactly as with a single
 declaration — the prefix already keeps every public API name distinct;
 only the prefix-free ones collide.
 
+Because the entry struct now lives inside its submodule, `invoke!`
+call sites must reference the scoped path — `invoke!(writer_sp::WriterSp,
+commit())`, not a bare `WriterSp` (a `use writer_sp::WriterSp` in a
+`#[cfg(test)]` context works too). The path resolves only in test
+builds, where the `#[cfg(test)]` submodule exists; in production the
+`invoke!` body is stripped before the path is resolved.
+
 Every generated type carrying `T` (`MyModuleSpGuard<T>`,
 `MyModuleSharedSp<T>`, the builders) requires `T: Send + Sync + 'static`,
 and `install_guard` / `install_shared` carry the same bounds: the state
