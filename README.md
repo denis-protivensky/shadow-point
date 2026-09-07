@@ -90,10 +90,6 @@ The same split has two useful readings:
 shadow-point = "0.3"
 ```
 
-`paste` does not need to be declared: `define_sp!` reaches it through
-shadow-point's own re-export (`$crate::paste`), which also keeps the
-dev-dependency seam setup (below) self-contained.
-
 ### 1. Declare hooks
 
 At module level, gate with `#[cfg(test)]` and call `define_sp!`:
