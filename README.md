@@ -1234,19 +1234,21 @@ on this thread, at this argument".
 
 | | what it does | pick it when |
 |---|---|---|
-| [failpoints (`fail`)](#failpoints-the-fail-crate) | named points with a global, unconditional runtime action | an injected failure (EIO, crash, sleep) on a composed path is the whole property |
+| [failpoints (`fail`)](#failpoints-the-fail-crate) | named points with a per-name runtime action (per-hit conditionals only via `cfg_callback`) | an injected failure (EIO, crash, sleep) on a composed path is the whole property |
 | [loom](#loom-and-shuttle-exploring-schedulers) | exhaustive interleaving exploration of instrumented primitives | you want to *find* which order breaks the code |
 | [shuttle](#loom-and-shuttle-exploring-schedulers) | randomized scheduler with deterministic replay | same, at schedules too large to explore exhaustively |
 | [madsim / turmoil](#deterministic-simulators) | whole-environment simulation (timers, RNG, network) | reproducibility of an entire distributed run is the property |
-| [mocks and hand-rolled barriers](#hand-rolled-mocks-and-barriers) | trait doubles, ad-hoc channels at call sites | the seam can live in the permanent API anyway |
+| [mocks and hand-rolled barriers](#hand-rolled-mocks-and-barriers) | trait doubles, ad-hoc channels at call sites | you accept shipping the test seam in the permanent API (a trait already exists there) |
 
 ### failpoints (the `fail` crate)
 
 A fail point is an *unnamed-in-code, named-by-string* hook: `fail_point!("wal-fsync")`
-consults a global registry configured at runtime (`fail::cfg("wal-fsync", "return(...)")`
-or the `FAILPOINTS` env var). The action is blind to call arguments and
-shared by every caller of that name — one participant hit, all participants
-hit. Under the `failpoints` feature the macro is live; with the feature off
+consults a global registry configured at runtime (`fail::cfg("wal-fsync", "sleep(10)")`
+or the `FAILPOINTS` env var). The action is blind to call arguments; under
+plain `fail::cfg` every caller of the name takes it, and hitting only one
+participant means hand-rolling that logic in a `cfg_callback` — evaluated
+per fire, still with no access to the call's arguments. Under the
+`failpoints` feature the macro is live; with the feature off
 it generates nothing, so the instrumentation costs the public API nothing.
 That combination — zero API surface, env-controllable, works from
 integration tests and released binaries — makes failpoints the right tool
@@ -1267,9 +1269,10 @@ Decision rule:
 - The property decomposes into local module invariants → **shadow-point
   unit test**: `#[cfg(test)] define_sp!` in the module's own `mod tests`.
   This is the default and costs nothing — no feature, no public items.
-- An unconditional global action on the public composed path is enough
-  (fsync fails, panic injection on a deterministic single-thread path) →
-  **failpoint**; prefer it, the API price is zero.
+- A global per-name action on the public composed path is enough
+  (fsync fails, panic injection on a deterministic single-thread path;
+  a `cfg_callback` conditional at most) → **failpoint**; prefer it, the
+  API price is zero.
 - A *conditional per-thread* stop is needed on a path only reachable
   through the public API → shadow-point, and you pay a feature tax for it,
   because a test in `tests/` compiles the lib **without** `cfg(test)` and
