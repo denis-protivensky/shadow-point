@@ -1228,19 +1228,22 @@ Modeling the dispatch state with loom analogs is future work.
 
 One axis separates the tools: shadow-point **scripts** one chosen
 interleaving at a named sync point in real code. The alternatives below
-either **inject failures** or **explore/simulate schedules**. None of
-them lets a test say "run this closure *in place of* the rival operation,
-on this thread, at this argument".
+either **inject failures**, **explore/simulate schedules**, or **detect
+whatever race the run happens to produce**. None of them lets a test say
+"run this closure *in place of* the rival operation, on this thread, at
+this argument".
 
 | | what it does | pick it when |
 |---|---|---|
 | [failpoints (`fail`)](#failpoints-the-fail-crate) | named points with a per-name runtime action (per-hit conditionals only via `cfg_callback`) | an injected failure (EIO, crash, sleep) on a composed path is the whole property |
 | [loom](#loom-and-shuttle-exploring-schedulers) | exhaustive interleaving exploration of instrumented primitives | you want to *find* which order breaks the code |
 | [shuttle](#loom-and-shuttle-exploring-schedulers) | randomized scheduler with deterministic replay | same, at schedules too large to explore exhaustively |
-| [madsim / turmoil](#deterministic-simulators) | whole-environment simulation (timers, RNG, network) | reproducibility of an entire distributed run is the property |
-| [mocks and hand-rolled barriers](#hand-rolled-mocks-and-barriers) | trait doubles, ad-hoc channels at call sites | you accept shipping the test seam in the permanent API (a trait already exists there) |
+| [Miri / ThreadSanitizer](#detectors-miri-and-threadsanitizer) | run real (Miri: interpreted) schedules and report the data race or UB they hit | you want to *catch* an unscripted race: Miri for small all-Rust units, TSan for real threads |
+| [madsim](#deterministic-simulators) | swaps tokio for a simulated deterministic runtime (tasks, timers, RNG, network) | reproducibility of an entire distributed run is the property, and the runtime swap is acceptable |
+| [turmoil](#deterministic-simulators) | deterministic network hardship, every host on one simulated thread | same, on top of a tokio runtime |
+| [mockall and hand-rolled barriers](#hand-rolled-mocks-and-barriers) | trait doubles, ad-hoc channels at call sites | you accept shipping the test seam in the permanent API (a trait already exists there) |
 
-### failpoints (the `fail` crate)
+### failpoints (the [`fail`](https://docs.rs/fail) crate)
 
 A fail point is an *unnamed-in-code, named-by-string* hook: `fail_point!("wal-fsync")`
 consults a global registry configured at runtime (`fail::cfg("wal-fsync", "sleep(10)")`
@@ -1281,14 +1284,16 @@ Decision rule:
     the crate's public API (and the generated items need `missing_docs`
     allowances);
   - the declaration must live behind your own feature (a normal-dep, not
-    dev-dep), and keeping hooks live in the feature build means dispatching
+    dev-dep — see [Using as a dev-dependency](#using-as-a-dev-dependency)),
+    and keeping hooks live in the feature build means dispatching
     through `with_dyn` directly instead of `invoke!` — a fork that drifts
     as the macro evolves;
   - guards are thread-local, so the async caveat applies unchanged
     ([Per-worker guards](#per-worker-guards-private-mode-on-real-threads)):
     on tokio, install inside the `spawn_blocking` closure and coordinate
-    the async body through `TokioAsyncGate` (fire/count/await, no parking)
-    rather than parking a guard across an `.await`.
+    the async body through `TokioAsyncGate`
+    ([Async (tokio) consumers](#async-tokio-consumers); fire/count/await,
+    no parking) rather than parking a guard across an `.await`.
 
 An integration shadow-point seam is therefore a deliberate exception, not
 a default: land it with its justification. The two tools coexist happily —
@@ -1297,10 +1302,11 @@ thread behaving in a scripted way.
 
 ### loom and shuttle: exploring schedulers
 
-[loom](#loom) exhaustively model-checks interleavings of its own
-synchronization primitives; [shuttle](https://github.com/awslabs/shuttle)
-explores the schedule space of std-style threads with a randomized
-scheduler, replaying a failing run deterministically from its seed. Both
+[loom](https://docs.rs/loom) exhaustively model-checks interleavings of
+its own synchronization primitives;
+[shuttle](https://github.com/awslabs/shuttle) explores the schedule
+space of std-style threads with a randomized scheduler, replaying a
+failing run deterministically from its seed. Both
 answer "does *some* order break this code?" and find the order for you.
 shadow-point answers "does the code survive *this* order?" and the test
 *is* the order — named, reviewed, reproducible run to run without a seed.
@@ -1309,26 +1315,49 @@ you script the same scenario once as a shadow-point test to pin the fix.
 shadow-point's own loom status (no `cfg(loom)` integration; std primitives
 are invisible to loom's model) is in the [Loom](#loom) section above.
 
+### Detectors: Miri and ThreadSanitizer
+
+[Miri](https://github.com/rust-lang/miri) (`cargo +nightly miri test`)
+interprets the MIR of an all-Rust dependency tree and flags undefined
+behavior and data races; `-Zmiri-many-seeds` reschedules the run per
+seed. [ThreadSanitizer](https://doc.rust-lang.org/unstable-book/compiler-flags/sanitizer.html)
+(`-Zsanitizer=thread`) instruments real threads and reports the races
+the actual schedule happened to produce. Both observe a run after the
+fact — "did this execution contain a race?" — where a sync point
+prescribes one: "run the rival operation *now*, on this thread". They
+compose the same way loom/shuttle do: a detector finds a race, a
+shadow-point test pins the interleaving that provokes it on demand. The
+cost asymmetry keeps both useful: Miri is orders of magnitude slower
+than real threads and cannot run FFI, so it fits small all-Rust units;
+TSan runs near-native but reports only what that one run produced.
+
 ### deterministic simulators
 
-`madsim` (tokio-compatible deterministic simulator for distributed
-systems) and `turmoil` (deterministic network fault simulation) achieve
-reproducibility by *replacing the environment*: tasks, timers, RNG and the
-network run on a simulated single-threaded runtime. That is a different
-layer than a sync point: simulators give you a repeatable whole-system
-run, but you steer time and messages, not "what the competing thread does
-at line N of `insert`" inside your real runtime. For a crash-safe storage
-engine or lock-free structure tested against real threads and a real tokio
-runtime, the simulator's control surface is the wrong shape — and it wants
-to own your runtime.
+[`madsim`](https://docs.rs/madsim) and
+[`turmoil`](https://docs.rs/turmoil) achieve reproducibility by
+*replacing the environment*, at different depths. `madsim` swaps tokio
+itself for a drop-in simulated runtime (patched `madsim-tokio` plus
+`RUSTFLAGS="--cfg madsim"`): tasks, timers, RNG, the network and process
+crashes all run under the simulator. `turmoil` keeps tokio and puts
+every host on a single simulated thread, introducing hardship through a
+deterministic network and, behind a feature flag, a simulated
+filesystem. That is a different layer than a sync point: simulators
+give you a repeatable whole-system run, but you steer time and
+messages, not "what the competing thread does at line N of `insert`"
+inside your real runtime. For a crash-safe storage engine or lock-free
+structure tested against real threads and a real tokio runtime, the
+simulator's control surface is the wrong shape — the code under test
+runs through the simulator's runtime and shims, not through production
+I/O.
 
 ### hand-rolled mocks and barriers
 
-The most-used "similar crate" is not a crate: trait interfaces with mock
-callbacks (`mockall` and friends), or ad-hoc channels/barriers woven into
-the code so tests can force an interleaving. Both move test structure into
-the production API — a trait object, a hook slot, a `Debug` seam that
-ships — and hand-rolled barriers re-implement, worse, what `sequence`
+The most common alternative is not purpose-built for concurrency:
+[`mockall`](https://docs.rs/mockall) and friends generate trait doubles,
+or ad-hoc channels/barriers are woven into the code so tests can force
+an interleaving. Both move test structure into the production API — a
+trait object, a hook slot, a `Debug` seam that ships — and hand-rolled
+barriers re-implement, worse, what `sequence`
 parking and `expect_calls` already provide: loud failure with a
 diagnostic instead of a hang, counts checked at drop, fire-once and
 predicates as data. A sync point costs one `invoke!` line at a chosen
