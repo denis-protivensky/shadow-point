@@ -1228,8 +1228,10 @@ Modeling the dispatch state with loom analogs is future work.
 
 One axis separates the tools: shadow-point **scripts** one chosen
 interleaving at a named sync point in real code. The alternatives below
-either **inject failures**, **explore/simulate schedules**, or **detect
-whatever race the run happens to produce**. None of them lets a test say
+either **inject failures**, **explore/simulate schedules**, **detect
+whatever race the run happens to produce**, or **rebuild the API**
+(mocks, ad-hoc barriers) to force the interleaving. None of them lets a
+test say
 "run this closure *in place of* the rival operation, on this thread, at
 this argument".
 
@@ -1240,7 +1242,7 @@ this argument".
 | [shuttle](#loom-and-shuttle-exploring-schedulers) | randomized scheduler with deterministic replay | same, at schedules too large to explore exhaustively |
 | [Miri / ThreadSanitizer](#detectors-miri-and-threadsanitizer) | run real (Miri: interpreted) schedules and report the data race or UB they hit | you want to *catch* an unscripted race: Miri for small all-Rust units, TSan for real threads |
 | [madsim](#deterministic-simulators) | swaps tokio for a simulated deterministic runtime (tasks, timers, RNG, network) | reproducibility of an entire distributed run is the property, and the runtime swap is acceptable |
-| [turmoil](#deterministic-simulators) | deterministic network hardship, every host on one simulated thread | same, on top of a tokio runtime |
+| [turmoil](#deterministic-simulators) | deterministic network hardship, every host on one simulated thread | same property, without swapping the runtime |
 | [mockall and hand-rolled barriers](#hand-rolled-mocks-and-barriers) | trait doubles, ad-hoc channels at call sites | you accept shipping the test seam in the permanent API (a trait already exists there) |
 
 ### failpoints (the [`fail`](https://docs.rs/fail) crate)
