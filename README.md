@@ -1228,16 +1228,17 @@ Modeling the dispatch state with loom analogs is future work.
 
 One axis separates the tools: shadow-point **scripts** one chosen
 interleaving at a named sync point in real code. The alternatives below
-either **inject failures**, **explore/simulate schedules**, **detect
-whatever race the run happens to produce**, or **rebuild the API**
-(mocks, ad-hoc barriers) to force the interleaving. None of them lets a
+either **inject failures**, **explore schedules**, **replace the
+environment** (simulators), **detect whatever race the run happens to
+produce**, or **rebuild the API** (mocks, ad-hoc barriers) to force the
+interleaving. None of them lets a
 test say
 "run this closure *in place of* the rival operation, on this thread, with
 these call arguments".
 
 | | what it does | pick it when |
 |---|---|---|
-| [failpoints (`fail`)](#failpoints-the-fail-crate) | named points with a per-name runtime action: panic, early `return(value)`, sleep, probabilistic `p%` triggers; per-hit conditionals only via `cfg_callback` | an injected failure (EIO, crash, sleep) on a composed path is the whole property |
+| [failpoints (`fail`)](#failpoints-the-fail-crate) | named points with a per-name runtime action: panic, early `return(value)`, sleep, probabilistic `p%` triggers; per-hit conditionals via `cfg_callback` or a fixed call-site predicate | an injected failure (EIO, crash, sleep) on a composed path is the whole property |
 | [loom](#loom-and-shuttle-exploring-schedulers) | exhaustive interleaving exploration of instrumented primitives | you want to *find* which order breaks the code |
 | [shuttle](#loom-and-shuttle-exploring-schedulers) | randomized scheduler over replacement thread/sync primitives, with deterministic replay | same, at schedules too large to explore exhaustively |
 | [Miri / ThreadSanitizer](#detectors-miri-and-threadsanitizer) | run real (Miri: interpreted) schedules and report the data race or UB they hit | you want to *catch* an unscripted race: Miri for small all-Rust units, TSan for real threads |
@@ -1251,11 +1252,13 @@ A fail point is an *unnamed-in-code, named-by-string* hook from the
 [`fail`](https://docs.rs/fail) crate: `fail_point!("wal-fsync")` consults
 a global registry configured at runtime (`fail::cfg("wal-fsync", "sleep(10)")`
 or the `FAILPOINTS` env var). The action is blind to call arguments; under
-plain `fail::cfg` every caller of the name takes it, and hitting only one
-participant means hand-rolling that logic in a
-`cfg_callback` — evaluated per fire, but still global: the callback gets
-neither the call's arguments nor any per-thread context for free, so
-per-participant behavior means rebuilding that state inside it by hand.
+plain `fail::cfg` every caller of the name takes it. Narrowing to one
+participant takes either a `cfg_callback` — evaluated per fire, but
+still global: the callback gets neither the call's arguments nor any
+per-thread context for free, so per-participant behavior means
+rebuilding that state inside it by hand — or a call-site predicate
+(`fail_point!(name, cond, |_| {})`), fixed in source and only usable
+where the participant identity is already in scope.
 Under the `failpoints` feature the macro is live; with the feature off it
 generates nothing, so the instrumentation costs the public API nothing.
 That combination — zero API surface, env-controllable, works from
@@ -1358,7 +1361,13 @@ deterministic network and, behind a feature flag, a simulated
 filesystem. That is a different layer than a sync point: simulators
 give you a repeatable whole-system run, but you steer time and
 messages, not "what the competing thread does at line N of `insert`"
-inside your real runtime. For a crash-safe storage engine or lock-free
+inside your real runtime. The nearest approach to a sync point in that
+world is turmoil's unstable `barriers` feature — a source-level
+`trigger(event)` a test-side `Barrier` suspends execution at, filtered
+by an event predicate — and it still cannot run a rival closure *in
+place of* the operation with its call arguments, install per-thread,
+or reach code outside the simulated single-thread runtime. For a
+crash-safe storage engine or lock-free
 structure tested against real threads and a real tokio runtime, the
 simulator's control surface is the wrong shape — the code under test
 runs through the simulator's runtime and shims, not through production
