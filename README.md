@@ -140,7 +140,34 @@ as its own statement or hoist such fires into a function.
 In production `invoke!` compiles to nothing — the `#[cfg(test)]`
 block is stripped.
 
-### 3. Write a test (single thread)
+### 3. Smoke test: verify dispatch
+
+Before trying a race, verify the basic dispatch path. This test installs a
+private guard, checks that the hook receives its declared argument, and
+asserts the expected call count:
+
+```rust,ignore
+#[cfg(test)]
+mod tests {
+    use super::MyModuleSp;
+
+    #[test]
+    fn hook_is_dispatched() {
+        let guard = MyModuleSp::install_guard(());
+
+        guard
+            .before_remove(|_, id| assert_eq!(id, 7))
+            .expect(1);
+
+        shadow_point::invoke!(MyModuleSp, before_remove(7));
+    }
+}
+```
+
+This deliberately avoids threads, a map, and the race scenario; it only
+checks `install_guard` → registration → `invoke!` → closure arguments.
+
+### 4. Worked example: shadow the competing operation
 
 The interesting case is a *shadow*: the hook closure runs the operation
 the competing thread would have run, at the exact linearization point.
@@ -274,4 +301,3 @@ the environment, or reshape the API.
 Dual-licensed, `MIT OR Apache-2.0` (the SPDX field is in
 [Cargo.toml](Cargo.toml)); the MIT text ships as
 [LICENSE-MIT](LICENSE-MIT).
-
