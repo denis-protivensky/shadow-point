@@ -108,9 +108,6 @@ shadow-point answers "does the code survive *this* order?" and the test
 *is* the order — named, reviewed, reproducible run to run without a seed.
 The workflows compose: loom/shuttle discover an interleaving that fails,
 you script the same scenario once as a shadow-point test to pin the fix.
-shadow-point's own loom status (no `cfg(loom)` integration; std primitives
-are invisible to loom's model) is in the README's
-[Loom](../README.md#loom) section.
 
 ## Detectors: Miri and ThreadSanitizer
 

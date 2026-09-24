@@ -30,10 +30,6 @@ The reference material lives in [`docs/`](docs/):
 | [Shared mode](docs/shared-mode.md) | one sync point across threads: lifecycle, the parking rendezvous, `Gate`, worked examples (ordering, parking, counting), caveats |
 | [Integration](docs/integration.md) | shadow-point as a dev-dependency (the seam macro); async (tokio) consumers and `TokioAsyncGate` |
 
-[Comparison with similar crates](#comparison-with-similar-crates) —
-`fail`, loom, shuttle, Miri/TSan, madsim, turmoil, mocks — is its own
-section below, backed by [docs/alternatives.md](docs/alternatives.md).
-
 ## Install modes and usage patterns
 
 There are two install *modes* — how the `invoke!` dispatch is bound to
@@ -69,11 +65,8 @@ One thread under test → pattern 1. Several threads → the trigger is
 by your own gates → pattern 2; the order/counts *are* the assertion →
 pattern 3, and every firing worker installs.
 
-The split has two readings: guard mode is concurrency without
-parallelism (two logical actors alternate deterministically on one real
-thread), and both modes see the guarded value only through `&T` — never
-`&mut` — so the instrumented API must mutate through `&self`. Both are
-spelled out in the
+The split has two readings — concurrency vs parallelism, and `&T`-only
+mutation — spelled out in the
 [guide](docs/guide.md#two-readings-of-the-mode-split).
 
 ## Quick start

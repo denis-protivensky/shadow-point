@@ -153,10 +153,6 @@ builds.
 - **Leaks per-install state** (`Box::leak` by design — normal for test
   instantiation, but do not call `install` in a long-lived loop). Applies
   to `install_shared` too.
-- **Requires the generated bounds** — `T: Send + Sync + 'static`;
-  closures `Send + 'static`, `every` closures also `Sync`. Stated with
-  its rationale under
-  [What `define_sp!` generates](#what-define_sp-generates).
 - **Restores on drop** — the guard binds this thread's dispatch for its
   lifetime and, on drop, restores the previously installed sync point
   (stacked installs unwind LIFO; after the drop, fires on this thread
@@ -261,8 +257,7 @@ immediately (`sync point ordering violation: expected <hook> next but
 ([Parking](shared-mode.md#parking-the-sequence-head-is-a-rendezvous)).
 With no later entry expecting that hook, the fire falls through to
 fire-once instead — an unmatched head does not panic on its own (see
-Registration precedence and lifetime above). A second `sequence(...)`
-call replaces the whole deque, it does not append.
+Registration precedence and lifetime above).
 
 Extra fires (after the sequence is consumed) are silently ignored — an
 empty deque makes the fire fall through to fire-once, and with no
