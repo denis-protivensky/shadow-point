@@ -146,19 +146,31 @@ block is stripped.
 
 ### 3. Write a test (single thread)
 
-```rust
+The interesting case is a *shadow*: the hook closure runs the operation
+the competing thread would have run, at the exact linearization point.
+Here the map's own `insert` fires `before_insert` between "key 1 is free"
+and the write — so the closure steals the slot first, and the outer insert
+is made to lose the race on demand:
+
+```rust,ignore
 #[cfg(test)]
 mod tests {
     #[test]
-    fn insert_triggers_hook() {
-        let data = setup();
-        let guard = MyModuleSp::install_guard(data);
+    fn insert_loses_the_race() {
+        // A concurrent map: interior mutability, mutates through &self.
+        let guard = MyModuleSp::install_guard(my_map());
 
-        guard.before_insert(|data, key| {
-            assert_eq!(key, &42);
+        // before_insert fires at the linearization point: the lookup
+        // already passed ("key 1 is free"), the write has not. Shadow
+        // the rival thread here — take the slot it was about to take.
+        guard.before_insert(|map, key| {
+            map.insert(*key, "rival"); // the competing op, run in place
         }).expect(1);
 
-        guard.insert(42, "hello");
+        // The real insert now finds the key taken: it must report a
+        // duplicate, NOT overwrite the value the hook just wrote.
+        assert!(guard.insert(1, "mine").is_err());
+        assert_eq!(guard.get(&1), Some(&"rival"));
     }
 }
 ```
@@ -166,10 +178,13 @@ mod tests {
 No `use` imports needed — hook names are associated constants on the
 entry-point struct.
 
-Nothing in the example beyond `install_guard` and the registration
-methods is shadow-point API: `setup()` is yours, and
-`guard.insert(42, "hello")` is *your* `T::insert` — the guard derefs to
-`&T`, so the guarded value's own methods are callable through it.
+Beyond `install_guard` and the registration methods, nothing here is
+shadow-point API: `my_map()` is your constructor, and `guard.insert(...)`
+/ `guard.get(...)` are *your* `T`'s methods — the guard derefs to `&T`, so
+the guarded value's own methods are callable through it. The nested
+`map.insert` inside the closure does not recurse into `before_insert`:
+fires of the same sync point on a thread already inside a hook are
+suppressed (see the intro), which is what keeps the count at `.expect(1)`.
 
 This is the private mode: the guard sees only fires from this thread.
 For hooks fired from several threads there are two ways to go — per-worker
