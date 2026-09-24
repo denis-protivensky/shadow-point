@@ -74,7 +74,9 @@ shadow-point = { version = "0.3", features = ["tokio-async"] }
 ```
 
 The feature pulls in optional `tokio` (default-features off, `rt` +
-`sync` + `macros`, ≥ 1.21); version and MSRV details are in the
+`sync` + `macros`, ≥ 1.21); the floor is deliberately conservative —
+`Notified::enable`, which `wait_at_least` needs, shipped in tokio 1.19,
+and the manifest rounds up to 1.21. Version and MSRV details are in the
 README's [Compatibility](../README.md#compatibility) section. Enable
 `tokio-async` as a **dev**-dependency in your project — production
 builds keep the seam-cfg-stripped zero-cost property. If your toolchain

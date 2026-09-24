@@ -233,10 +233,16 @@ guard.sequence(|s| {
 guard.expect_calls(MyModuleSp::after_commit, 1);
 ```
 
-Each `s.hook(closure)` pushes an entry. On fire, the front entry must match
-the hook — otherwise panic with an ordering violation message. A second
-`sequence(...)` call replaces the whole deque, it does not append (see
-Registration precedence and lifetime above).
+Each `s.hook(closure)` pushes an entry. On fire, the head entry must match
+the hook. A fire of a *different* hook is an ordering violation only when
+some *later* entry expects the hook that fired — then private mode panics
+immediately (`sync point ordering violation: expected <hook> next but
+<hook> fired`) and shared mode parks the arrival at the head
+([Parking](shared-mode.md#parking-the-sequence-head-is-a-rendezvous)).
+With no later entry expecting that hook, the fire falls through to
+fire-once instead — an unmatched head does not panic on its own (see
+Registration precedence and lifetime above). A second `sequence(...)`
+call replaces the whole deque, it does not append.
 
 Extra fires (after the sequence is consumed) are silently ignored — an
 empty deque makes the fire fall through to fire-once, and with no

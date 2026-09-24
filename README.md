@@ -155,6 +155,11 @@ is made to lose the race on demand:
 ```rust,ignore
 #[cfg(test)]
 mod tests {
+    // The entry point lives in the parent module — the file that ran
+    // `define_sp!`. (If the declaration sits in its own `mod writer_sp`,
+    // import it from there: `use super::writer_sp::WriterSp;`.)
+    use super::MyModuleSp;
+
     #[test]
     fn insert_loses_the_race() {
         // A concurrent map: interior mutability, mutates through &self.
@@ -175,8 +180,9 @@ mod tests {
 }
 ```
 
-No `use` imports needed — hook names are associated constants on the
-entry-point struct.
+`MyModuleSp` is the only import: a test module nested inside the
+instrumented file takes it from the parent module, and hooks need no
+import at all — they are associated constants on the entry-point struct.
 
 Beyond `install_guard` and the registration methods, nothing here is
 shadow-point API: `my_map()` is your constructor, and `guard.insert(...)`
