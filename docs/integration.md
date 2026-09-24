@@ -1,7 +1,6 @@
 # Integration: dev-dependency seam and async (tokio) consumers
 
-Moved out of the [README](../README.md). Hook dispatch semantics referenced
-below are in [guide.md](guide.md) and [shared-mode.md](shared-mode.md).
+Dispatch semantics: [guide.md](guide.md) and [shared-mode.md](shared-mode.md).
 
 ## Using as a dev-dependency
 

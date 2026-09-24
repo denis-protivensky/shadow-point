@@ -1,7 +1,6 @@
 # Shared sync points across threads
 
-Moved out of the [README](../README.md). The private-guard API, dispatch
-order, and hook arguments are in [guide.md](guide.md).
+The private-guard API, dispatch order, and hook arguments are in [guide.md](guide.md).
 
 ## Shared mode: one sync point across threads
 

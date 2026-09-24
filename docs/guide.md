@@ -1,7 +1,6 @@
 # Private mode, hook arguments, and the `define_sp!` reference
 
-Moved out of the [README](../README.md) to keep it scannable. Shared sync
-points (cross-thread sequences, parking, `Gate`) live in
+Shared sync points (cross-thread sequences, parking, `Gate`) live in
 [shared-mode.md](shared-mode.md); the dev-dependency seam and tokio support
 in [integration.md](integration.md).
 
@@ -54,17 +53,11 @@ associated hook constants; the internal machinery (`__Sp`,
 `SeqEntry`, the thread-local, …) stays private.
 
 One `define_sp!` per module. Besides the prefixed names in the table
-(derived from the prefix via `paste!`), the macro emits a set of names
-that do not derive from the prefix: the
-`use HookId` import, the module-private machinery (`__Sp`, `__SpDefault`,
-`__SP_DEFAULT`, `__SP_TL`, `SeqEntry`, `EveryClosures`), and two
-un-prefixed types that carry the visibility token — `EveryBuilder` and
-`SpExpect` (both already in the table above). Two sync points generated
-side by side in one module collide on each of those names — E0252 for
-the duplicate `HookId` import, E0428 for each redefined name, then a
-cascade as the second invocation binds to the first one's types:
-E0034 (multiple applicable items), E0592 (duplicate impls),
-E0119/E0308 (conflicting impls, mismatched types).
+(derived from the prefix via `paste!`), the macro emits names that do not
+derive from the prefix: the `use HookId` import, module-private machinery
+(`__Sp`, `__SpDefault`, `__SP_DEFAULT`, `__SP_TL`, `SeqEntry`,
+`EveryClosures`), and the visibility-bearing `EveryBuilder` / `SpExpect`
+types. Two declarations in one module collide on those names.
 
 The usual layout avoids the issue by construction — one sync point per
 file, declared at the top of the production module it instruments. When
@@ -334,11 +327,9 @@ they are dropped before counting). `guard.expect_calls(hook, n)`
 declares a hook's total count without registering any closure; it works
 for hooks you never registered too — `expect_calls(hook, 0)` asserts
 the hook never fired. `.expect(n)` chained on a fire-once registration
-sets the same counter expectation; `expect_calls` exists to declare
-counts independently of closures (see the `expect_calls` line in the
-Sequence example above). A later call for the same hook replaces the
-earlier expectation — including a `.expect()` chained onto a fresh
-fire-once registration (last write wins).
+sets the same counter expectation (see **Registration precedence and
+lifetime**); `expect_calls` exists to declare counts independently of
+closures.
 
 In shared mode the count is aggregated across all bound threads and
 asserted at the last `Arc` drop instead (see
@@ -492,7 +483,6 @@ thread's log is complete on its own.
 ```rust,ignore
 use shadow_point::{Gate, PARK_TIMEOUT};
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 
 /// The instrumented API (stands in for the real one under test): its
 /// `invoke!` sites dispatch into whichever guard is bound on the
@@ -505,12 +495,10 @@ fn real_insert(key: i32) {
 
 #[test]
 fn t1_inserts_before_t2_under_gate_choreography() {
-    let seen = Arc::new(AtomicUsize::new(0));
     // Cross-thread ORDER is enforced by the test's own gates, not by a
     // shared sequence. `first_done` proves T1's before_insert completed.
     let first_done = Arc::new(Gate::new());
 
-    let seen_t1 = seen.clone();
     let done_t1 = first_done.clone();
     let t1 = std::thread::spawn(move || {
         // Each worker binds its OWN private guard: hooks registered
@@ -520,21 +508,18 @@ fn t1_inserts_before_t2_under_gate_choreography() {
         guard
             .before_insert(move |_, key| {
                 assert_eq!(key, &1, "T1 inserts first");
-                seen_t1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 done_t1.set(); // completion signal for T2's turn
             })
             .expect(1); // T1's own hook count, checked at this guard's Drop
         real_insert(1); // the instrumented API fires this thread's hooks
     });
 
-    let seen_t2 = seen.clone();
     let wait_t2 = first_done.clone();
     let t2 = std::thread::spawn(move || {
         let guard = MyModuleSp::install_guard(());
         guard
             .before_insert(move |_, key| {
                 assert_eq!(key, &2, "T2 inserts second");
-                seen_t2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })
             .expect(1);
         // Ordered *after* T1's hook completes — the gate does what a
@@ -545,7 +530,6 @@ fn t1_inserts_before_t2_under_gate_choreography() {
 
     t1.join().unwrap(); // each guard — and its expect(1) — drops in-thread
     t2.join().unwrap();
-    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 ```
 

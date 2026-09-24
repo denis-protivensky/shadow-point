@@ -1,7 +1,6 @@
 # Comparison with similar crates
 
-Moved out of the [README](../README.md). shadow-point's own loom status is
-in the README's [Loom](../README.md#loom) section.
+shadow-point's own loom status is in the README's [Loom](../README.md#loom) section.
 
 One axis separates the tools: shadow-point **scripts** one chosen
 interleaving at a named sync point in real code. The alternatives below

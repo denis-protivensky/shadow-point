@@ -135,9 +135,8 @@ block is stripped.
 
 ### 3. Smoke test: verify dispatch
 
-Before trying a race, verify the basic dispatch path. This test installs a
-private guard, checks that the hook receives its declared argument, and
-asserts the expected call count:
+Before trying a race, verify the basic dispatch path. This deliberately avoids
+threads, a map, and the race scenario.
 
 ```rust,ignore
 #[cfg(test)]
@@ -156,9 +155,6 @@ mod tests {
     }
 }
 ```
-
-This deliberately avoids threads, a map, and the race scenario; it only
-checks `install_guard` → registration → `invoke!` → closure arguments.
 
 ### 4. Worked example: shadow the competing operation
 
