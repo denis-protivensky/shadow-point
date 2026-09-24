@@ -5,6 +5,25 @@ points (cross-thread sequences, parking, `Gate`) live in
 [shared-mode.md](shared-mode.md); the dev-dependency seam and tokio support
 in [integration.md](integration.md).
 
+## Two readings of the mode split
+
+The same two modes (and the three usage patterns built on them) are worth
+reading twice:
+
+- **Concurrency vs parallelism.** Guard mode is concurrency without
+  parallelism: two logical actors — the operation under test and the
+  interferer — alternate at the linearization point, deterministically,
+  on one real thread; nothing actually races. Shared mode adds the
+  parallelism: real threads race for real, and `sequence`/`Gate` pin
+  the interleaving down so the chosen scenario reproduces run to run.
+- **Interior mutability.** The guard derefs to `&T`, and every hook
+  closure receives the same `&T` — never `&mut`. The operation under
+  test and the interferer share one value through shared references,
+  so the instrumented API must mutate through `&self`. That is exactly
+  what lets a hook closure perform the rival operation at the
+  linearization point — the `map.insert(*key, "rival")` pattern in
+  [What you can test](#what-you-can-test).
+
 ## What `define_sp!` generates
 
 Given `prefix MyModule`, the macro generates:
@@ -134,9 +153,10 @@ builds.
 - **Leaks per-install state** (`Box::leak` by design — normal for test
   instantiation, but do not call `install` in a long-lived loop). Applies
   to `install_shared` too.
-- **Requires `T: Send + Sync + 'static`** — and registered closures must
-  be `Send + 'static` (`every` closures additionally `Sync`): the state
-  is leaked and may cross threads.
+- **Requires the generated bounds** — `T: Send + Sync + 'static`;
+  closures `Send + 'static`, `every` closures also `Sync`. Stated with
+  its rationale under
+  [What `define_sp!` generates](#what-define_sp-generates).
 - **Restores on drop** — the guard binds this thread's dispatch for its
   lifetime and, on drop, restores the previously installed sync point
   (stacked installs unwind LIFO; after the drop, fires on this thread

@@ -19,6 +19,8 @@ to nothing.
 - [Production safety](#production-safety)
 - [Compatibility](#compatibility)
 - [Loom](#loom)
+- [Comparison with similar crates](#comparison-with-similar-crates)
+- [License](#license)
 
 The reference material lives in [`docs/`](docs/):
 
@@ -27,7 +29,10 @@ The reference material lives in [`docs/`](docs/):
 | [Guide](docs/guide.md) | what `define_sp!` generates; private-mode guard API and dispatch order; fire-once, `sequence`, predicate-gated entries, `every`, `expect_calls`; hook arguments; per-worker guards; worked "what you can test" scenarios; `current_fire()` and panic-message formats |
 | [Shared mode](docs/shared-mode.md) | one sync point across threads: lifecycle, the parking rendezvous, `Gate`, worked examples (ordering, parking, counting), caveats |
 | [Integration](docs/integration.md) | shadow-point as a dev-dependency (the seam macro); async (tokio) consumers and `TokioAsyncGate` |
-| [Alternatives](docs/alternatives.md) | comparison with `fail`, loom, shuttle, Miri/TSan, madsim, turmoil, mocks — and when to pick which |
+
+[Comparison with similar crates](#comparison-with-similar-crates) —
+`fail`, loom, shuttle, Miri/TSan, madsim, turmoil, mocks — is its own
+section below, backed by [docs/alternatives.md](docs/alternatives.md).
 
 ## Install modes and usage patterns
 
@@ -64,21 +69,12 @@ One thread under test → pattern 1. Several threads → the trigger is
 by your own gates → pattern 2; the order/counts *are* the assertion →
 pattern 3, and every firing worker installs.
 
-The same split has two useful readings:
-
-- **Concurrency vs parallelism.** Guard mode is concurrency without
-  parallelism: two logical actors — the operation under test and the
-  interferer — alternate at the linearization point, deterministically,
-  on one real thread; nothing actually races. Shared mode adds the
-  parallelism: real threads race for real, and `sequence`/`Gate` pin
-  the interleaving down so the chosen scenario reproduces run to run.
-- **Interior mutability.** The guard derefs to `&T`, and every hook
-  closure receives the same `&T` — never `&mut`. The operation under
-  test and the interferer share one value through shared references,
-  so the instrumented API must mutate through `&self`. That is exactly
-  what lets a hook closure perform the rival operation at the
-  linearization point — the `map.insert(*key, "rival")` pattern in the
-  [guide's examples](docs/guide.md#what-you-can-test).
+The split has two readings: guard mode is concurrency without
+parallelism (two logical actors alternate deterministically on one real
+thread), and both modes see the guarded value only through `&T` — never
+`&mut` — so the instrumented API must mutate through `&self`. Both are
+spelled out in the
+[guide](docs/guide.md#two-readings-of-the-mode-split).
 
 ## Quick start
 
@@ -230,7 +226,9 @@ install site — formats and details are in the
 
 ## Production safety
 
-- `invoke!` compiles to `{}` outside `#[cfg(test)]`.
+- `invoke!` expands to a `#[cfg(test)]`-attributed block; outside test
+  builds the attribute strips the whole statement, so the call site
+  compiles to nothing (not even an empty block).
 - `define_sp!` is gated with `#[cfg(test)]` by the caller.
 - Zero cost — verified with `cargo build --release`.
 
@@ -244,7 +242,8 @@ non-default `tokio-async` feature, optional `tokio` (default-features off,
 — default builds never resolve tokio; tokio ≤ 1.38 is within the crate's
 MSRV (tokio 1.38 requires Rust ≥ 1.63), while tokio ≥ 1.39 requires
 Rust ≥ 1.70. In test builds a hook fire costs a TLS read plus a few mutex
-operations; uninstalled threads dispatch to a no-op impl.
+operations; uninstalled threads dispatch to a no-op impl. The full public
+API is documented at [`docs.rs/shadow-point`](https://docs.rs/shadow-point).
 
 ## Loom
 
@@ -269,4 +268,10 @@ rule for each — is in
 *scripts* one chosen interleaving at a named point in real code, where
 the alternatives inject failures, explore or detect schedules, replace
 the environment, or reshape the API.
+
+## License
+
+Dual-licensed, `MIT OR Apache-2.0` (the SPDX field is in
+[Cargo.toml](Cargo.toml)); the MIT text ships as
+[LICENSE-MIT](LICENSE-MIT).
 
