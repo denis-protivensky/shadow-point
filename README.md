@@ -287,6 +287,7 @@ the environment, or reshape the API.
 
 ## License
 
-Dual-licensed, `MIT OR Apache-2.0` (the SPDX field is in
-[Cargo.toml](Cargo.toml)); the MIT text ships as
-[LICENSE-MIT](LICENSE-MIT).
+Dual-licensed under your choice of either the MIT license or the Apache
+License, Version 2.0. The SPDX field is in [Cargo.toml](Cargo.toml); the
+texts ship as [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
