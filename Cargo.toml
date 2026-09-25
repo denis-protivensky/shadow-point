@@ -11,7 +11,15 @@ categories = ["development-tools::testing"]
 
 [dependencies]
 paste = "1.0"
-tokio = { version = "1.21", optional = true, default-features = false, features = ["rt", "sync", "macros"] }
+# The library uses `tokio::sync::Notify` and `tokio::pin!` only. `pin!` is
+# re-exported outside `cfg_macros!`, so `rt`/`macros` are not needed here —
+# and dropping `macros` also drops the `tokio-macros` -> `quote`/`syn` chain
+# that raised the feature's MSRV. `rt` + `macros` stay in dev-dependencies
+# for `tests/tokio_async_gate.rs`.
+tokio = { version = "1.21", optional = true, default-features = false, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1.21", default-features = false, features = ["rt", "macros"] }
 
 [features]
 tokio-async = ["dep:tokio"]
