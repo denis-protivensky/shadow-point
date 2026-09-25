@@ -81,8 +81,7 @@ fn sequence_out_of_order_panics() {
         r.is_err(),
         "firing `b` with `a` at the sequence head must panic"
     );
-    assert_panic_says_ordering_violation(&r, "`b` before `a`");
-    assert_panic_tail_is(&r, "expected `a` next but `b` fired");
+    assert_ordering_panic(&r, "`b` before `a`", "expected `a` next but `b` fired");
     // Nothing was consumed by the failed fire: `a` is still consumable.
     shadow_point::invoke!(single::SingleSp, a(0));
     drop(g);
@@ -126,8 +125,11 @@ fn optional_head_not_skipped_in_private_mode() {
     // later matching entry still means ordering violation.
     let r = std::panic::catch_unwind(|| fire_b(1));
     assert!(r.is_err(), "optional head is not skipped in private mode");
-    assert_panic_says_ordering_violation(&r, "`b` before optional `a`");
-    assert_panic_tail_is(&r, "expected `a` next but `b` fired");
+    assert_ordering_panic(
+        &r,
+        "`b` before optional `a`",
+        "expected `a` next but `b` fired",
+    );
     drop(g);
 }
 
@@ -149,24 +151,14 @@ fn panic_message(r: &std::thread::Result<()>) -> String {
     }
 }
 
-/// Pins the ordering-violation panic prefix (frozen by the cross-thread
-/// rework) instead of accepting any panic from the dispatch.
-fn assert_panic_says_ordering_violation(r: &std::thread::Result<()>, what: &str) {
+/// Pins the ordering-violation panic: the frozen prefix plus the
+/// parameterized tail (`expected `{}` next but `{}` fired`), so
+/// swapped/garbled hook names are caught, not just the prefix.
+fn assert_ordering_panic(r: &std::thread::Result<()>, what: &str, tail: &str) {
     let msg = panic_message(r);
     assert!(
-        msg.contains("sync point ordering violation"),
-        "unexpected panic message for {what}: {msg:?}"
-    );
-}
-
-/// Pins the parameterized tail of the ordering-violation message
-/// (`expected `{}` next but `{}` fired`) so swapped/garbled hook names in
-/// the panic are caught, not just the frozen prefix.
-fn assert_panic_tail_is(r: &std::thread::Result<()>, tail: &str) {
-    let msg = panic_message(r);
-    assert!(
-        msg.contains(tail),
-        "panic message does not contain expected tail {tail:?}: {msg:?}"
+        msg.contains("sync point ordering violation") && msg.contains(tail),
+        "unexpected panic for {what} (want tail {tail:?}): {msg:?}"
     );
 }
 
