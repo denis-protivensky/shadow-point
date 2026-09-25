@@ -11,7 +11,18 @@ categories = ["development-tools::testing"]
 
 [dependencies]
 paste = "1.0"
-tokio = { version = "1.21", optional = true, default-features = false, features = ["rt", "sync", "macros"] }
+# The library uses `tokio::sync::Notify` and `tokio::pin!` only. `pin!` is
+# re-exported outside `cfg_macros!`, so `rt`/`macros` are not needed here —
+# and dropping `macros` also drops the `tokio-macros` -> `quote`/`syn` chain
+# that raised the feature's MSRV. dev-deps take `rt` only (no `macros`): the
+# test uses `Builder`/`spawn`/`await`, never `#[tokio::test]` or `join!`, so
+# the proc-macro chain stays out of the test graph. 1.65 builds still need
+# tokio pinned in the lockfile (`cargo update -p tokio --precise 1.21.2`);
+# see README's Compatibility section for version floors.
+tokio = { version = "1.21", optional = true, default-features = false, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1.21", default-features = false, features = ["rt"] }
 
 [features]
 tokio-async = ["dep:tokio"]

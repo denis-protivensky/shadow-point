@@ -73,16 +73,10 @@ pub fn trace_enabled() -> bool {
 ///
 /// The gate is panic-safe: a poisoned lock (a panicking waiter) is
 /// transparently recovered via [`into_inner`](std::sync::PoisonError::into_inner).
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Gate {
     flag: std::sync::Mutex<bool>,
     cv: std::sync::Condvar,
-}
-
-impl Default for Gate {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Gate {
@@ -191,7 +185,7 @@ impl Gate {
 /// `tokio` in when the `tokio-async` feature is enabled — default builds resolve
 /// neither tokio nor this type.
 #[cfg(feature = "tokio-async")]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TokioAsyncGate(std::sync::Arc<Inner>);
 
 #[cfg(feature = "tokio-async")]
@@ -199,13 +193,6 @@ pub struct TokioAsyncGate(std::sync::Arc<Inner>);
 struct Inner {
     count: std::sync::atomic::AtomicUsize,
     woke: tokio::sync::Notify,
-}
-
-#[cfg(feature = "tokio-async")]
-impl Default for TokioAsyncGate {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 #[cfg(feature = "tokio-async")]
@@ -532,7 +519,7 @@ macro_rules! define_sp {
 
             // ── Hook enum ─────────────────────────────────────────────
 
-            #[repr(u64)]
+            #[repr(usize)]
             #[derive(Debug, Clone, Copy, PartialEq, Eq)]
             #[allow(non_camel_case_types, dead_code)]
             $vis enum [<$prefix Hook>] {
@@ -540,16 +527,14 @@ macro_rules! define_sp {
             }
 
             impl [<$prefix Hook>] {
-                /// Discriminant: the hash-map key for per-hook counts.
-                #[inline]
-                fn id(&self) -> u64 {
-                    *self as u64
-                }
+                /// Hook names indexed by discriminant.
+                const NAMES: &'static [&'static str] =
+                    &[$(stringify!($method)),+];
+                /// Number of hooks: the length of the counter arrays.
+                const COUNT: usize = Self::NAMES.len();
                 /// Shown in drop-time assertion failures.
                 fn name(&self) -> &'static str {
-                    match self {
-                        $( [<$prefix Hook>]::$method => stringify!($method), )+
-                    }
+                    Self::NAMES[*self as usize]
                 }
             }
 
@@ -665,12 +650,13 @@ macro_rules! define_sp {
                 sequence_cv: ::std::sync::Condvar,
                 shared: bool,
                 installed_at: &'static std::panic::Location<'static>,
-                calls: ::std::sync::Mutex<
-                    ::std::collections::HashMap<u64, (&'static str, usize)>
-                >,
-                expected: ::std::sync::Mutex<
-                    ::std::collections::HashMap<u64, (&'static str, usize)>
-                >,
+                // Per-hook counters, indexed by `Hook` discriminant. Lock
+                // free on the fire path: a cross-thread fire only bumps its
+                // own slot, never a shared map. One slot per hook costs
+                // 24 bytes — a sync point with hundreds of hooks should go
+                // back to a map.
+                calls: [::std::sync::atomic::AtomicUsize; [<$prefix Hook>]::COUNT],
+                expected: ::std::sync::Mutex<[Option<usize>; [<$prefix Hook>]::COUNT]>,
             }
 
             #[allow(dead_code)]
@@ -691,31 +677,29 @@ macro_rules! define_sp {
                         sequence_cv: ::std::sync::Condvar::new(),
                         shared: false,
                         installed_at,
-                        calls: ::std::sync::Mutex::new(
-                            ::std::collections::HashMap::new()
-                        ),
+                        // `from_fn`, not `Default::default()`: std only
+                        // implements `[AtomicUsize; N]: Default` for N ≤ 32,
+                        // which would cap the hook count.
+                        calls: ::std::array::from_fn(|_| {
+                            ::std::sync::atomic::AtomicUsize::new(0)
+                        }),
                         expected: ::std::sync::Mutex::new(
-                            ::std::collections::HashMap::new()
+                            [None; [<$prefix Hook>]::COUNT]
                         ),
                     }
                 }
 
                 fn bump_call(&self, hook: [<$prefix Hook>]) -> usize {
-                    let mut calls = self
-                        .calls
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let entry = calls.entry(hook.id()).or_insert((hook.name(), 0));
-                    let idx = entry.1;
-                    entry.1 += 1;
-                    idx
+                    self.calls[hook as usize].fetch_add(
+                        1, ::std::sync::atomic::Ordering::SeqCst,
+                    )
                 }
 
                 fn set_expected(&self, hook: [<$prefix Hook>], n: usize) {
                     self.expected
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(hook.id(), (hook.name(), n));
+                        [hook as usize] = Some(n);
                 }
 
                 // ── Registration/assertion helpers ────────────────────
@@ -785,13 +769,15 @@ macro_rules! define_sp {
                         .expected
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let calls = self.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    for (id, (name, expected)) in expected.iter() {
-                        let actual = calls.get(id).map_or(0, |(_, c)| *c);
+                    for (i, expected) in expected.iter().enumerate() {
+                        let Some(expected) = expected else { continue };
+                        let actual = self.calls[i]
+                            .load(::std::sync::atomic::Ordering::SeqCst);
                         assert_eq!(
                             actual, *expected,
-                            "sync point hook `{name}` fired {actual} \
+                            "sync point hook `{}` fired {actual} \
                              time(s), expected {expected} ({}installed at {})",
+                            [<$prefix Hook>]::NAMES[i],
                             if shared { "shared, " } else { "" },
                             self.installed_at,
                         );

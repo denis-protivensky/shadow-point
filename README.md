@@ -253,7 +253,7 @@ MSRV is Rust 1.65 (edition 2021). The only default dependency is `paste`, used
 at macro-expansion time and re-exported by the crate — `define_sp!` reaches it
 via `$crate::paste`, so consumers never declare it themselves. Behind the
 non-default `tokio-async` feature, optional `tokio` (default-features off,
-`rt` + `sync` + `macros` features, ≥ 1.21) is added
+`sync` only, ≥ 1.21) is added
 — default builds never resolve tokio; tokio ≤ 1.38 is within the crate's
 MSRV (tokio 1.38 requires Rust ≥ 1.63), while tokio ≥ 1.39 requires
 Rust ≥ 1.70. In test builds a hook fire costs a TLS read plus a few mutex

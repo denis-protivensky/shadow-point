@@ -24,7 +24,7 @@ mod ag {
 /// The motivating case: an awaited future fires milestones that the test
 /// body observes without parking. Determinism rests on `wait_at_least`
 /// enabling its `Notify` slot before reading the counter — NOT on the
-/// argument order of `join!`: whichever future is polled first, either the
+/// poll order of the spawned `firing` future: whichever runs first, either the
 /// waiter sees `count == 0` and sleeps until a fire wakes it, or the fires
 /// already landed and the post-`enable()` check returns immediately.
 /// With std `Gate::wait` this exact shape hangs forever (single executor
@@ -48,11 +48,15 @@ fn current_thread_body_waits_on_future_fires() {
         let _guard = bound.install();
         gate.wait_at_least(0).await; // n == 0 returns immediately
         let waiting = gate.wait_at_least(2);
-        let firing = async {
+        // `spawn`, not `join!`: keeps the `macros` feature (and its
+        // proc-macro chain) out of the dev-dep graph. Order not
+        // load-bearing — see doc; `spawn` already queued the fires.
+        let firing = tokio::spawn(async {
             shadow_point::invoke!(ag::AgSp, a(0));
             shadow_point::invoke!(ag::AgSp, a(1));
-        };
-        tokio::join!(waiting, firing); // order not load-bearing — see doc
+        });
+        waiting.await;
+        firing.await.unwrap();
         assert_eq!(gate.count(), 2);
     });
     drop(shared);
