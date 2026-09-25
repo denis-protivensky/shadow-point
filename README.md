@@ -99,7 +99,7 @@ shadow_point::define_sp! {
 In production builds `#[cfg(test)]` removes the call entirely.
 
 One `define_sp!` per module: the macro emits prefix-free names
-(`__Sp`, `EveryBuilder`, …) that collide when two invocations share a
+(`__Sp`, `EveryClosures`, …) that collide when two invocations share a
 module — keep sync points in separate files, or give each its own
 `mod { … }` inside one file. Scoping the declaration also scopes its
 entry point, so `invoke!` call sites outside that module must name the
@@ -235,8 +235,9 @@ Output:
 
 Useful for discovering expected sequences and call counts. The same
 check is available programmatically as `shadow_point::trace_enabled()`.
-Inside a hook closure, `current_fire()` reports the hook name, the
-fire index, and the firing thread; every drop assertion prints the
+Inside a hook closure, `current_fire()` reports the hook name and the
+fire index (the closure runs on the firing thread, so thread info is
+`std::thread::current()`); every drop assertion prints the
 install site — formats and details are in the
 [debugging reference](docs/guide.md#debugging-reference).
 
