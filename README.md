@@ -98,13 +98,11 @@ shadow_point::define_sp! {
 
 In production builds `#[cfg(test)]` removes the call entirely.
 
-One `define_sp!` per module: the macro emits prefix-free names
-(`__Sp`, `EveryClosures`, …) that collide when two invocations share a
-module — keep sync points in separate files, or give each its own
-`mod { … }` inside one file. Scoping the declaration also scopes its
-entry point, so `invoke!` call sites outside that module must name the
-module path (`invoke!(writer_sp::WriterSp, …)`) — see the
-[guide](docs/guide.md#what-define_sp-generates) for the full picture.
+One `define_sp!` per module — the macro also emits prefix-free names
+(`__Sp`, `EveryClosures`, …), so two invocations in one module collide.
+Separate modules fix it (the usual layout is one sync point per file); the
+collision list and the `invoke!` path rule it implies are in
+[What `define_sp!` generates](docs/guide.md#what-define_sp-generates).
 
 ### 2. Insert `invoke!` calls
 
