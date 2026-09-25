@@ -652,9 +652,9 @@ macro_rules! define_sp {
                 installed_at: &'static std::panic::Location<'static>,
                 // Per-hook counters, indexed by `Hook` discriminant. Lock
                 // free on the fire path: a cross-thread fire only bumps its
-                // own slot, never the whole map. ponytail: one slot per
-                // hook costs 24 bytes each — a sync point with hundreds of
-                // hooks should go back to a map.
+                // own slot, never a shared map. One slot per hook costs
+                // 24 bytes — a sync point with hundreds of hooks should go
+                // back to a map.
                 calls: [::std::sync::atomic::AtomicUsize; [<$prefix Hook>]::COUNT],
                 expected: ::std::sync::Mutex<[Option<usize>; [<$prefix Hook>]::COUNT]>,
             }
@@ -677,7 +677,12 @@ macro_rules! define_sp {
                         sequence_cv: ::std::sync::Condvar::new(),
                         shared: false,
                         installed_at,
-                        calls: Default::default(),
+                        // `from_fn`, not `Default::default()`: std only
+                        // implements `[AtomicUsize; N]: Default` for N ≤ 32,
+                        // which would cap the hook count.
+                        calls: ::std::array::from_fn(|_| {
+                            ::std::sync::atomic::AtomicUsize::new(0)
+                        }),
                         expected: ::std::sync::Mutex::new(
                             [None; [<$prefix Hook>]::COUNT]
                         ),
