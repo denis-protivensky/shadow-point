@@ -54,7 +54,7 @@ associated hook constants; the internal machinery (`__Sp`,
 
 One `define_sp!` per module. Besides the prefixed names in the table
 (derived from the prefix via `paste!`), the macro emits names that do not
-derive from the prefix: the `use HookId` import, module-private machinery
+derive from the prefix: module-private machinery
 (`__Sp`, `__SpDefault`, `__SP_DEFAULT`, `__SP_TL`, `SeqEntry`), and the
 visibility-bearing `EveryClosures` / `SpExpect` types. Two declarations
 in one module collide on those names.
