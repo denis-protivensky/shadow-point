@@ -99,7 +99,7 @@ shadow_point::define_sp! {
 In production builds `#[cfg(test)]` removes the call entirely.
 
 One `define_sp!` per module: the macro emits prefix-free names
-(`__Sp`, `EveryBuilder`, …) that collide when two invocations share a
+(`__Sp`, `EveryClosures`, …) that collide when two invocations share a
 module — keep sync points in separate files, or give each its own
 `mod { … }` inside one file. Scoping the declaration also scopes its
 entry point, so `invoke!` call sites outside that module must name the

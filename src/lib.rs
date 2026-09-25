@@ -269,12 +269,10 @@ impl TokioAsyncGate {
 pub struct FireInfo {
     /// Name of the hook being dispatched.
     pub hook: &'static str,
-    /// Zero-based index of this fire on this hook (global across threads).
+    /// Zero-based index of this fire on this hook (global across
+    /// threads). The closure runs on the firing thread, so
+    /// `std::thread::current()` is the thread info — no fields for it.
     pub index: usize,
-    /// Id of the thread the hook fired on.
-    pub thread_id: std::thread::ThreadId,
-    /// Name of the thread the hook fired on, if set.
-    pub thread_name: Option<String>,
 }
 
 // `const {}` would be the idiomatic modern form, but inline const blocks
@@ -389,17 +387,16 @@ impl Drop for ExecSink {
 /// - `struct {$prefix}SpGuard<T>` — guard with `Deref`, fire-once / sequence
 ///   / every registration, `expect_calls`, and `Drop` assertions
 /// - `struct {$prefix}SeqBuilder<T>` — builder for `guard.sequence(...)`
-/// - Un-prefixed (carry the visibility token): `EveryBuilder`, `SpExpect`
+/// - Un-prefixed (carry the visibility token): `EveryClosures`, `SpExpect`
 /// - Internal: `__Sp<T>` (state), `__SpDefault`, `__SP_DEFAULT`, `SeqEntry`,
-///   `EveryClosures`, `__SP_TL` (thread-local)
+///   `__SP_TL` (thread-local)
 ///
 /// # Limitations
 ///
 /// One invocation per module. Besides the prefixed names, the macro emits
-/// names that do not derive from the prefix — the `use HookId` import, the
 /// private machinery (`__Sp`, `__SpDefault`, `__SP_DEFAULT`, `__SP_TL`,
-/// `SeqEntry`, `EveryClosures`) and the two un-prefixed types that carry
-/// the visibility token, `EveryBuilder` / `SpExpect` — so two invocations
+/// `SeqEntry`) and the two un-prefixed types that carry
+/// the visibility token, `EveryClosures` / `SpExpect` — so two invocations
 /// in one module collide on those names (E0252/E0428, then an
 /// E0034/E0592/E0119/E0308 cascade).
 /// The fix is scoping: separate modules have separate scopes, so wrap each
@@ -511,37 +508,16 @@ macro_rules! define_sp {
                 ///
                 /// # Caveats
                 ///
-                /// 1. A thread parked at the head of the sequence is inside
-                ///    the instrumented code path and holds production locks.
-                ///    Order the `sequence` entries so the head consumer
-                ///    never needs a lock held by a parked thread — otherwise
-                ///    that fire fails with a `sequence park timeout` panic,
-                ///    not a hang.
-                /// 2. `sequence` orders the *consumption* of entries, not
-                ///    the completion of their closures: a later step may
-                ///    finish before an earlier one. Coordinate completion
-                ///    with [`Gate`](crate::Gate).
-                /// 3. Fire-once closures are nondeterministic in shared
-                ///    mode: the winner is whichever thread's call counter
-                ///    lands first, and the closure receives that thread's
-                ///    arguments. Use `sequence` for deterministic ordering.
-                /// 4. Register `sequence`/`every`/`expect_calls` before
-                ///    spawning workers; a fire that reaches the sync point
-                ///    before registration silently falls through to
-                ///    fire-once/counter.
-                /// 5. Same-named entries from different threads are each
-                ///    consumed exactly once (entries are re-checked after
-                ///    every wake), but wake order is not FIFO.
-                /// 6. Join all workers and drop every `{$prefix}SharedGuard`
-                ///    before dropping the last `Arc`: the shared
-                ///    assertions run on the final drop, and a worker still
-                ///    parked at that point fails with a `sequence park
-                ///    timeout` panic instead of being joined.
-                /// 7. In shared mode, an `optional` entry at the head is
-                ///    skipped — its closure never runs — when any *other*
-                ///    hook fires while it is at the head. In private mode
-                ///    the same mismatch leaves the entry in place, forgiven
-                ///    at drop.
+                /// A parked thread is inside the instrumented code path
+                /// and holds production locks — order `sequence` so the
+                /// head consumer never needs a parked thread's lock.
+                /// `sequence` orders consumption, not completion (use
+                /// [`Gate`](crate::Gate)); fire-once winners are
+                /// nondeterministic; register before spawning workers;
+                /// join workers before dropping the last `Arc`. Violations
+                /// fail with a `sequence park timeout` or a drop-time
+                /// panic, never hang. The full list with rationale:
+                /// `docs/shared-mode.md` (Caveats).
                 #[track_caller]
                 $vis fn install_shared<T: Send + Sync + 'static>(
                     value: T,
@@ -639,11 +615,31 @@ macro_rules! define_sp {
             // `Arc` so a dispatch clones the closure under the lock and
             // calls it after unlocking: concurrent dispatches on different
             // threads never serialize on each other's `every` closures.
+            // The per-hook setters double as the builder passed to
+            // `every(...)`.
             #[allow(dead_code)]
-            struct EveryClosures<T: Send + Sync + 'static> {
+            $vis struct EveryClosures<T: Send + Sync + 'static> {
                 $( $method: Option<
                     ::std::sync::Arc<dyn Fn(&T $( , $arg_ty)*) + Send + Sync>
                 >, )+
+            }
+
+            #[allow(dead_code)]
+            impl<T: Send + Sync + 'static> EveryClosures<T> {
+                $(
+                    /// Register a closure that fires on every invocation of
+                    /// this hook (on the firing thread, after the state
+                    /// locks are released). A second registration for the
+                    /// same hook replaces the first (last wins).
+                    #[allow(clippy::type_complexity)]
+                    $vis fn $method(
+                        &mut self,
+                        f: impl Fn(&T $( , $arg_ty)*) + Send + Sync + 'static,
+                    ) -> &mut Self {
+                        self.$method = Some(::std::sync::Arc::new(f));
+                        self
+                    }
+                )+
             }
 
             // ── Sync-point state ──────────────────────────────────────
@@ -724,6 +720,86 @@ macro_rules! define_sp {
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(hook.id(), (hook.name(), n));
                 }
+
+                // ── Registration/assertion helpers ────────────────────
+                // The guard and the shared sync point expose the same
+                // registration API; the bodies live here so both wrappers
+                // are one-liners.
+
+                fn build_sequence(
+                    &self,
+                    f: impl FnOnce(&mut [<$prefix SeqBuilder>]<T>),
+                ) {
+                    let mut builder = [<$prefix SeqBuilder>] {
+                        seq: ::std::collections::VecDeque::new(),
+                    };
+                    f(&mut builder);
+                    *self.sequence.lock().unwrap_or_else(|e| e.into_inner()) =
+                        builder.seq;
+                }
+
+                fn set_every(&self, f: impl FnOnce(&mut EveryClosures<T>)) {
+                    let mut every = EveryClosures { $( $method: None, )+ };
+                    f(&mut every);
+                    *self.every.lock().unwrap_or_else(|e| e.into_inner()) = every;
+                }
+
+                $(
+                    fn [< $method _once >](
+                        &self,
+                        f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
+                    ) -> SpExpect<'_, T> {
+                        *self.$method.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(Box::new(f));
+                        SpExpect { sp: self, hook: [<$prefix Hook>]::$method }
+                    }
+                )+
+
+                /// Drop-time assertions: unconsumed mandatory sequence
+                /// entries and mismatched `expect_calls` counts. `shared`
+                /// only marks the install mode in the panic location.
+                /// Entries marked optional via `SeqBuilder::optional`
+                /// (e.g. a trailing sentinel) may remain unconsumed;
+                /// every other entry — gated or not — must have fired.
+                fn assert_fires(&self, shared: bool) {
+                    let seq = self
+                        .sequence
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let unconsumed: Vec<_> =
+                        seq.iter().filter(|e| !e.is_optional()).collect();
+                    assert!(
+                        unconsumed.is_empty(),
+                        "sync point sequence not fully consumed: \
+                         {} entr{} remaining [{}] ({}installed at {})",
+                        unconsumed.len(),
+                        if unconsumed.len() == 1 { "y" } else { "ies" },
+                        unconsumed
+                            .iter()
+                            .map(|e| e.name())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        if shared { "shared, " } else { "" },
+                        self.installed_at,
+                    );
+                    drop(seq);
+
+                    let expected = self
+                        .expected
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+                    for (id, (name, expected)) in expected.iter() {
+                        let actual = calls.get(id).map_or(0, |(_, c)| *c);
+                        assert_eq!(
+                            actual, *expected,
+                            "sync point hook `{name}` fired {actual} \
+                             time(s), expected {expected} ({}installed at {})",
+                            if shared { "shared, " } else { "" },
+                            self.installed_at,
+                        );
+                    }
+                }
             }
 
             impl<T: Send + Sync + 'static> $crate::SyncPoint for __Sp<T> {}
@@ -758,10 +834,6 @@ macro_rules! define_sp {
                         let _f = $crate::CurrentFire::install($crate::FireInfo {
                             hook: __hook.name(),
                             index: __idx,
-                            thread_id: std::thread::current().id(),
-                            thread_name: std::thread::current()
-                                .name()
-                                .map(|n| n.to_owned()),
                         });
                         // `every`: clone the `Arc` under the lock, then call
                         // unlocked so concurrent dispatches don't serialize.
@@ -976,30 +1048,6 @@ macro_rules! define_sp {
                 }
             }
 
-            // ── Every builder ─────────────────────────────────────────
-
-            #[allow(dead_code)]
-            $vis struct EveryBuilder<T: Send + Sync + 'static> {
-                every: EveryClosures<T>,
-            }
-
-            #[allow(dead_code)]
-            impl<T: Send + Sync + 'static> EveryBuilder<T> {
-                $(
-                    /// Register a closure that fires on every invocation of
-                    /// this hook (on the firing thread, after the state
-                    /// locks are released).
-                    #[allow(clippy::type_complexity)]
-                    $vis fn $method(
-                        &mut self,
-                        f: impl Fn(&T $( , $arg_ty)*) + Send + Sync + 'static,
-                    ) -> &mut Self {
-                        self.every.$method = Some(::std::sync::Arc::new(f));
-                        self
-                    }
-                )+
-            }
-
             // ── Fire-once fluent helper ───────────────────────────────
 
             #[allow(dead_code)]
@@ -1055,15 +1103,7 @@ macro_rules! define_sp {
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
                     ) -> SpExpect<'_, T> {
-                        *self
-                            .sp
-                            .$method
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = Some(Box::new(f));
-                        SpExpect {
-                            sp: self.sp,
-                            hook: [<$prefix Hook>]::$method,
-                        }
+                        self.sp.[< $method _once >](f)
                     }
                 )+
 
@@ -1072,30 +1112,12 @@ macro_rules! define_sp {
                 /// Each builder method pushes a closure that must fire in
                 /// registration order. Out-of-order fires panic.
                 $vis fn sequence(&self, f: impl FnOnce(&mut [<$prefix SeqBuilder>]<T>)) {
-                    let mut builder = [<$prefix SeqBuilder>] {
-                        seq: ::std::collections::VecDeque::new(),
-                    };
-                    f(&mut builder);
-                    *self
-                        .sp
-                        .sequence
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = builder.seq;
+                    self.sp.build_sequence(f);
                 }
 
                 /// Register closures that fire on every invocation.
-                $vis fn every(&self, f: impl FnOnce(&mut EveryBuilder<T>)) {
-                    let mut builder = EveryBuilder {
-                        every: EveryClosures {
-                            $( $method: None, )+
-                        },
-                    };
-                    f(&mut builder);
-                    *self
-                        .sp
-                        .every
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = builder.every;
+                $vis fn every(&self, f: impl FnOnce(&mut EveryClosures<T>)) {
+                    self.sp.set_every(f);
                 }
 
                 /// Assert that `hook` fires exactly `n` times before drop.
@@ -1114,45 +1136,7 @@ macro_rules! define_sp {
             impl<T: Send + Sync + 'static> Drop for [<$prefix SpGuard>]<T> {
                 fn drop(&mut self) {
                     __SP_TL.with(|__c| __c.set(self.old));
-
-                    let seq = self.sp.sequence.lock().unwrap_or_else(|e| e.into_inner());
-                    // Entries marked optional via `SeqBuilder::optional`
-                    // (e.g. a trailing sentinel) may remain unconsumed:
-                    // their hook never fired, or their predicate never
-                    // passed. Every other entry — gated or not — must have
-                    // fired; any remaining is a missing scenario step.
-                    let unconsumed: Vec<_> =
-                        seq.iter().filter(|e| !e.is_optional()).collect();
-                    assert!(
-                        unconsumed.is_empty(),
-                        "sync point sequence not fully consumed: \
-                         {} entr{} remaining [{}] (installed at {})",
-                        unconsumed.len(),
-                        if unconsumed.len() == 1 { "y" } else { "ies" },
-                        unconsumed
-                            .iter()
-                            .map(|e| e.name())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        self.sp.installed_at,
-                    );
-                    drop(seq);
-
-                    let expected = self
-                        .sp
-                        .expected
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    let calls = self.sp.calls.lock().unwrap_or_else(|e| e.into_inner());
-                    for (id, (name, expected)) in expected.iter() {
-                        let actual = calls.get(id).map_or(0, |(_, c)| *c);
-                        assert_eq!(
-                            actual, *expected,
-                            "sync point hook `{name}` fired {actual} \
-                             time(s), expected {expected} (installed at {})",
-                            self.sp.installed_at,
-                        );
-                    }
+                    self.sp.assert_fires(false);
                 }
             }
 
@@ -1188,46 +1172,20 @@ macro_rules! define_sp {
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
                     ) -> SpExpect<'_, T> {
-                        *self
-                            .sp
-                            .$method
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = Some(Box::new(f));
-                        SpExpect {
-                            sp: self.sp,
-                            hook: [<$prefix Hook>]::$method,
-                        }
+                        self.sp.[< $method _once >](f)
                     }
                 )+
 
                 /// Register an ordered sequence of hook fires across
                 /// threads. See `{$prefix}SpGuard::sequence`.
                 $vis fn sequence(&self, f: impl FnOnce(&mut [<$prefix SeqBuilder>]<T>)) {
-                    let mut builder = [<$prefix SeqBuilder>] {
-                        seq: ::std::collections::VecDeque::new(),
-                    };
-                    f(&mut builder);
-                    *self
-                        .sp
-                        .sequence
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = builder.seq;
+                    self.sp.build_sequence(f);
                 }
 
                 /// Register closures that fire on every invocation (on the
                 /// firing thread, after the state locks are released).
-                $vis fn every(&self, f: impl FnOnce(&mut EveryBuilder<T>)) {
-                    let mut builder = EveryBuilder {
-                        every: EveryClosures {
-                            $( $method: None, )+
-                        },
-                    };
-                    f(&mut builder);
-                    *self
-                        .sp
-                        .every
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = builder.every;
+                $vis fn every(&self, f: impl FnOnce(&mut EveryClosures<T>)) {
+                    self.sp.set_every(f);
                 }
 
                 /// Assert that `hook` fires exactly `n` times in total
@@ -1270,42 +1228,9 @@ macro_rules! define_sp {
 
             impl<T: Send + Sync + 'static> Drop for [<$prefix SharedSp>]<T> {
                 fn drop(&mut self) {
-                    let seq = self.sp.sequence.lock().unwrap_or_else(|e| e.into_inner());
-                    // Same assertions as `{$prefix}SpGuard::drop`, with the
-                    // source marked "shared": `install_shared` state is
-                    // dropped via the last `Arc`, not via a guard.
-                    let unconsumed: Vec<_> =
-                        seq.iter().filter(|e| !e.is_optional()).collect();
-                    assert!(
-                        unconsumed.is_empty(),
-                        "sync point sequence not fully consumed: \
-                         {} entr{} remaining [{}] (shared, installed at {})",
-                        unconsumed.len(),
-                        if unconsumed.len() == 1 { "y" } else { "ies" },
-                        unconsumed
-                            .iter()
-                            .map(|e| e.name())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        self.sp.installed_at,
-                    );
-                    drop(seq);
-
-                    let expected = self
-                        .sp
-                        .expected
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    let calls = self.sp.calls.lock().unwrap_or_else(|e| e.into_inner());
-                    for (id, (name, expected)) in expected.iter() {
-                        let actual = calls.get(id).map_or(0, |(_, c)| *c);
-                        assert_eq!(
-                            actual, *expected,
-                            "sync point hook `{name}` fired {actual} \
-                             time(s), expected {expected} (shared, installed at {})",
-                            self.sp.installed_at,
-                        );
-                    }
+                    // Same assertions as `{$prefix}SpGuard::drop`; the
+                    // `install_shared` state is dropped via the last `Arc`.
+                    self.sp.assert_fires(true);
                 }
             }
 

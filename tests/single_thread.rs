@@ -288,8 +288,6 @@ fn deref_and_current_fire() {
         let f = shadow_point::current_fire().expect("fire info inside the hook");
         assert_eq!(f.hook, "a");
         assert_eq!(f.index, 0, "first fire has zero-based index 0");
-        assert_eq!(f.thread_id, std::thread::current().id());
-        assert_eq!(f.thread_name.as_deref(), std::thread::current().name());
     });
     shadow_point::invoke!(single::SingleSp, a(7));
     assert!(

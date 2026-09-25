@@ -36,7 +36,7 @@ Given `prefix MyModule`, the macro generates:
 | `MyModuleSharedSp<T>` | Shared state — same registration API, `install()` per worker |
 | `MyModuleSharedGuard<T>` | Per-thread TLS install of a shared sync point |
 | `MyModuleSeqBuilder<T>` | Builder for `sequence(...)` |
-| `EveryBuilder<T>` | Builder for `every(...)` |
+| `EveryClosures<T>` | Builder for `every(...)` (per-hook setters) |
 | `SpExpect<'_, T>` | Return value of a fire-once registration — chain `.expect(n)` |
 
 Associated constants on the entry-point struct let you reference hooks
@@ -55,9 +55,9 @@ associated hook constants; the internal machinery (`__Sp`,
 One `define_sp!` per module. Besides the prefixed names in the table
 (derived from the prefix via `paste!`), the macro emits names that do not
 derive from the prefix: the `use HookId` import, module-private machinery
-(`__Sp`, `__SpDefault`, `__SP_DEFAULT`, `__SP_TL`, `SeqEntry`,
-`EveryClosures`), and the visibility-bearing `EveryBuilder` / `SpExpect`
-types. Two declarations in one module collide on those names.
+(`__Sp`, `__SpDefault`, `__SP_DEFAULT`, `__SP_TL`, `SeqEntry`), and the
+visibility-bearing `EveryClosures` / `SpExpect` types. Two declarations
+in one module collide on those names.
 
 The usual layout avoids the issue by construction — one sync point per
 file, declared at the top of the production module it instruments. When
@@ -558,16 +558,17 @@ the cooperative gate.
 
 Inside any hook closure — fire-once, a sequence step, or an `every`
 closure — `shadow_point::current_fire()` returns the `FireInfo` of the
-dispatch running on this thread: the `hook` name, the zero-based
+dispatch running on this thread: the `hook` name and the zero-based
 `index` of this fire within its hook's count — a per-sync-point
 counter shared by all threads, the same number `SP_TRACE` prints
-(1-based) — and the firing thread's `thread_id`/`thread_name`.
+(1-based). The closure runs on the firing thread, so thread info is
+just `std::thread::current()`.
 Outside a dispatch it returns `None`. Handy for helpers that must know
 which hook fired without being told:
 
 ```rust
 let f = shadow_point::current_fire().expect("inside a hook");
-eprintln!("{} #{} on {:?}", f.hook, f.index, f.thread_id);
+eprintln!("{} #{} on {:?}", f.hook, f.index, std::thread::current().id());
 ```
 
 ### Panic messages
