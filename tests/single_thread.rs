@@ -133,21 +133,17 @@ fn optional_head_not_skipped_in_private_mode() {
     drop(g);
 }
 
-/// Extract the panic payload of a `catch_unwind` result as an owned string
+/// Extract the panic payload of a `catch_unwind` result as a borrowed `&str`
 /// (String or `&'static str` payloads; other payloads and no-panic are
 /// distinguishable sentinels that fail any `contains` assertion).
-fn panic_message(r: &std::thread::Result<()>) -> String {
+fn panic_message(r: &std::thread::Result<()>) -> &str {
     match r {
-        Err(p) => {
-            if let Some(s) = p.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = p.downcast_ref::<&'static str>() {
-                (*s).to_string()
-            } else {
-                "<non-string panic>".to_string()
-            }
-        }
-        Ok(()) => "<no panic>".to_string(),
+        Err(p) => p
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| p.downcast_ref::<&'static str>().copied())
+            .unwrap_or("<non-string panic>"),
+        Ok(()) => "<no panic>",
     }
 }
 
@@ -281,7 +277,8 @@ fn deref_and_current_fire() {
         assert_eq!(f.hook, "a");
         assert_eq!(f.index, 0, "first fire has zero-based index 0");
     });
-    shadow_point::invoke!(single::SingleSp, a(7));
+    // trailing comma in invoke! is supported:
+    shadow_point::invoke!(single::SingleSp, a(7,));
     assert!(
         shadow_point::current_fire().is_none(),
         "fire info restored after the dispatch"
