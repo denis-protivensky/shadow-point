@@ -380,12 +380,9 @@ impl Drop for ExecSink {
 ///
 /// # Hook placement
 ///
-/// One hook per `invoke!` call site: a fire is identified by hook name
-/// alone, so two sites sharing a name are indistinguishable to
-/// sequences, `expect_calls`, `SP_TRACE`, and panic messages. Repeated
-/// fires of one site are told apart by arguments (predicate-gated
-/// sequence entries), not by extra names — see `docs/guide.md`
-/// ("Hook placement").
+/// One hook per `invoke!` site — a fire is identified by hook name alone,
+/// so two sites sharing a name are indistinguishable to tests. Details:
+/// `docs/guide.md` ("Hook placement").
 ///
 /// # Specification syntax
 ///

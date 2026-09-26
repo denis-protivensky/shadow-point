@@ -101,14 +101,11 @@ list must contain at least one hook.
 ### Hook placement: one hook per call site
 
 Give each `invoke!` site in production code its own hook method — do not
-share one hook name across call sites. Nothing downstream keys on the
-call site: sequence matching, `expect_calls`, the `SP_TRACE` line,
-`current_fire()`, and panic messages all identify a fire by the hook
-name (plus a per-hook fire index or the fire's arguments). Two sites
-sharing a name are indistinguishable to tests — a sequence entry
-consumes whichever site fires first, `expect_calls` mixes the sites'
-counts, and an ordering-violation panic cannot say which site fired
-out of turn.
+share one hook name across call sites. A fire is identified by its hook
+name alone, so nothing downstream can tell the sites apart: a sequence
+entry consumes whichever site fires first, `expect_calls` mixes the
+sites' counts, and an ordering-violation panic cannot say which site
+fired out of turn.
 
 Repeated fires of the *same* site (loops, retries) are expected: tell
 them apart by arguments with [predicate-gated
