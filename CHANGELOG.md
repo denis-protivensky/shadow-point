@@ -5,10 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-[Unreleased]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/denis-protivensky/shadow-point/releases/tag/v0.1.0
+
+## [0.3.1] - 2026-09-26
+
+### Changed
+- README: crate badges (crates.io, docs.rs, MSRV, license, CI); Quick start
+  now precedes the install-modes taxonomy; the three-patterns table merged
+  Mode+Threads and dropped the Count checks column (covered by the modes
+  table and the guide) — tables render poorly on crates.io.
+
+### Internal
+- Repository now publishes CI (GitHub Actions: test on stable + 1.65 MSRV,
+  fmt, clippy, docs) and a committed `Cargo.lock` pinning tokio 1.21.2 for
+  the MSRV leg.
 
 ## [0.3.0] - 2026-09-26
 
