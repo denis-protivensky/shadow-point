@@ -198,11 +198,11 @@ The two modes:
 
 The three patterns:
 
-| Pattern | Mode | Threads | Where cross-thread order is asserted | Count checks | Typical scenario |
-|---|---|---|---|---|---|
-| 1. Scripted interferer | private guard on the test thread | one | n/a — one thread scripts everything | guard Drop | shadow a rival operation at the linearization point (see [What you can test](docs/guide.md#what-you-can-test)) |
-| 2. Per-worker guards | private guard installed **in each worker thread** | several | your own gates/atomics, in the test's code | each guard's Drop, per thread | each worker's hook behavior is a local contract; workers must merely not overlap |
-| 3. Shared sync point | `install_shared` + `install()` per worker | several | the macro: `sequence` parks out-of-order arrivals | aggregated at last `Arc` drop | cross-thread order/counts *are* the assertion |
+| Pattern | Mode and threads | Where cross-thread order is asserted | Typical scenario |
+|---|---|---|---|
+| 1. Scripted interferer | Single-threaded, private guard on the test thread | n/a — one thread scripts everything | shadow a rival operation at the linearization point (see [What you can test](docs/guide.md#what-you-can-test)) |
+| 2. Per-worker guards | Multi-threaded, private guard installed **in each worker thread** | your own gates/atomics, in the test's code | each worker's hook behavior is a local contract; workers must merely not overlap |
+| 3. Shared sync point | Multi-threaded, `install_shared` + `install()` per worker | the macro: `sequence` parks out-of-order arrivals | cross-thread order/counts *are* the assertion |
 
 Decision rule: a private guard is a thread-local — it sees only its own
 thread's fires. A thread without an install dispatches to the default
