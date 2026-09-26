@@ -98,6 +98,23 @@ be `Send + 'static` (`every` closures additionally `Sync`).
 `MyModuleHook` derives `Debug, Clone, Copy, PartialEq, Eq`; the hook
 list must contain at least one hook.
 
+### Hook placement: one hook per call site
+
+Give each `invoke!` site in production code its own hook method — do not
+share one hook name across call sites. Nothing downstream keys on the
+call site: sequence matching, `expect_calls`, the `SP_TRACE` line,
+`current_fire()`, and panic messages all identify a fire by the hook
+name (plus a per-hook fire index or the fire's arguments). Two sites
+sharing a name are indistinguishable to tests — a sequence entry
+consumes whichever site fires first, `expect_calls` mixes the sites'
+counts, and an ordering-violation panic cannot say which site fired
+out of turn.
+
+Repeated fires of the *same* site (loops, retries) are expected: tell
+them apart by arguments with [predicate-gated
+entries](#predicate-gated-entries) (`s.hook_when(pred, …)`), not by
+extra hook names.
+
 ### The extension trait: generic code over a sync point
 
 `MyModuleSyncPoint` has one method per hook (taking the declared

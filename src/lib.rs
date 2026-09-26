@@ -378,6 +378,15 @@ impl Drop for ExecSink {
 /// (`invoke!(writer_sp::WriterSp, …)`); inside the module the bare name
 /// still resolves.
 ///
+/// # Hook placement
+///
+/// One hook per `invoke!` call site: a fire is identified by hook name
+/// alone, so two sites sharing a name are indistinguishable to
+/// sequences, `expect_calls`, `SP_TRACE`, and panic messages. Repeated
+/// fires of one site are told apart by arguments (predicate-gated
+/// sequence entries), not by extra names — see `docs/guide.md`
+/// ("Hook placement").
+///
 /// # Specification syntax
 ///
 /// ```text
