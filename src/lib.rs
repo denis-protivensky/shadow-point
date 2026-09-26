@@ -39,7 +39,7 @@ pub trait SyncPoint: Send + Sync {}
 /// crate's test mode), and to a no-op otherwise.
 #[macro_export]
 macro_rules! invoke {
-    ($sp:path, $func:ident ( $($args:expr),* )) => {
+    ($sp:path, $func:ident ( $($args:expr),* $(,)? )) => {
         #[cfg(test)]
         {
             <$sp>::with_dyn(|__sp| __sp.$func($($args),*));
@@ -83,48 +83,39 @@ impl Gate {
     /// Create a new, unset gate.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            flag: std::sync::Mutex::new(false),
-            cv: std::sync::Condvar::new(),
-        }
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, bool> {
+        self.flag
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Set the gate, waking every thread blocked in
     /// [`wait`](Self::wait) / [`wait_timeout`](Self::wait_timeout).
     pub fn set(&self) {
-        let mut flag = self
-            .flag
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut flag = self.lock();
         *flag = true;
         self.cv.notify_all();
     }
 
     /// Clear the gate so a subsequent [`wait`](Self::wait) blocks again.
     pub fn clear(&self) {
-        *self
-            .flag
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+        *self.lock() = false;
     }
 
     /// Whether the gate is currently set.
     #[must_use]
     pub fn is_set(&self) -> bool {
-        *self
-            .flag
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self.lock()
     }
 
     /// Block until the gate is set. May hang forever if the gate is never
     /// set — prefer [`must_wait`](Self::must_wait) where a hang would be
     /// indistinguishable from a test bug.
     pub fn wait(&self) {
-        let flag = self
-            .flag
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let flag = self.lock();
         drop(
             self.cv
                 .wait_while(flag, |set| !*set)
@@ -139,10 +130,7 @@ impl Gate {
     /// semantics), so the call may outlast `timeout` by the lock-acquisition
     /// time.
     pub fn wait_timeout(&self, timeout: std::time::Duration) -> bool {
-        let flag = self
-            .flag
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let flag = self.lock();
         let (flag, _) = self
             .cv
             .wait_timeout_while(flag, timeout, |set| !*set)
@@ -200,7 +188,7 @@ impl TokioAsyncGate {
     /// Create a new gate at count zero.
     #[must_use]
     pub fn new() -> Self {
-        Self(std::sync::Arc::new(Inner::default()))
+        Self::default()
     }
 
     /// Increment the milestone count and wake all registered waiters.
@@ -249,7 +237,7 @@ impl TokioAsyncGate {
 ///
 /// Returned by [`current_fire`] while a hook closure runs (fire-once, a
 /// sequence step, or an `every` closure); `None` outside of any dispatch.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FireInfo {
     /// Name of the hook being dispatched.
     pub hook: &'static str,
@@ -263,8 +251,8 @@ pub struct FireInfo {
 // are experimental until 1.79 and the crate targets MSRV 1.65.
 thread_local! {
     #[allow(clippy::missing_const_for_thread_local)]
-    static CURRENT_FIRE: std::cell::RefCell<Option<FireInfo>> =
-        std::cell::RefCell::new(None);
+    static CURRENT_FIRE: std::cell::Cell<Option<FireInfo>> =
+        std::cell::Cell::new(None);
 }
 
 /// Metadata about the hook fire currently being dispatched on this thread,
@@ -272,7 +260,7 @@ thread_local! {
 /// hook fired, or after a dispatch finished).
 #[must_use]
 pub fn current_fire() -> Option<FireInfo> {
-    CURRENT_FIRE.with(|c| c.borrow().clone())
+    CURRENT_FIRE.with(std::cell::Cell::get)
 }
 
 /// RAII guard that installs [`FireInfo`] as the current fire on this thread
@@ -287,14 +275,14 @@ pub struct CurrentFire {
 impl CurrentFire {
     #[doc(hidden)]
     pub fn install(info: FireInfo) -> Self {
-        let prev = CURRENT_FIRE.with(|c| c.borrow_mut().replace(info));
+        let prev = CURRENT_FIRE.with(|c| c.replace(Some(info)));
         Self { prev }
     }
 }
 
 impl Drop for CurrentFire {
     fn drop(&mut self) {
-        CURRENT_FIRE.with(|c| *c.borrow_mut() = self.prev.take());
+        CURRENT_FIRE.with(|c| c.set(self.prev.take()));
     }
 }
 
@@ -319,31 +307,30 @@ thread_local! {
         std::cell::RefCell::new(Vec::new());
 }
 
-/// Whether the sync point at `sp` is currently dispatching a hook on THIS
-/// thread.
-///
-/// Re-entry suppression is per-thread and per-sync-point. A single
-/// per-`__Sp` global atomic would also suppress legitimate fires from other
-/// threads — including the very fire a parked thread is waiting for — so
-/// the executing set lives in the thread.
-#[doc(hidden)]
-#[must_use]
-pub fn __sp_executing(sp: *const ()) -> bool {
-    EXEC_STACK.with(|s| s.borrow().contains(&sp))
-}
-
 /// RAII guard that marks a sync point as executing on this thread for the
 /// duration of a hook dispatch (panic-safe). Hidden: used only from macro
 /// expansions generated by [`define_sp!`].
+///
+/// Re-entry suppression is per-thread and per-sync-point: a nested
+/// dispatch of any hook of this sync point from the same thread is
+/// suppressed, while a genuinely concurrent fire from another thread
+/// always proceeds.
 #[doc(hidden)]
 #[must_use]
 pub struct ExecSink(*const ());
 
 impl ExecSink {
     #[doc(hidden)]
-    pub fn new(sp: *const ()) -> Self {
-        EXEC_STACK.with(|s| s.borrow_mut().push(sp));
-        Self(sp)
+    pub fn try_enter(sp: *const ()) -> Option<Self> {
+        EXEC_STACK.with(|s| {
+            let mut stack = s.borrow_mut();
+            if stack.contains(&sp) {
+                None
+            } else {
+                stack.push(sp);
+                Some(Self(sp))
+            }
+        })
     }
 }
 
@@ -357,7 +344,6 @@ impl Drop for ExecSink {
         });
     }
 }
-
 // --- define_sp! macro ---
 
 /// Generate a complete sync-point infrastructure from a prefix and hook list.
@@ -520,7 +506,7 @@ macro_rules! define_sp {
             // ── Hook enum ─────────────────────────────────────────────
 
             #[repr(usize)]
-            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
             #[allow(non_camel_case_types, dead_code)]
             $vis enum [<$prefix Hook>] {
                 $( $method, )+
@@ -541,54 +527,35 @@ macro_rules! define_sp {
             // ── Sequence entry ────────────────────────────────────────
 
             #[allow(non_camel_case_types, dead_code)]
-            enum SeqEntry<T: Send + Sync + 'static> {
-                // Each entry carries an optional predicate over the hook
-                // arguments and an `optional` flag. `None` predicate (the
-                // default from `$method(f)`) consumes unconditionally on the
-                // next matching fire; `Some(pred)` (from
-                // `$method_when(pred, f)`) consumes only when `pred(&args)`
-                // passes, otherwise the entry stays at the front of the
-                // sequence and waits for the next fire. Useful when a hook
-                // fires for several distinct scenarios (e.g. a retry probe
-                // vs. a real attempt) and only some should advance the step.
-                // The flag (set via `SeqBuilder::optional`) marks entries
-                // that may legitimately remain unconsumed at guard drop
-                // (e.g. a trailing sentinel); every other entry — gated or
-                // not — must fire. Closures are `Send`: shared-mode entries
-                // cross into engine threads.
+            enum SeqAction<T: Send + Sync + 'static> {
                 $( $method(
                     Option<Box<dyn Fn($($arg_ty),*) -> bool + Send>>,
                     Box<dyn FnOnce(&T $( , $arg_ty)*) + Send>,
-                    bool,
                 ), )+
+            }
+
+            #[allow(dead_code)]
+            impl<T: Send + Sync + 'static> SeqAction<T> {
+                fn hook(&self) -> [<$prefix Hook>] {
+                    match self {
+                        $( Self::$method(..) => [<$prefix Hook>]::$method, )+
+                    }
+                }
+            }
+
+            #[allow(dead_code)]
+            struct SeqEntry<T: Send + Sync + 'static> {
+                action: SeqAction<T>,
+                optional: bool,
             }
 
             #[allow(dead_code)]
             impl<T: Send + Sync + 'static> SeqEntry<T> {
                 fn matches(&self, hook: [<$prefix Hook>]) -> bool {
-                    matches!(
-                        (self, hook),
-                        $( (Self::$method(..), [<$prefix Hook>]::$method) ) | +
-                    )
+                    self.action.hook() == hook
                 }
                 fn name(&self) -> &'static str {
-                    match self {
-                        $( Self::$method(..) => stringify!($method), )+
-                    }
-                }
-                /// Whether this entry may legitimately remain unconsumed at
-                /// guard drop (marked via `SeqBuilder::optional`, e.g. a
-                /// trailing sentinel). Every other entry — gated or not —
-                /// must fire.
-                fn is_optional(&self) -> bool {
-                    match self {
-                        $( Self::$method(_, _, optional) => *optional, )+
-                    }
-                }
-                fn set_optional(&mut self, optional: bool) {
-                    match self {
-                        $( Self::$method(_, _, opt) => *opt = optional, )+
-                    }
+                    self.action.hook().name()
                 }
             }
 
@@ -747,24 +714,25 @@ macro_rules! define_sp {
                         .sequence
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let unconsumed: Vec<_> =
-                        seq.iter().filter(|e| !e.is_optional()).collect();
-                    assert!(
-                        unconsumed.is_empty(),
-                        "sync point sequence not fully consumed: \
-                         {} entr{} remaining [{}] ({}installed at {})",
-                        unconsumed.len(),
-                        if unconsumed.len() == 1 { "y" } else { "ies" },
-                        unconsumed
-                            .iter()
-                            .map(|e| e.name())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        if shared { "shared, " } else { "" },
-                        self.installed_at,
-                    );
+                    if seq.iter().any(|e| !e.optional) {
+                        let unconsumed: Vec<_> =
+                            seq.iter().filter(|e| !e.optional).collect();
+                        assert!(
+                            unconsumed.is_empty(),
+                            "sync point sequence not fully consumed: \
+                             {} entr{} remaining [{}] ({}installed at {})",
+                            unconsumed.len(),
+                            if unconsumed.len() == 1 { "y" } else { "ies" },
+                            unconsumed
+                                .iter()
+                                .map(|e| e.name())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            if shared { "shared, " } else { "" },
+                            self.installed_at,
+                        );
+                    }
                     drop(seq);
-
                     let expected = self
                         .expected
                         .lock()
@@ -791,17 +759,16 @@ macro_rules! define_sp {
                 $(
                     fn $method(&self $( , $arg: $arg_ty)*) {
                         // Re-entry suppression is per-thread and
-                        // per-sync-point (see `__sp_executing`): a nested
-                        // dispatch of any hook of this sync point from the
-                        // same thread is dropped before it counts or
-                        // consumes, while a genuinely concurrent fire from
-                        // another thread always proceeds — including the
-                        // fire that unblocks a parked thread.
+                        // per-sync-point: a nested dispatch of any hook of
+                        // this sync point from the same thread is dropped
+                        // before it counts or consumes, while a genuinely
+                        // concurrent fire from another thread always
+                        // proceeds — including the fire that unblocks a
+                        // parked thread.
                         let __sp_addr = self as *const Self as *const ();
-                        if $crate::__sp_executing(__sp_addr) {
+                        let Some(_e) = $crate::ExecSink::try_enter(__sp_addr) else {
                             return;
-                        }
-                        let _e = $crate::ExecSink::new(__sp_addr);
+                        };
                         let __hook = [<$prefix Hook>]::$method;
                         let __idx = self.bump_call(__hook);
                         if $crate::trace_enabled() {
@@ -861,11 +828,11 @@ macro_rules! define_sp {
                                 match __seq.front() {
                                     None => break (false, None),
                                     Some(__front) if __front.matches(__hook) => {
-                                        let __pass = match __front {
-                                            SeqEntry::$method(Some(__pred), _, _) => {
+                                        let __pass = match &__front.action {
+                                            SeqAction::$method(Some(__pred), _) => {
                                                 __pred($($arg),*)
                                             }
-                                            SeqEntry::$method(None, _, _) => true,
+                                            SeqAction::$method(None, _) => true,
                                             // Unreachable: `matches` already
                                             // confirmed this variant.
                                             _ => true,
@@ -873,12 +840,12 @@ macro_rules! define_sp {
                                         if __pass {
                                             let __entry = __seq.pop_front();
                                             self.sequence_cv.notify_all();
-                                            break (true, __entry);
+                                            break (true, __entry.map(|e| e.action));
                                         }
                                         break (true, None);
                                     }
                                     Some(__front)
-                                        if self.shared && __front.is_optional() =>
+                                        if self.shared && __front.optional =>
                                     {
                                         __seq.pop_front();
                                         self.sequence_cv.notify_all();
@@ -934,7 +901,7 @@ macro_rules! define_sp {
                             }
                         };
                         match __consumed {
-                            Some(SeqEntry::$method(_, __f, _)) => {
+                            Some(SeqAction::$method(_, __f)) => {
                                 __f(&self.value $( , $arg)*);
                             }
                             // The sequence loop only pops entries that match
@@ -980,8 +947,10 @@ macro_rules! define_sp {
                         &mut self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
                     ) -> &mut Self {
-                        self.seq
-                            .push_back(SeqEntry::$method(None, Box::new(f), false));
+                        self.seq.push_back(SeqEntry {
+                            action: SeqAction::$method(None, Box::new(f)),
+                            optional: false,
+                        });
                         self
                     }
 
@@ -1006,11 +975,10 @@ macro_rules! define_sp {
                         pred: impl Fn($($arg_ty),*) -> bool + Send + 'static,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
                     ) -> &mut Self {
-                        self.seq.push_back(SeqEntry::$method(
-                            Some(Box::new(pred)),
-                            Box::new(f),
-                            false,
-                        ));
+                        self.seq.push_back(SeqEntry {
+                            action: SeqAction::$method(Some(Box::new(pred)), Box::new(f)),
+                            optional: false,
+                        });
                         self
                     }
                 )+
@@ -1026,7 +994,7 @@ macro_rules! define_sp {
                     self.seq
                         .back_mut()
                         .expect("SeqBuilder::optional called with no entries")
-                        .set_optional(true);
+                        .optional = true;
                     self
                 }
             }
