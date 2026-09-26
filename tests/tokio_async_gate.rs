@@ -1,5 +1,5 @@
-//! TokioAsyncGate tests (feature = "tokio-async"): milestone coordination on a
-//! tokio current_thread runtime, where the std `Gate` would deadlock the
+//! `TokioAsyncGate` tests (feature = "tokio-async"): milestone coordination on a
+//! tokio `current_thread` runtime, where the std `Gate` would deadlock the
 //! executor. Runtimes are built via `Builder` (not `#[tokio::test]`) to keep
 //! the runtime setup explicit.
 
@@ -38,7 +38,7 @@ fn current_thread_body_waits_on_future_fires() {
     let g = gate.clone();
     let s = seen.clone();
     shared.every(|e| {
-        e.a(move |_, _| {
+        e.a(move |(), _| {
             g.fire();
             s.fetch_add(1, Ordering::SeqCst);
         });
@@ -63,7 +63,7 @@ fn current_thread_body_waits_on_future_fires() {
     assert_eq!(seen.load(Ordering::SeqCst), 2);
 }
 
-/// Worker side runs on a blocking thread (per-thread guard + install_shared,
+/// Worker side runs on a blocking thread (per-thread guard + `install_shared`,
 /// the only sound install for off-runtime threads), test body waits async.
 /// The sleep makes both fires land BEFORE the waiter's first poll, so this
 /// deterministically covers the fire-before-`enable()` window: the count
@@ -78,7 +78,7 @@ fn spawn_blocking_worker_fires_async_waiter() {
     let shared = ag::AgSp::install_shared(());
     let g = gate.clone();
     shared.every(|e| {
-        e.b(move |_, _| g.fire());
+        e.b(move |(), _| g.fire());
     });
     let worker_shared = shared.clone();
     let worker = rt.spawn_blocking(move || {

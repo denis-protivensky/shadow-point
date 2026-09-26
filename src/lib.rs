@@ -321,6 +321,7 @@ pub struct ExecSink(*const ());
 
 impl ExecSink {
     #[doc(hidden)]
+    #[must_use]
     pub fn try_enter(sp: *const ()) -> Option<Self> {
         EXEC_STACK.with(|s| {
             let mut stack = s.borrow_mut();

@@ -38,7 +38,7 @@ fn sequence_order_across_threads() {
         s.a({
             let log = log.clone();
             let gate_a = gate_a.clone();
-            move |_, _| {
+            move |(), _| {
                 log.lock().unwrap().push("a");
                 gate_a.set();
             }
@@ -47,7 +47,7 @@ fn sequence_order_across_threads() {
             let log = log.clone();
             let gate_a = gate_a.clone();
             let gate_b = gate_b.clone();
-            move |_, _| {
+            move |(), _| {
                 // Completion is coordinated with gates: consumption order
                 // (a -> b -> c) does not order step *completion*.
                 gate_a.must_wait(PARK_TIMEOUT);
@@ -57,7 +57,7 @@ fn sequence_order_across_threads() {
         });
         s.c({
             let log = log.clone();
-            move |_, _| {
+            move |(), _| {
                 log.lock().unwrap().push("c");
             }
         });
@@ -97,7 +97,7 @@ fn park_until_turn() {
         s.a({
             let log = log.clone();
             let gate_a = gate_a.clone();
-            move |_, _| {
+            move |(), _| {
                 log.lock().unwrap().push("a");
                 gate_a.set();
             }
@@ -105,7 +105,7 @@ fn park_until_turn() {
         s.b({
             let log = log.clone();
             let gate_a = gate_a.clone();
-            move |_, _| {
+            move |(), _| {
                 // `b`'s step may start as soon as `a` is consumed (the park
                 // wake precedes step `a`), so completion must wait for
                 // step `a` to finish.
@@ -121,7 +121,7 @@ fn park_until_turn() {
     shared.every(|e| {
         e.b({
             let entered = entered.clone();
-            move |_, _| entered.set()
+            move |(), _| entered.set()
         });
     });
     let s1 = shared.clone();
@@ -155,14 +155,14 @@ fn optional_head_skipped_cross_thread() {
     shared.sequence(|s| {
         s.a({
             let log = log.clone();
-            move |_, _| {
+            move |(), _| {
                 log.lock().unwrap().push("a");
             }
         })
         .optional()
         .b({
             let log = log.clone();
-            move |_, _| {
+            move |(), _| {
                 log.lock().unwrap().push("b");
             }
         });
@@ -214,7 +214,7 @@ fn expect_calls_aggregates_threads() {
     shared.every(|e| {
         e.a({
             let count = count.clone();
-            move |_, _| {
+            move |(), _| {
                 let _ = count.fetch_add(1, Ordering::SeqCst);
             }
         });
@@ -244,7 +244,7 @@ fn expect_calls_aggregates_threads() {
 fn shared_drop_asserts_unconsumed() {
     let shared = ct::CtSp::install_shared(());
     shared.sequence(|s| {
-        s.a(|_, _| {});
+        s.a(|(), _| {});
     });
     drop(shared);
 }
@@ -256,13 +256,13 @@ fn two_threads_same_hook_entries() {
     shared.sequence(|s| {
         s.b({
             let log = log.clone();
-            move |_, _| {
+            move |(), _| {
                 log.lock().unwrap().push("b");
             }
         });
         s.b({
             let log = log.clone();
-            move |_, _| {
+            move |(), _| {
                 log.lock().unwrap().push("b");
             }
         });

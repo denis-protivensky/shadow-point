@@ -73,8 +73,8 @@ fn sequence_out_of_order_panics() {
     g.sequence(|s| {
         // Both entries optional: the ordering panic below is the assertion,
         // and drop must not add a second panic on top of it.
-        s.a(|_, _| {}).optional();
-        s.b(|_, _| {}).optional();
+        s.a(|(), _| {}).optional();
+        s.b(|(), _| {}).optional();
     });
     let r = std::panic::catch_unwind(|| fire_b(1));
     assert!(
@@ -95,12 +95,12 @@ fn when_predicate_gates_until_match_and_blocks_fire_once() {
     g.sequence(|s| {
         s.a_when(|v| v == 1, {
             let steps = steps.clone();
-            move |_, _| steps.inc()
+            move |(), _| steps.inc()
         });
     });
     g.a({
         let fire_once = fire_once.clone();
-        move |_, _| fire_once.inc()
+        move |(), _| fire_once.inc()
     });
     // a(0): predicate fails -> entry stays at the head; fire-once is NOT
     // triggered (the pending entry still expects this hook).
@@ -118,8 +118,8 @@ fn when_predicate_gates_until_match_and_blocks_fire_once() {
 fn optional_head_not_skipped_in_private_mode() {
     let g = single::SingleSp::install_guard(());
     g.sequence(|s| {
-        s.a(|_, _| {}).optional();
-        s.b(|_, _| {}).optional();
+        s.a(|(), _| {}).optional();
+        s.b(|(), _| {}).optional();
     });
     // Private mode never skips an `optional` head on a mismatched fire: a
     // later matching entry still means ordering violation.
@@ -162,7 +162,7 @@ fn assert_ordering_panic(r: &std::thread::Result<()>, what: &str, tail: &str) {
 fn trailing_optional_entry_forgiven_at_drop() {
     let g = single::SingleSp::install_guard(());
     g.sequence(|s| {
-        s.a(|_, _| {}).b(|_, _| {}).c(|_, _| {}).optional();
+        s.a(|(), _| {}).b(|(), _| {}).c(|(), _| {}).optional();
     });
     shadow_point::invoke!(single::SingleSp, a(0));
     shadow_point::invoke!(single::SingleSp, b(0));
@@ -177,13 +177,13 @@ fn fire_once_runs_once_and_expect_calls_pass() {
     let every = C::new();
     g.a({
         let runs = runs.clone();
-        move |_, _| runs.inc()
+        move |(), _| runs.inc()
     })
     .expect(3);
     g.every(|e| {
         e.a({
             let every = every.clone();
-            move |_, _| every.inc()
+            move |(), _| every.inc()
         });
     });
     shadow_point::invoke!(single::SingleSp, a(0));
@@ -211,7 +211,7 @@ fn nested_invoke_of_same_sp_is_suppressed() {
     let outer = C::new();
     g.a({
         let outer = outer.clone();
-        move |_, _| {
+        move |(), _| {
             outer.inc();
             // Nested dispatch of the same hook on the same thread:
             // suppressed before it counts or re-runs.
@@ -232,7 +232,7 @@ fn transitive_reentry_across_prefixes_a_b_a() {
     first.sequence(|s| {
         s.ping({
             let log = log.clone();
-            move |_, _| {
+            move |(), _| {
                 push(&log, "A-");
                 shadow_point::invoke!(second::SecondSp, ping(0));
                 push(&log, "-a");
@@ -241,7 +241,7 @@ fn transitive_reentry_across_prefixes_a_b_a() {
     });
     second.ping({
         let log = log.clone();
-        move |_, _| {
+        move |(), _| {
             push(&log, "B-");
             // Inner `First::ping` from within `Second::ping` must be
             // suppressed: the outer A is still dispatching on this thread
