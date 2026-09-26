@@ -1,5 +1,11 @@
 # shadow-point — Deterministic testing of concurrent Rust code
 
+[![crates.io](https://img.shields.io/crates/v/shadow-point)](https://crates.io/crates/shadow-point)
+[![docs.rs](https://img.shields.io/docsrs/shadow-point)](https://docs.rs/shadow-point)
+[![MSRV](https://img.shields.io/crates/msrv/shadow-point)](#compatibility)
+[![License](https://img.shields.io/crates/l/shadow-point)](#license)
+[![CI](https://github.com/denis-protivensky/shadow-point/actions/workflows/ci.yml/badge.svg)](https://github.com/denis-protivensky/shadow-point/actions/workflows/ci.yml)
+
 Hook points let tests inject code at linearization points of concurrent
 operations and *shadow* the competing one: the closure runs in place of
 what the other thread would have done. The same `invoke!` call sites
@@ -13,8 +19,8 @@ to nothing.
 
 ## Contents
 
-- [Install modes and usage patterns](#install-modes-and-usage-patterns)
 - [Quick start](#quick-start)
+- [Install modes and usage patterns](#install-modes-and-usage-patterns)
 - [Debugging](#debugging)
 - [Production safety](#production-safety)
 - [Compatibility](#compatibility)
@@ -29,45 +35,6 @@ The reference material lives in [`docs/`](docs/):
 | [Guide](docs/guide.md) | what `define_sp!` generates; private-mode guard API and dispatch order; fire-once, `sequence`, predicate-gated entries, `every`, `expect_calls`; hook arguments; per-worker guards; worked "what you can test" scenarios; `current_fire()` and panic-message formats |
 | [Shared mode](docs/shared-mode.md) | one sync point across threads: lifecycle, the parking rendezvous, `Gate`, worked examples (ordering, parking, counting), caveats |
 | [Integration](docs/integration.md) | shadow-point as a dev-dependency (the seam macro); async (tokio) consumers and `TokioAsyncGate` |
-
-## Install modes and usage patterns
-
-There are two install *modes* — how the `invoke!` dispatch is bound to
-threads — but three *usage patterns* people actually write, and the
-mapping is not one-to-one: the private mode serves both the
-single-thread test and the per-worker-guard choreography. Both modes
-dispatch the same `invoke!` call sites — you choose per test by how you
-install, not by how you declare hooks or fire them.
-
-The two modes:
-
-| | `install_guard` — private | `install_shared` — shared |
-|---|---|---|
-| Whose fires are seen | only the installing thread | every worker that called `install()` on its thread |
-| Fires from other threads | silently dropped (they hit the default no-op) | counted, sequenced, aggregated |
-| Out-of-order sequence fire | panics immediately if a later entry expects the hook (otherwise the fire falls through) | parks the early thread at the head, panics on `PARK_TIMEOUT` |
-| Expected counts | checked at guard drop | aggregated across threads, checked at last `Arc` drop |
-
-The three patterns:
-
-| Pattern | Mode | Threads | Where cross-thread order is asserted | Count checks | Typical scenario |
-|---|---|---|---|---|---|
-| 1. Scripted interferer | private guard on the test thread | one | n/a — one thread scripts everything | guard Drop | shadow a rival operation at the linearization point (see [What you can test](docs/guide.md#what-you-can-test)) |
-| 2. Per-worker guards | private guard installed **in each worker thread** | several | your own gates/atomics, in the test's code | each guard's Drop, per thread | each worker's hook behavior is a local contract; workers must merely not overlap |
-| 3. Shared sync point | `install_shared` + `install()` per worker | several | the macro: `sequence` parks out-of-order arrivals | aggregated at last `Arc` drop | cross-thread order/counts *are* the assertion |
-
-Decision rule: a private guard is a thread-local — it sees only its own
-thread's fires. A thread without an install dispatches to the default
-no-op and its fires disappear: the most common wrong-mode mistake is a
-guard installed on the *test* thread while the hooks fire on workers.
-One thread under test → pattern 1. Several threads → the trigger is
-*what you assert*: per-worker local contracts, cross-thread order held
-by your own gates → pattern 2; the order/counts *are* the assertion →
-pattern 3, and every firing worker installs.
-
-The split has two readings — concurrency vs parallelism, and `&T`-only
-mutation — spelled out in the
-[guide](docs/guide.md#two-readings-of-the-mode-split).
 
 ## Quick start
 
@@ -210,6 +177,45 @@ or one `install_shared` sync point when the cross-thread order/counts
 *are* the assertion
 ([shared mode](docs/shared-mode.md#shared-mode-one-sync-point-across-threads)).
 Hook declarations and `invoke!` calls are identical in all of them.
+
+## Install modes and usage patterns
+
+There are two install *modes* — how the `invoke!` dispatch is bound to
+threads — but three *usage patterns* people actually write, and the
+mapping is not one-to-one: the private mode serves both the
+single-thread test and the per-worker-guard choreography. Both modes
+dispatch the same `invoke!` call sites — you choose per test by how you
+install, not by how you declare hooks or fire them.
+
+The two modes:
+
+| | `install_guard` — private | `install_shared` — shared |
+|---|---|---|
+| Whose fires are seen | only the installing thread | every worker that called `install()` on its thread |
+| Fires from other threads | silently dropped (they hit the default no-op) | counted, sequenced, aggregated |
+| Out-of-order sequence fire | panics immediately if a later entry expects the hook (otherwise the fire falls through) | parks the early thread at the head, panics on `PARK_TIMEOUT` |
+| Expected counts | checked at guard drop | aggregated across threads, checked at last `Arc` drop |
+
+The three patterns:
+
+| Pattern | Mode | Threads | Where cross-thread order is asserted | Count checks | Typical scenario |
+|---|---|---|---|---|---|
+| 1. Scripted interferer | private guard on the test thread | one | n/a — one thread scripts everything | guard Drop | shadow a rival operation at the linearization point (see [What you can test](docs/guide.md#what-you-can-test)) |
+| 2. Per-worker guards | private guard installed **in each worker thread** | several | your own gates/atomics, in the test's code | each guard's Drop, per thread | each worker's hook behavior is a local contract; workers must merely not overlap |
+| 3. Shared sync point | `install_shared` + `install()` per worker | several | the macro: `sequence` parks out-of-order arrivals | aggregated at last `Arc` drop | cross-thread order/counts *are* the assertion |
+
+Decision rule: a private guard is a thread-local — it sees only its own
+thread's fires. A thread without an install dispatches to the default
+no-op and its fires disappear: the most common wrong-mode mistake is a
+guard installed on the *test* thread while the hooks fire on workers.
+One thread under test → pattern 1. Several threads → the trigger is
+*what you assert*: per-worker local contracts, cross-thread order held
+by your own gates → pattern 2; the order/counts *are* the assertion →
+pattern 3, and every firing worker installs.
+
+The split has two readings — concurrency vs parallelism, and `&T`-only
+mutation — spelled out in the
+[guide](docs/guide.md#two-readings-of-the-mode-split).
 
 ## Debugging
 
