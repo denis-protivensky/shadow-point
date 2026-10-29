@@ -330,3 +330,100 @@ fn two_threads_same_hook_entries() {
         "both same-hook entries are consumed exactly once; order is un-fixed"
     );
 }
+
+// ── Shared-mode reclamation ──────────────────────────────────────────
+//
+// `install_shared` leaked its state through `Box::leak` too, so the shared
+// path had the same blind spot as the guard. Reaching the last `Arc` now
+// frees the state — and the guarded value's `Drop` runs there, which is why
+// the ORDER inside `SharedSp::drop` is load-bearing: without it, the last
+// `Arc` on an unwinding thread would run a consumer destructor mid-unwind,
+// the exact abort 0.3.2 removed the crate's own raise for.
+
+#[test]
+fn the_shared_value_is_dropped_with_the_last_arc() {
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let shared = ct::CtSp::install_shared(Dropped(flag.clone()));
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "the value is alive while its Arc is"
+    );
+    drop(shared);
+    assert!(
+        flag.load(Ordering::SeqCst),
+        "the last Arc released the state, and the guarded value with it"
+    );
+}
+
+#[test]
+fn a_worker_guard_keeps_the_shared_value_alive_until_it_leaves() {
+    // The docs already promise this for the ASSERTIONS ("they run only after
+    // every worker has dropped its guard"); reclamation extends it to the
+    // value. A worker's TLS entry is a strong handle, so a thread inside a
+    // dispatch cannot be reading state that the main test just freed.
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let shared = ct::CtSp::install_shared(Dropped(flag.clone()));
+    let worker = {
+        let s = shared.clone();
+        std::thread::spawn(move || {
+            let _inst = s.install(); // holds a strong handle for its scope
+            std::thread::sleep(Duration::from_millis(40));
+        })
+    };
+    std::thread::sleep(Duration::from_millis(15));
+    drop(shared); // the test's own last reference — a worker still holds one
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "the value was freed while a worker's install still held the state"
+    );
+    worker.join().unwrap();
+    assert!(
+        flag.load(Ordering::SeqCst),
+        "the value went when the last handle — the worker's guard — left"
+    );
+}
+
+#[test]
+fn a_panicking_last_arc_does_not_run_the_shared_value_destructor() {
+    // The release step is the last thing `SharedSp::drop` does, and on an
+    // unwinding thread it is skipped: `T::drop` is consumer code, and one
+    // that panics here would double-panic and abort the run. The state
+    // field is an `Option` precisely so this step can be withheld — an
+    // implicitly dropped `Arc` field could not be.
+    static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct CountsDrops;
+    impl Drop for CountsDrops {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let before = DROPS.load(Ordering::SeqCst);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let shared = ct::CtSp::install_shared(CountsDrops);
+        shared.sequence(|q| {
+            q.a(|_, _| ()); // left unconsumed on purpose: asserts fire at the end
+        });
+        let _inst = shared.install();
+        // Unwinding drops `_inst` (one handle) and then `shared` — the last
+        // one — so both the assertions and the release run mid-unwind.
+        panic!("the test's own failure");
+    }));
+    assert!(outcome.is_err(), "the scenario failed as designed");
+    assert_eq!(
+        DROPS.load(Ordering::SeqCst),
+        before,
+        "the shared value must be forgotten while unwinding, not dropped"
+    );
+}

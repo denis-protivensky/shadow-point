@@ -456,11 +456,15 @@ macro_rules! define_sp {
             thread_local! {
                 // Plain const-evaluable initializers: inline `const {}`
                 // blocks (experimental until 1.79) would break MSRV 1.65.
-                static __SP_TL: ::std::cell::Cell<
-                    &'static dyn [<$prefix SyncPoint>]
-                > = ::std::cell::Cell::new(
-                    &__SP_DEFAULT as &'static dyn [<$prefix SyncPoint>]
-                );
+                // `Option<Arc<dyn ..>>`, not `Cell<&'static dyn ..>`: the
+                // state is reference-counted, so releasing the last handle
+                // frees it — which is what makes the guarded value's own
+                // `Drop` observable instead of permanently silent. `None`
+                // is an uninstalled thread, dispatching to the default
+                // no-op below exactly as the old `&__SP_DEFAULT` did.
+                static __SP_TL: ::std::cell::RefCell<
+                    Option<::std::sync::Arc<dyn [<$prefix SyncPoint>]>>
+                > = ::std::cell::RefCell::new(None);
             }
 
             // ── Entry-point struct ────────────────────────────────────
@@ -491,7 +495,24 @@ macro_rules! define_sp {
                 $vis fn with_dyn<R>(
                     __f: impl ::std::ops::FnOnce(&dyn [<$prefix SyncPoint>]) -> R,
                 ) -> R {
-                    __SP_TL.with(|__c| __f(__c.get()))
+                    // The handle is cloned out and the borrow released
+                    // BEFORE the call, and two things depend on that order:
+                    //
+                    // - A hook that installs or drops a guard takes this
+                    //   same TLS slot mutably; calling out through a live
+                    //   borrow would panic the `RefCell` — a crash the
+                    //   harness would own, not the test.
+                    // - The clone keeps the state alive for the whole
+                    //   dispatch, so the address `EXEC_STACK` holds cannot
+                    //   be freed and reused under a live frame.
+                    //
+                    // The clone is the price of reclamation: one strong
+                    // count per fire.
+                    let __held = __SP_TL.with(|__c| __c.borrow().clone());
+                    match __held {
+                        Some(__sp) => __f(&*__sp),
+                        None => __f(&__SP_DEFAULT),
+                    }
                 }
 
                 /// Install a guard that drives sync-point hooks for `value`.
@@ -534,15 +555,12 @@ macro_rules! define_sp {
                 $vis fn install_shared<T: Send + Sync + 'static>(
                     value: T,
                 ) -> ::std::sync::Arc<[<$prefix SharedSp>]<T>> {
-                    let mut sp = Box::new(__Sp::new(
-                        value,
-                        std::panic::Location::caller(),
-                    ));
+                    let mut sp = __Sp::new(value, std::panic::Location::caller());
                     // Read by dispatch without a lock; written here before
                     // the `Arc` is published to worker threads.
                     sp.shared = true;
                     ::std::sync::Arc::new([<$prefix SharedSp>] {
-                        sp: Box::leak(sp),
+                        sp: Some(::std::sync::Arc::new(sp)),
                     })
                 }
             }
@@ -1156,8 +1174,11 @@ macro_rules! define_sp {
             /// Derefs to the guarded value. Drop asserts that all registered
             /// sequences were consumed and all `expect_calls` counts match —
             /// raised on a clean thread, printed rather than raised while the
-            /// thread is already unwinding. The guarded value is never
-            /// dropped here — see `docs/guide.md`, "The leak".
+            /// thread is already unwinding. After the assertions, the guard
+            /// releases the state: if it held the last reference, the
+            /// guarded value's own `Drop` runs here (on an unwinding thread
+            /// it is deliberately not run — see `docs/guide.md`,
+            /// "Reclamation and what it owns").
             ///
             /// Drop the guard on the thread that installed it: the guard
             /// restores the previously installed sync point of ITS OWN thread
@@ -1166,19 +1187,49 @@ macro_rules! define_sp {
             #[clippy::has_significant_drop]
             #[must_use]
             $vis struct [<$prefix SpGuard>]<T: Send + Sync + 'static> {
-                sp: &'static __Sp<T>,
-                old: &'static dyn [<$prefix SyncPoint>],
+                // `Option` so `Drop` can take the state out and decide,
+                // after its own assertions, whether this is the release that
+                // frees the guarded value.
+                sp: Option<::std::sync::Arc<__Sp<T>>>,
+                // The sync point this thread had before, owned: a stacked
+                // install keeps the outer state alive while the inner runs,
+                // and hands it back on drop.
+                old: Option<::std::sync::Arc<dyn [<$prefix SyncPoint>]>>,
             }
 
             #[allow(dead_code)]
             impl<T: Send + Sync + 'static> [<$prefix SpGuard>]<T> {
                 #[track_caller]
                 fn install(value: T) -> Self {
-                    let sp: &'static __Sp<T> = Box::leak(Box::new(
-                        __Sp::new(value, std::panic::Location::caller()),
+                    let sp = ::std::sync::Arc::new(__Sp::new(
+                        value,
+                        std::panic::Location::caller(),
                     ));
-                    let old = __SP_TL.with(|__c| __c.replace(sp));
-                    Self { sp, old }
+                    // The TLS entry holds its own strong handle, so a
+                    // dispatch (see `with_dyn`) can never read freed state.
+                    // `sp.clone()`, not `Arc::clone(&sp)`: the unsizing
+                    // coercion to the trait object happens at the binding,
+                    // and `Arc::clone(&sp)` makes type inference unify the
+                    // argument's `Arc<..>` with the expected `Arc<dyn ..>`.
+                    let handle: ::std::sync::Arc<dyn [<$prefix SyncPoint>]> = sp.clone();
+                    let old = __SP_TL.with(|__c| {
+                        let mut slot = __c.borrow_mut();
+                        slot.replace(handle)
+                    });
+                    Self {
+                        sp: Some(sp),
+                        old,
+                    }
+                }
+
+                /// The state behind the `Option`: every registration and
+                /// every deref reaches it here, so a guard that was moved
+                /// out of by `Drop` fails loudly instead of silently.
+                fn state(&self) -> &__Sp<T> {
+                    &self
+                        .sp
+                        .as_ref()
+                        .expect("shadow-point: guard used after it was dropped")
                 }
 
                 $(
@@ -1191,7 +1242,7 @@ macro_rules! define_sp {
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
                     ) -> SpExpect<'_, T> {
-                        self.sp.[< $method _once >](f)
+                        self.state().[< $method _once >](f)
                     }
                 )+
 
@@ -1200,31 +1251,65 @@ macro_rules! define_sp {
                 /// Each builder method pushes a closure that must fire in
                 /// registration order. Out-of-order fires panic.
                 $vis fn sequence(&self, f: impl FnOnce(&mut [<$prefix SeqBuilder>]<T>)) {
-                    self.sp.build_sequence(f);
+                    self.state().build_sequence(f);
                 }
 
                 /// Register closures that fire on every invocation.
                 $vis fn every(&self, f: impl FnOnce(&mut EveryClosures<T>)) {
-                    self.sp.set_every(f);
+                    self.state().set_every(f);
                 }
 
                 /// Assert that `hook` fires exactly `n` times before drop.
                 $vis fn expect_calls(&self, hook: [<$prefix Hook>], n: usize) {
-                    self.sp.set_expected(hook, n);
+                    self.state().set_expected(hook, n);
                 }
             }
 
             impl<T: Send + Sync + 'static> std::ops::Deref for [<$prefix SpGuard>]<T> {
                 type Target = T;
                 fn deref(&self) -> &T {
-                    &self.sp.value
+                    &self.state().value
                 }
             }
 
             impl<T: Send + Sync + 'static> Drop for [<$prefix SpGuard>]<T> {
                 fn drop(&mut self) {
-                    __SP_TL.with(|__c| __c.set(self.old));
-                    self.sp.assert_fires(false);
+                    // The order is the contract, and each step is why the
+                    // next one is safe:
+                    //
+                    // 1. restore this thread's TLS. Dispatch can no longer
+                    //    reach this state, and whatever was installed under
+                    //    us lives on through `old`. Taking the Option out
+                    //    with `take()` also means the `Arc` is released with
+                    //    the borrow already dropped — never while a live
+                    //    `RefCell` borrow could re-enter.
+                    // 2. run the drop assertions while the state is fully
+                    //    readable. They read counters and the deque, not the
+                    //    guarded value, so freeing `T` first would make them
+                    //    true only by accident.
+                    // 3. only now release this guard's reference. If it is
+                    //    the last, the state is freed and the guarded value's
+                    //    own `Drop` runs — the behavior the leak used to hide.
+                    //
+                    // On an unwinding thread step 3 leaks instead of freeing:
+                    // a guarded value whose `Drop` panics would double-panic
+                    // and abort the binary, which is the exact failure the
+                    // printed assertions exist to prevent. A leak on a path
+                    // that is already failing is the cheaper half of that
+                    // trade, and the OS reclaims it at process end.
+                    __SP_TL.with(|__c| {
+                        *(__c.borrow_mut()) = self.old.take()
+                    });
+                    let sp = self
+                        .sp
+                        .take()
+                        .expect("shadow-point: guard dropped twice");
+                    sp.assert_fires(false);
+                    if std::thread::panicking() {
+                        std::mem::forget(sp);
+                    } else {
+                        drop(sp);
+                    }
                 }
             }
 
@@ -1239,16 +1324,35 @@ macro_rules! define_sp {
             /// the hooks. Derefs to the shared value. Drop (of the last
             /// `Arc` clone) asserts that all registered sequences were
             /// consumed and all `expect_calls` counts match — same
-            /// assertions as `{$prefix}SpGuard`, on the same raise-or-print
-            /// rule.
+            /// assertions, in the same order and on the same
+            /// raise-or-print rule, as `{$prefix}SpGuard` — and then
+            /// releases the shared value, whose own `Drop` runs at that
+            /// point.
             #[clippy::has_significant_drop]
             #[must_use]
             $vis struct [<$prefix SharedSp>]<T: Send + Sync + 'static> {
-                sp: &'static __Sp<T>,
+                // `Option` for the same reason the guard has one: the drop
+                // below must be able to NOT release the state on an
+                // unwinding thread, and a field that is implicitly dropped
+                // at the end of `Drop::drop` cannot be withheld.
+                sp: Option<::std::sync::Arc<__Sp<T>>>,
             }
 
             #[allow(dead_code)]
             impl<T: Send + Sync + 'static> [<$prefix SharedSp>]<T> {
+                /// The `Arc` the state is reached through: cloning it is
+                /// what a worker's TLS entry installs.
+                fn held(&self) -> &::std::sync::Arc<__Sp<T>> {
+                    self.sp
+                        .as_ref()
+                        .expect("shadow-point: shared state used after drop")
+                }
+
+                /// The state behind the `Option`.
+                fn state(&self) -> &__Sp<T> {
+                    self.held()
+                }
+
                 $(
                     /// Register a fire-once closure for this hook.
                     ///
@@ -1261,26 +1365,26 @@ macro_rules! define_sp {
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
                     ) -> SpExpect<'_, T> {
-                        self.sp.[< $method _once >](f)
+                        self.state().[< $method _once >](f)
                     }
                 )+
 
                 /// Register an ordered sequence of hook fires across
                 /// threads. See `{$prefix}SpGuard::sequence`.
                 $vis fn sequence(&self, f: impl FnOnce(&mut [<$prefix SeqBuilder>]<T>)) {
-                    self.sp.build_sequence(f);
+                    self.state().build_sequence(f);
                 }
 
                 /// Register closures that fire on every invocation (on the
                 /// firing thread, after the state locks are released).
                 $vis fn every(&self, f: impl FnOnce(&mut EveryClosures<T>)) {
-                    self.sp.set_every(f);
+                    self.state().set_every(f);
                 }
 
                 /// Assert that `hook` fires exactly `n` times in total
                 /// before the last `Arc` clone is dropped.
                 $vis fn expect_calls(&self, hook: [<$prefix Hook>], n: usize) {
-                    self.sp.set_expected(hook, n);
+                    self.state().set_expected(hook, n);
                 }
 
                 /// Install this sync point on the calling thread (TLS), so
@@ -1296,11 +1400,21 @@ macro_rules! define_sp {
                 /// guard owns an `Arc` clone of this sync point: the
                 /// `SharedSp::drop` assertions run only after every worker
                 /// has dropped its guard, so the final counts/sequence
-                /// reads are race-free.
+                /// reads are race-free — and the shared value's own `Drop`
+                /// is released at that same moment, never earlier.
                 $vis fn install(
                     self: &::std::sync::Arc<Self>,
                 ) -> [<$prefix SharedGuard>]<T> {
-                    let old = __SP_TL.with(|__c| __c.replace(self.sp));
+                    // The worker's TLS entry owns a strong handle too, so
+                    // the state cannot be freed while that thread is inside
+                    // a dispatch; `_shared` is what holds the shared state
+                    // until every worker has left.
+                    let handle: ::std::sync::Arc<dyn [<$prefix SyncPoint>]> =
+                        self.held().clone();
+                    let old = __SP_TL.with(|__c| {
+                        let mut slot = __c.borrow_mut();
+                        slot.replace(handle)
+                    });
                     [<$prefix SharedGuard>] {
                         _shared: ::std::sync::Arc::clone(self),
                         old,
@@ -1311,15 +1425,30 @@ macro_rules! define_sp {
             impl<T: Send + Sync + 'static> std::ops::Deref for [<$prefix SharedSp>]<T> {
                 type Target = T;
                 fn deref(&self) -> &T {
-                    &self.sp.value
+                    &self.state().value
                 }
             }
 
             impl<T: Send + Sync + 'static> Drop for [<$prefix SharedSp>]<T> {
                 fn drop(&mut self) {
-                    // Same assertions as `{$prefix}SpGuard::drop`; the
-                    // `install_shared` state is dropped via the last `Arc`.
-                    self.sp.assert_fires(true);
+                    // Same assertions as `{$prefix}SpGuard::drop`, in the
+                    // same order, for the same reasons — and the same
+                    // unwinding guard: reaching the last `Arc` while the
+                    // thread is unwinding must print rather than raise, and
+                    // must NOT run the guarded value's `Drop`. That
+                    // destructor is consumer code; panicking inside it here
+                    // would be a double panic, and no leaked registration is
+                    // worth trading the run's report for.
+                    let sp = self
+                        .sp
+                        .take()
+                        .expect("shadow-point: shared state dropped twice");
+                    sp.assert_fires(true);
+                    if std::thread::panicking() {
+                        std::mem::forget(sp);
+                    } else {
+                        drop(sp);
+                    }
                 }
             }
 
@@ -1330,12 +1459,17 @@ macro_rules! define_sp {
             #[must_use]
             $vis struct [<$prefix SharedGuard>]<T: Send + Sync + 'static> {
                 _shared: ::std::sync::Arc<[<$prefix SharedSp>]<T>>,
-                old: &'static dyn [<$prefix SyncPoint>],
+                old: Option<::std::sync::Arc<dyn [<$prefix SyncPoint>]>>,
             }
 
             impl<T: Send + Sync + 'static> Drop for [<$prefix SharedGuard>]<T> {
                 fn drop(&mut self) {
-                    __SP_TL.with(|__c| __c.set(self.old));
+                    // Restore first, and release the worker's handle of the
+                    // previous install with the borrow already dropped: the
+                    // outer state (if any) lives on through `old`.
+                    __SP_TL.with(|__c| {
+                        *(__c.borrow_mut()) = self.old.take()
+                    });
                 }
             }
         }
