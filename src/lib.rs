@@ -12,6 +12,15 @@
 //! detection.
 
 #![forbid(unsafe_code)]
+// The crate dogfoods the lint its consumers are subject to. `define_sp!`
+// emits public items (trait, hook methods, entry struct, hook enum,
+// builders), and a consumer that keeps `#![deny(missing_docs)]` fails its
+// *test* build on any of them that carries no doc comment — production
+// builds are clean because the caller gates the macro with `#[cfg(test)]`,
+// so only a test build sees the generated items. `missing_docs` is inert
+// outside a library crate and for `#[doc(hidden)]` items, so the pin lives
+// here, in the test build of this crate, on the `sp_docs` probe module.
+#![deny(missing_docs)]
 
 // Re-export so `define_sp!` can reach `paste!` through `$crate`: without
 // it the expansion's `::paste` path lands in the CONSUMING crate's extern
@@ -398,7 +407,7 @@ impl Drop for ExecSink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// define_sp! {
 ///     pub(in crate::core_array) prefix Array
 ///     {
@@ -418,8 +427,22 @@ macro_rules! define_sp {
         $crate::paste! {
             // ── Extension trait ───────────────────────────────────────
 
+            /// The hook interface this sync point dispatches through.
+            ///
+            /// Every hook is a method with an empty default body, so a type
+            /// that implements this trait may override only the hooks it
+            /// cares about: an uninstrumented hook is the no-op it declares.
+            /// The `define_sp!` macro also implements it for the
+            /// hidden default (all no-ops) and for the generated state.
             $vis trait [<$prefix SyncPoint>]: $crate::SyncPoint {
-                $( fn $method(&self $( , _: $arg_ty)*) {} )+
+                $(
+                    #[doc = concat!(
+                        "Called at the `", stringify!($method),
+                        "` linearization point, with the arguments declared \
+                         for it. The default body does nothing."
+                    )]
+                    fn $method(&self $( , _: $arg_ty)*) {}
+                )+
             }
 
             // ── Default impl + thread-local ───────────────────────────
@@ -442,12 +465,23 @@ macro_rules! define_sp {
 
             // ── Entry-point struct ────────────────────────────────────
 
+            #[doc = concat!(
+                "Entry point for the `", stringify!($prefix),
+                "` sync point: the path `invoke!` dispatches through, and the \
+                handle the test installs. Created only by \
+                `define_sp!`; call \
+                [`install_guard`](#method.install_guard) or \
+                [`install_shared`](#method.install_shared) to arm it."
+            )]
             $vis struct [<$prefix Sp>];
 
             #[allow(non_upper_case_globals, dead_code)]
             impl [<$prefix Sp>] {
-                /// Hook identifiers as associated constants.
                 $(
+                    #[doc = concat!(
+                        "The `", stringify!($method), "` hook's identifier: names \
+                        it for `expect_calls` without spelling the enum."
+                    )]
                     $vis const $method: [<$prefix Hook>] = [<$prefix Hook>]::$method;
                 )+
 
@@ -487,11 +521,14 @@ macro_rules! define_sp {
                 /// and holds production locks — order `sequence` so the
                 /// head consumer never needs a parked thread's lock.
                 /// `sequence` orders consumption, not completion (use
-                /// [`Gate`](crate::Gate)); fire-once winners are
+                /// the `Gate` type); fire-once winners are
                 /// nondeterministic; register before spawning workers;
                 /// join workers before dropping the last `Arc`. Violations
                 /// fail with a `sequence park timeout` or a drop-time
-                /// panic, never hang. The full list with rationale:
+                /// assertion (raised on a clean thread, printed rather
+                /// than raised while the thread is already unwinding —
+                /// a panic from `Drop` there is a double panic), never
+                /// hang. The full list with rationale:
                 /// `docs/shared-mode.md` (Caveats).
                 #[track_caller]
                 $vis fn install_shared<T: Send + Sync + 'static>(
@@ -512,11 +549,20 @@ macro_rules! define_sp {
 
             // ── Hook enum ─────────────────────────────────────────────
 
+            /// Identifiers for this sync point's hooks, one variant per
+            /// declared hook. The discriminant indexes the per-hook counters
+            /// and expectations, and [`Debug`] prints the hook's own name —
+            /// the spelling `expect_calls` takes.
+            ///
+            /// [`Debug`]: std::fmt::Debug
             #[repr(usize)]
             #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
             #[allow(non_camel_case_types, dead_code)]
             $vis enum [<$prefix Hook>] {
-                $( $method, )+
+                $(
+                    #[doc = concat!("The `", stringify!($method), "` hook.")]
+                    $method,
+                )+
             }
 
             impl [<$prefix Hook>] {
@@ -573,6 +619,13 @@ macro_rules! define_sp {
             // threads never serialize on each other's `every` closures.
             // The per-hook setters double as the builder passed to
             // `every(...)`.
+            /// The `every` registration builder: one setter per hook, each
+            /// installing a closure that runs on **every** fire of that hook.
+            ///
+            /// Handed to the closure passed to `guard.every(...)`. Setting
+            /// the same hook twice — or calling
+            /// `every` twice — replaces, never appends; hooks not mentioned
+            /// become no-ops.
             #[allow(dead_code)]
             $vis struct EveryClosures<T: Send + Sync + 'static> {
                 $( $method: Option<
@@ -710,6 +763,23 @@ macro_rules! define_sp {
                     }
                 )+
 
+                /// Report one drop assertion on a thread that is already
+                /// unwinding. Private to the generated state, so the fix
+                /// adds no public item; shared by both assertion kinds so
+                /// their print arms cannot drift, while each keeps its own
+                /// raise form (and therefore its own payload).
+                ///
+                /// `let _ = writeln!`, never `eprintln!`: a failed stderr
+                /// write would panic, and a panic raised while unwinding is
+                /// the double panic this path exists to avoid.
+                fn report_while_unwinding(message: &str) {
+                    use ::std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "shadow-point: {message} (while unwinding)"
+                    );
+                }
+
                 /// Drop-time assertions: unconsumed mandatory sequence
                 /// entries and mismatched `expect_calls` counts. `shared`
                 /// only marks the install mode in the panic location.
@@ -717,6 +787,30 @@ macro_rules! define_sp {
                 /// (e.g. a trailing sentinel) may remain unconsumed;
                 /// every other entry — gated or not — must have fired.
                 fn assert_fires(&self, shared: bool) {
+                    // Assertions of a test harness, not of production code:
+                    // they must report, never take the run down with them.
+                    //
+                    // A panic inside a `Drop` that is already running because
+                    // of another panic is a double panic, and a double panic
+                    // aborts the process: the harness stops reporting, every
+                    // test that had not started is lost, and the failure that
+                    // is the real one is buried in the abort's own trace. So
+                    // when this thread is unwinding, the same diagnostics are
+                    // printed instead of raised. On a failing test the trade is
+                    // obvious: its own panic is the first message and the real
+                    // one, and an incomplete scenario is its symptom, not a
+                    // second failure. One case has no first failure to stand
+                    // behind: a `#[should_panic]` test unwinds by design, and
+                    // there the printed assertion lets the scenario pass with
+                    // an incomplete choreography (pinned by a test). This is
+                    // deliberate — the alternative was a double panic that
+                    // aborted the whole binary — but it means "expected panic"
+                    // tests must complete their scenario before panicking, or
+                    // drop the guard before the expected panic runs. On the
+                    // clean-exit path (`panicking() == false`) the assertion
+                    // is raised exactly as before, in the same payload form:
+                    // a test that forgot to finish its sequence fails.
+                    let unwinding = std::thread::panicking();
                     let seq = self
                         .sequence
                         .lock()
@@ -724,8 +818,7 @@ macro_rules! define_sp {
                     if seq.iter().any(|e| !e.optional) {
                         let unconsumed: Vec<_> =
                             seq.iter().filter(|e| !e.optional).collect();
-                        assert!(
-                            unconsumed.is_empty(),
+                        let message = format!(
                             "sync point sequence not fully consumed: \
                              {} entr{} remaining [{}] ({}installed at {})",
                             unconsumed.len(),
@@ -738,8 +831,18 @@ macro_rules! define_sp {
                             if shared { "shared, " } else { "" },
                             self.installed_at,
                         );
+                        drop(seq);
+                        if unwinding {
+                            Self::report_while_unwinding(&message);
+                        } else {
+                            // The message with no wrapper: v0.3.1 raised this
+                            // through `assert!(cond, msg)`, whose payload is
+                            // the bare message — `panic!` reproduces it.
+                            panic!("{message}");
+                        }
+                    } else {
+                        drop(seq);
                     }
-                    drop(seq);
                     let expected = self
                         .expected
                         .lock()
@@ -748,14 +851,26 @@ macro_rules! define_sp {
                         let Some(expected) = expected else { continue };
                         let actual = self.calls[i]
                             .load(::std::sync::atomic::Ordering::SeqCst);
-                        assert_eq!(
-                            actual, *expected,
+                        if actual == *expected {
+                            continue;
+                        }
+                        let message = format!(
                             "sync point hook `{}` fired {actual} \
                              time(s), expected {expected} ({}installed at {})",
                             [<$prefix Hook>]::NAMES[i],
                             if shared { "shared, " } else { "" },
                             self.installed_at,
                         );
+                        if unwinding {
+                            Self::report_while_unwinding(&message);
+                        } else {
+                            // v0.3.1 raised this through `assert_eq!`, whose
+                            // wrapper line and left/right echo are part of the
+                            // payload consumers match — the custom message is
+                            // identical, so the whole payload is byte-for-byte
+                            // what it was.
+                            assert_eq!(actual, *expected, "{message}");
+                        }
                     }
                 }
             }
@@ -937,6 +1052,12 @@ macro_rules! define_sp {
 
             // ── Sequence builder ──────────────────────────────────────
 
+            /// The `sequence` registration builder: one method per hook pushes
+            /// a step that must fire in registration order; `*_when` variants
+            /// additionally gate the step on a predicate over the fire's
+            /// arguments; `optional` marks the last step as allowed to stay
+            /// unconsumed. A step's closure runs on the firing thread at the
+            /// moment the sequence consumes it.
             #[allow(dead_code)]
             $vis struct [<$prefix SeqBuilder>]<T: Send + Sync + 'static> {
                 seq: ::std::collections::VecDeque<SeqEntry<T>>,
@@ -1008,6 +1129,12 @@ macro_rules! define_sp {
 
             // ── Fire-once fluent helper ───────────────────────────────
 
+            /// The fluent handle returned by registering a fire-once closure:
+            /// chain `.expect(n)` to pin how many times that hook must fire
+            /// before the guard (or the last `Arc` of a shared sync point) is
+            /// dropped. Dropping the handle without `.expect(n)` leaves the
+            /// one-shot registered — it still runs on the first fire — and
+            /// checks no count.
             #[allow(dead_code)]
             $vis struct SpExpect<'a, T: Send + Sync + 'static> {
                 sp: &'a __Sp<T>,
@@ -1027,7 +1154,10 @@ macro_rules! define_sp {
             /// Guard returned by `{$prefix}Sp::install_guard()`.
             ///
             /// Derefs to the guarded value. Drop asserts that all registered
-            /// sequences were consumed and all `expect_calls` counts match.
+            /// sequences were consumed and all `expect_calls` counts match —
+            /// raised on a clean thread, printed rather than raised while the
+            /// thread is already unwinding. The guarded value is never
+            /// dropped here — see `docs/guide.md`, "The leak".
             ///
             /// Drop the guard on the thread that installed it: the guard
             /// restores the previously installed sync point of ITS OWN thread
@@ -1109,7 +1239,8 @@ macro_rules! define_sp {
             /// the hooks. Derefs to the shared value. Drop (of the last
             /// `Arc` clone) asserts that all registered sequences were
             /// consumed and all `expect_calls` counts match — same
-            /// assertions as `{$prefix}SpGuard`.
+            /// assertions as `{$prefix}SpGuard`, on the same raise-or-print
+            /// rule.
             #[clippy::has_significant_drop]
             #[must_use]
             $vis struct [<$prefix SharedSp>]<T: Send + Sync + 'static> {
@@ -1209,4 +1340,23 @@ macro_rules! define_sp {
             }
         }
     };
+}
+
+/// Probe that the generated public items are documented.
+///
+/// `#[cfg(test)]` so it never enters the published API, and *not*
+/// `#[doc(hidden)]` because the lint skips hidden items: the point is to
+/// make `define_sp!`'s output publicly reachable under this crate's own
+/// `deny(missing_docs)`. A generated item that loses its doc comment
+/// breaks `cargo test` here instead of breaking a consumer's build three
+/// projects away.
+#[cfg(test)]
+pub mod sp_docs {
+    define_sp! {
+        pub prefix Docs
+        {
+            before_probe(key: &u32),
+            after_probe(len: usize),
+        }
+    }
 }

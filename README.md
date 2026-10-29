@@ -194,7 +194,7 @@ The two modes:
 | Whose fires are seen | only the installing thread | every worker that called `install()` on its thread |
 | Fires from other threads | silently dropped (they hit the default no-op) | counted, sequenced, aggregated |
 | Out-of-order sequence fire | panics immediately if a later entry expects the hook (otherwise the fire falls through) | parks the early thread at the head, panics on `PARK_TIMEOUT` |
-| Expected counts | checked at guard drop | aggregated across threads, checked at last `Arc` drop |
+| Expected counts | checked at guard drop (raised, or printed if the thread is unwinding) | aggregated across threads, checked at last `Arc` drop (same raise-or-print rule) |
 
 The three patterns:
 

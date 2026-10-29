@@ -86,6 +86,50 @@ fn sequence_order_across_threads() {
     assert_eq!(*log.lock().unwrap(), ["a", "b", "c"]);
 }
 
+/// The park arm must fail, not hang: a fire whose head can never advance
+/// waits `PARK_TIMEOUT` and reports the timeout diagnostic.
+///
+/// Ignored by default because the behavior under test *is* the wait — a
+/// run costs `PARK_TIMEOUT` (10s at the default), which belongs to a
+/// deliberate pass (`cargo test -- --ignored`) and not to the CI legs.
+/// The `sequence` replacement at the end is what lets the `Arc`'s drop
+/// assertions pass, and it is the second thing this test pins: a second
+/// `sequence` call swaps the whole deque, it does not append.
+#[test]
+#[ignore = "parks for the full PARK_TIMEOUT by design (10s)"]
+fn unattainable_head_reports_the_park_timeout() {
+    let shared = ct::CtSp::install_shared(());
+    shared.sequence(|s| {
+        s.b(|(), _| ()); // head: nothing will ever fire `b`
+        s.a(|(), _| ()); // this fire is the one that parks
+    });
+    let started = std::time::Instant::now();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _g = shared.install();
+        shadow_point::invoke!(ct::CtSp, a(0));
+    }));
+    let waited = started.elapsed();
+    let err = outcome.expect_err("the parked fire must panic, not return");
+    let msg = err
+        .downcast_ref::<String>()
+        .expect("a formatted panic message");
+    assert!(
+        msg.contains("sequence park timeout"),
+        "the diagnostic names the park: {msg}"
+    );
+    assert!(
+        msg.contains("head is `b`"),
+        "and names the blocking head: {msg}"
+    );
+    assert!(
+        waited >= PARK_TIMEOUT / 2,
+        "the thread really parked, it did not fail instantly ({waited:?})"
+    );
+    // Replace the whole deque (does not append): the abandoned entries are
+    // gone, so the Arc's drop assertions pass.
+    shared.sequence(|_s| {});
+}
+
 #[test]
 fn park_until_turn() {
     let log = mk_log();

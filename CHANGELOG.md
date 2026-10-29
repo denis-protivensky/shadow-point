@@ -11,6 +11,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/denis-protivensky/shadow-point/releases/tag/v0.1.0
 
+## [Unreleased]
+
+### Added
+- The generated public items carry doc comments, so a consumer that keeps
+  `#![deny(missing_docs)]` builds the **test build of its library crate**
+  with hooks installed (`missing_docs` is inert in integration-test crates,
+  so `tests/` files never saw the lint).
+  Before, every generated trait, method, struct, enum variant, builder and
+  associated constant tripped the lint (production builds were clean because
+  the caller gates `define_sp!` with `#[cfg(test)]`), which forced consumers
+  into an `#[allow(missing_docs)]` wrapper module. Pinned by the crate's own
+  `deny(missing_docs)` plus a `#[cfg(test)] pub mod sp_docs` probe: the lint
+  is inert outside a library crate and for `#[doc(hidden)]` items, so only
+  this shape catches a generated item losing its doc comment.
+- `tests/cross_thread.rs`: `unattainable_head_reports_the_park_timeout`
+  (`#[ignore]` — it parks for the full `PARK_TIMEOUT` by design) pins that
+  the shared park arm fails with the timeout diagnostic instead of hanging.
+- `tests/single_thread.rs`: `second_sequence_replaces_the_first` pins that a
+  second `sequence` call swaps the whole deque rather than appending.
+
+### Changed
+- Drop-time assertions (`sequence` not fully consumed, `expect_calls`
+  mismatch) are **printed instead of raised when the thread is already
+  unwinding**. A panic from a `Drop` during unwinding is a double panic, and
+  a double panic aborts the test binary: the harness stops reporting, tests
+  that had not started are lost, and the test's own failure — the real one —
+  is buried under the abort. An incomplete scenario is a symptom of that
+  failure, not a second one. The assertion is raised exactly as before on a
+  thread that is not unwinding. The printed line carries
+  `(while unwinding)`; the **raised** path keeps its payload byte-for-byte:
+  the sequence assertion was `assert!(cond, msg)` (bare message, so `panic!`
+  reproduces it) and the count assertion was `assert_eq!(a, b, msg)` and is
+  raised that way again — the wrapper line and the left/right echo are part
+  of what consumers match (verified against `v0.3.1` on stable and 1.65;
+  `raised_assertions_keep_their_payload_shape` pins it). The generated
+  `install_shared` doc, the `SpGuard` doc and the README mode table, which
+  all promised an unconditional drop-time panic, now state the conditional
+  form — in both table cells, not just the private one (`install_shared`'s
+  Caveats and `SharedSp`'s drop doc among them).
+- The unwind trade now has a named cost: `thread::panicking()` is true in a
+  `#[should_panic]` test as well, so such a test **passes** with an
+  incomplete scenario where the old code aborted the binary. Documented in
+  the guide's "Keep a failure one test" (four habits), pinned by
+  `should_panic_test_passes_with_an_incomplete_scenario`, with the two
+  shapes that keep the teeth pinned beside it
+  (`guard_dropped_before_the_expected_panic_still_asserts`).
+- `docs/guide.md`: "The leak and what it owns" — the four leak cases, each
+  derived from who holds what (`Arc` in `T` never drops, `Weak` in `T` drops
+  when the test decides, a consumed fire-once closure drops, an `every`
+  closure never does) and the three test shapes that work with them. The
+  shapes name the pitfalls they avoid: hook closures are `'static`, so the
+  `Weak`-guarded shape carries its own `Weak` clone, never the `Arc`; the
+  flag shape names which object implements `Drop` and who owns it; and the
+  narrow-scope example counts with `expect_calls` and collects with `every`
+  — a fire-once registration runs its closure on the FIRST fire only, so
+  three fires collect one key while `.expect(3)` still passes (the counter
+  counts fires, not closure runs) — and reads the collected Vec under the
+  lock instead of `Arc::try_unwrap`, which the leaked registration's own
+  `Arc` clone defeats with an opaque `Err(Arc)`. The guard API list points
+  at the section, and its drop-assertion bullet matches the new unwinding
+  rule.
+- Generated doc comments no longer link `[`Gate`](crate::Gate)` — v0.3.1's
+  one generated `crate::` link: inside a consumer crate `crate::` resolves
+  against *that* crate's root, so rustdoc renders a dead
+  `href="crate::Gate"` (verified in a consumer's rendered HTML;
+  `-D warnings` does not catch it).
+- `docs/guide.md`: "Keep a failure one test" — the four test-writing habits
+  that make one bad scenario cost one test (guard in a narrow scope with
+  assertions after it, `expect(n)` when the claim is only a count, finish
+  the scenario before a `#[should_panic]`, collect through the closure
+  instead of asserting inside it); the panic-behavior paragraph and the
+  debugging reference updated for the new shape, the double-panic rationale
+  now in one place with a link from the other.
+
 ## [0.3.1] - 2026-09-26
 
 ### Changed

@@ -44,7 +44,10 @@ Each step exists to make the next one deterministic; do not reorder:
 5. **Join every worker.**
 6. **Drop the last `Arc`** — the shared assertions (unconsumed sequence
    entries, `expect_calls` mismatches) run there. After the joins, so
-   they cannot race an in-flight fire.
+   they cannot race an in-flight fire. On a thread that is already
+   unwinding the same assertions are printed rather than raised
+   (double panic), like the guard's in private mode —
+   see [Keep a failure one test](guide.md#keep-a-failure-one-test).
 
 A worker that never calls `install()` dispatches to the default no-op
 and its fires vanish silently — that is the shared-mode version of the
