@@ -48,7 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `raised_assertions_keep_their_payload_shape` pins it). The generated
   `install_shared` doc, the `SpGuard` doc and the README mode table, which
   all promised an unconditional drop-time panic, now state the conditional
-  form — in both table cells, not just the private one.
+  form — in both table cells, not just the private one (`install_shared`'s
+  Caveats and `SharedSp`'s drop doc among them).
 - The unwind trade now has a named cost: `thread::panicking()` is true in a
   `#[should_panic]` test as well, so such a test **passes** with an
   incomplete scenario where the old code aborted the binary. Documented in

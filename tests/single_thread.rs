@@ -441,8 +441,10 @@ fn guard_dropped_before_the_expected_panic_still_asserts() {
     }));
     let msg = panic_message(&outcome);
     assert!(
-        msg.contains("sequence not fully consumed"),
-        "the drop-time assertion is the payload, not the later panic: {msg:?}"
+        msg.starts_with("sync point sequence not fully consumed"),
+        "the raise is the drop-time assertion itself, and its custom message \
+         is the payload (the escape hatch must not degrade into a wrapper \
+         that only 'mentions' the assertion): {msg:?}"
     );
 }
 
