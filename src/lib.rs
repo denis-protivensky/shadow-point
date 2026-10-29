@@ -305,6 +305,79 @@ impl Drop for CurrentFire {
 /// hook) — failing is better than hanging.
 pub const PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The park timeout the shared-mode sequence actually uses: [`PARK_TIMEOUT`]
+/// unless `SP_PARK_TIMEOUT_MS` names a number of milliseconds.
+///
+/// The constant stays the default and stays public: a consumer that imports
+/// it keeps compiling, and a library that silently failed to match the
+/// environment would be a worse neighbor than one that reads it once. The
+/// env is read on the first call and cached in an atomic, so the park path
+/// pays a relaxed load per wake, not a `getenv` — and `unsafe` is not needed
+/// (the crate forbids it, and MSRV 1.65 has no `OnceLock`).
+///
+/// A value that does not parse, or is empty, is ignored with one printed
+/// note: a typo in a CI env should not silently change what the suite
+/// proves, and should not fail a run either. `0` is legal and means "do not
+/// wait": the head is re-checked and the timeout diagnostic raised on the
+/// next wake, so a wrong choreography fails instantly instead of parking.
+///
+/// ```text
+/// SP_PARK_TIMEOUT_MS=200 cargo test
+/// ```
+pub fn park_timeout() -> std::time::Duration {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // The resolved value in milliseconds, `u64::MAX` while unresolved. A
+    // sentinel in one atomic rather than `Once` + a cell: the cache is a
+    // single integer, two racers computing the same answer is benign, and
+    // MSRV 1.65 has neither `OnceLock` nor a safe way to need one here.
+    static CACHED: AtomicU64 = AtomicU64::new(u64::MAX);
+    let cached = CACHED.load(Ordering::Relaxed);
+    if cached != u64::MAX {
+        return std::time::Duration::from_millis(cached);
+    }
+    let resolved = resolve_park_timeout(std::env::var("SP_PARK_TIMEOUT_MS"));
+    // Publish the winner, or adopt the value the first writer settled on, so
+    // every thread in the process waits on one and the same timeout. Note the
+    // shape of `compare_exchange`'s Ok arm: it yields the PREVIOUS value,
+    // which on success is the unresolved sentinel — `unwrap_or_else` over it
+    // would hand back `u64::MAX` as if it were a timeout in milliseconds
+    // (a ~584-year park, caught by the end-to-end test in
+    // `tests/park_timeout_env.rs`, not by the resolver's unit tests).
+    let winner =
+        match CACHED.compare_exchange(u64::MAX, resolved, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => resolved,
+            Err(current) => current,
+        };
+    std::time::Duration::from_millis(winner)
+}
+
+/// The resolution rule, as a pure function of the env lookup: one value for
+/// the whole process (see `park_timeout`'s cache), which is also why the
+/// environment can only be tested in a separate binary.
+fn resolve_park_timeout(raw: Result<String, std::env::VarError>) -> u64 {
+    let default_ms = PARK_TIMEOUT.as_millis() as u64;
+    match raw {
+        Err(std::env::VarError::NotPresent) => default_ms,
+        Err(_) => {
+            eprintln!(
+                "shadow-point: SP_PARK_TIMEOUT_MS is not valid UTF-8, \
+using the default {PARK_TIMEOUT:?}"
+            );
+            default_ms
+        }
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!(
+                    "shadow-point: SP_PARK_TIMEOUT_MS={raw:?} is not a \
+number of milliseconds, using the default {PARK_TIMEOUT:?}"
+                );
+                default_ms
+            }
+        },
+    }
+}
+
 // See CURRENT_FIRE: inline `const {}` blocks are experimental until 1.79.
 thread_local! {
     // Addresses of `__Sp` instances currently dispatching a hook on this
@@ -1013,7 +1086,7 @@ macro_rules! define_sp {
                                                      timeout ({:?}): thread waiting \
                                                      for `{}`, head is `{}` \
                                                      (installed at {})",
-                                                    $crate::PARK_TIMEOUT,
+                                                    $crate::park_timeout(),
                                                     __hook.name(),
                                                     __front.name(),
                                                     self.installed_at,
@@ -1023,7 +1096,7 @@ macro_rules! define_sp {
                                                 .sequence_cv
                                                 .wait_timeout(
                                                     __seq,
-                                                    $crate::PARK_TIMEOUT,
+                                                    $crate::park_timeout(),
                                                 )
                                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                                             __seq = __g;
@@ -1492,5 +1565,62 @@ pub mod sp_docs {
             before_probe(key: &u32),
             after_probe(len: usize),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn park_timeout_defaults_to_the_constant() {
+        assert_eq!(
+            resolve_park_timeout(Err(std::env::VarError::NotPresent)),
+            PARK_TIMEOUT.as_millis() as u64
+        );
+    }
+
+    #[test]
+    fn park_timeout_takes_the_env_value() {
+        assert_eq!(resolve_park_timeout(Ok("250".into())), 250);
+        assert_eq!(resolve_park_timeout(Ok(" 250 ".into())), 250);
+        assert_eq!(resolve_park_timeout(Ok("0".into())), 0);
+    }
+
+    /// The cached accessor, pinned separately from the resolution rule: the
+    /// value that comes out of `park_timeout` is what a park waits on, and
+    /// the first version of the cache returned its own "unresolved" sentinel
+    /// as a timeout (~584 years). The pure resolver cannot see that bug; only
+    /// a test on the cached path can.
+    #[test]
+    fn park_timeout_never_returns_the_unresolved_sentinel() {
+        use std::time::Duration;
+        let t = park_timeout();
+        assert!(
+            t < Duration::from_secs(60 * 60),
+            "a park timeout of {t:?} is a cache bug, not a timeout"
+        );
+        assert!(
+            t >= Duration::from_millis(0),
+            "resolved once, and stable: {:?}",
+            park_timeout()
+        );
+        assert_eq!(park_timeout(), t, "one value for the whole process");
+    }
+
+    #[test]
+    fn a_value_that_does_not_parse_falls_back_to_the_default() {
+        // A typo in a CI env must not silently change what the suite proves.
+        for bad in ["", "abc", "-5", "10.5", "1_000"] {
+            assert_eq!(
+                resolve_park_timeout(Ok(bad.into())),
+                PARK_TIMEOUT.as_millis() as u64,
+                "{bad:?} is not a number of milliseconds"
+            );
+        }
+        assert_eq!(
+            resolve_park_timeout(Err(std::env::VarError::NotUnicode("not utf8".into()))),
+            PARK_TIMEOUT.as_millis() as u64
+        );
     }
 }

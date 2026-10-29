@@ -58,10 +58,11 @@ do not need to bind.
 
 A worker that fires a hook the sequence expects only at a *later*
 position parks instead of panicking, and re-checks the head after
-every wake. The panic fires only when a full `PARK_TIMEOUT` (a
-crate-root `Duration` constant of 10 s, not per-install configurable)
+every wake. The panic fires only when a full `park_timeout()` (the
+`PARK_TIMEOUT` constant of 10 s, unless `SP_PARK_TIMEOUT_MS` names
+another value for the process — see below)
 elapses with no wake and the head still blocks the fire — a thread
-that keeps getting woken can park longer than 10 s in total. This is what makes shared mode
+that keeps getting woken can park longer than the budget in total. This is what makes shared mode
 composable: *any* thread may arrive out of order, and the sequence
 sorts arrivals — each same-hook entry is consumed exactly once, the
 thread that fires the head hook pops it and wakes the next in line.
@@ -70,9 +71,16 @@ Fires matching no entry at all never park; they fall through (see
 
 Parking is a mutual-deadlock guard, **not** a synchronization
 mechanism: if the head can never advance (no live thread will fire it),
-the parked worker panics at `PARK_TIMEOUT` with a `sequence park
+the parked worker panics at the budget with a `sequence park
 timeout` diagnostic naming the waiting hook, the head hook, and the
 install site. The test fails loudly; it does not hang.
+
+**Lowering the budget.** `SP_PARK_TIMEOUT_MS=200 cargo test` shortens the
+wait for a whole process (read once, cached; an unparsable value falls back
+to the default and says so). Use it for a deliberate pass over tests that
+*are* the wait, not as a CI default: the budget is the deadlock guard, so a
+small one can mistake a loaded scheduler for a stuck head and fail a correct
+test: on a busy machine a runnable thread can wait seconds for its slice.
 
 `Gate::must_wait` / `wait_timeout` take any `Duration` — the examples
 reuse `PARK_TIMEOUT` merely as a convenient budget.

@@ -14,6 +14,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `park_timeout()`, the value the shared-mode sequence actually parks for:
+  `PARK_TIMEOUT` unless `SP_PARK_TIMEOUT_MS` names milliseconds. The public
+  constant keeps its meaning and stays the default, so a consumer importing
+  it is untouched; the env is read once per process and cached in one atomic
+  (no `unsafe`, no `OnceLock`, so MSRV 1.65 holds). A value that does not
+  parse falls back to the default **and says so on stderr** — a typo in a CI
+  env should not silently change what a suite proves. `0` is legal: a
+  choreography that can never advance then reports at once instead of
+  parking. Resolution is unit-tested, and the park itself end-to-end in
+  `tests/park_timeout_env.rs` (child processes with their own env, since the
+  cache is per-process).
+  Set the env for the ignored `unattainable_head_reports_the_park_timeout`
+  to make that pass cheap; do **not** set it for a whole CI leg — parking is
+  a mutual-deadlock guard, and a 200 ms budget can mistake a loaded
+  scheduler for a stuck head and fail a correct test.
+
 ### Changed
 - **Breaking (semantics): the sync-point state is reclaimed, not leaked.**
   `install_guard`/`install_shared` held it through `Box::leak`, so the
@@ -50,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assertions → release), the new ownership table, the measured cost, and a
   migration note. `with_dyn` documents the clone-before-call rule and why a
   hook may install or drop a guard without breaking the TLS borrow.
+- `docs/shared-mode.md`: the parking section names `park_timeout()` instead
+  of asserting that `PARK_TIMEOUT` is "not per-install configurable", and
+  adds how to lower the budget — with the warning that it is a deadlock
+  guard, so a short budget on a busy machine can fail a correct test.
 
 ## [0.3.2] - 2026-10-30
 
