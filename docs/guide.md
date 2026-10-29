@@ -221,14 +221,10 @@ so other threads keep running and reporting their own diagnostics.
 
 Guard/`Arc` drop assertions are **reported, not raised, while the thread
 is already unwinding**: the same message goes to stderr with
-`(while unwinding)` appended, and the process keeps running. A panic
-from a destructor during unwinding is a double panic, and a double panic
-aborts the test binary — the harness stops reporting, every test that had
-not started is lost, and the test's own failure (the real one) is buried
-under the abort. An incomplete scenario is a symptom of that failure, not
-a second failure. On a thread that is *not* unwinding the assertion is
-raised exactly as before: a test that ends with an unconsumed sequence or
-a wrong call count fails. See
+`(while unwinding)` appended, and the process keeps running. On a thread
+that is *not* unwinding the assertion is raised exactly as before: a test
+that ends with an unconsumed sequence or a wrong call count fails. Why
+printing was the only safe form, and the habits that keep the fix sharp:
 [Keep a failure one test](#keep-a-failure-one-test).
 
 - One fire-once slot per hook: a second registration for the same hook
@@ -458,7 +454,7 @@ panic on top of the first, and Rust turns a double panic into an abort:
 the test binary dies, the harness reports nothing after it, and the real
 failure — the test's own — is the only thing worth reading. The library
 now prints that diagnostic instead of raising it, so an unwinding drop
-cannot take the run down. Three habits keep the fix useful rather than
+cannot take the run down. Four habits keep the fix useful rather than
 merely survivable:
 
 - **Let the guard own a narrow scope, and assert outside it.** The drop
@@ -466,16 +462,27 @@ merely survivable:
   incomplete scenario still fails loudly with its own message, and the
   test's own assertion fails separately:
 
-  ```rust
+  ```rust,ignore
   fn observed_by_the_hook() -> Vec<u32> {
       let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-      {
+      let out = {
           let guard = MyModuleSp::install_guard(());
           let s = seen.clone();
-          guard.before_insert(move |_, key| s.lock().unwrap().push(*key));
+          // The count is what makes this a checked scenario: without
+          // `.expect(3)` the guard has no drop assertion at all, a hook
+          // that never fires is silent, and the Vec below comes back empty
+          // — an assert in the test body, not a scenario message here.
+          guard
+              .before_insert(move |_, key| s.lock().unwrap().push(*key))
+              .expect(3);
           run_the_thing(); // the instrumented call, hooks fire here
-      } // the guard (and its drop assertions) end here
-      std::sync::Arc::try_unwrap(seen).unwrap().into_inner().unwrap()
+          // Read through the same lock instead of `Arc::try_unwrap`: the
+          // guard's registration may hold another `Arc` clone of `seen`
+          // (leaked until reclamation), and `try_unwrap` would fail with
+          // an opaque `Err(Arc)` rather than say the scenario was not run.
+          seen.lock().unwrap().clone()
+      }; // the guard (and its drop assertions) end here
+      out
   }
 
   #[test]
@@ -485,9 +492,21 @@ merely survivable:
   ```
 
 - **Prefer `expect(n)` to `sequence(...)` when the claim is only a
-  count.** `expect_calls` / `.expect(n)` asserts one number and cannot
+  count.** `expect_calls` / `.expect(n)` assert one number and cannot
   strand a step. `sequence` is a choreography: an unfinished choreography
   is exactly the message that used to abort the binary.
+
+- **Finish the scenario before a `#[should_panic]`.** `thread::panicking()`
+  is true inside an expected panic too — that test unwinds by design, with
+  no first failure behind it — so a guard dropped there prints its
+  assertion instead of raising it, and an incomplete choreography **passes**.
+  This is the accepted cost of the fix (the alternative aborted the whole
+  binary, pinned by `should_panic_test_passes_with_an_incomplete_scenario`),
+  and two shapes keep the teeth: end the scenario and `drop(guard)` before
+  the expected `panic!` (pinned by
+  `guard_dropped_before_the_expected_panic_still_asserts`), or keep the
+  guard outside a `catch_unwind` — after the catch the thread is no longer
+  unwinding and the drop raises on the clean path.
 
 - **Do not let a hook closure panic on an assertion it wants to make.**
   A panic raised inside a closure propagates out of the `invoke!` site and
@@ -496,17 +515,18 @@ merely survivable:
   collect through the closure (the `seen` vector above) and assert after
   the guard is gone.
 
-With these, one bad scenario costs one test. The third habit is the one
+With these, one bad scenario costs one test. The last habit is the one
 that catches people first, because "assert inside the hook" reads as the
 natural way to check something at a linearization point.
 
 ## The leak and what it owns
 
 `install_guard`/`install_shared` leak their state on purpose: the thread-local
-dispatch holds is `&'static dyn …`, and in shared mode that same state is
+dispatch holds a `&'static dyn …`, and in shared mode that same state is
 published to worker threads, so reclamation would have to prove no thread is
 inside a dispatch at the moment the last handle goes away. For a `Vec` or a
-`Mutex` the leak is nothing — the process ends and the allocator wins. What it
+`Mutex` the leak is nothing — the process ends and the OS reclaims its whole
+address space, leaked allocations included. What it
 does change is **ownership of destructors**, and the four cases below are
 measured, not assumed:
 
@@ -523,30 +543,76 @@ A test that wants to prove a file handle closes, a child process dies, or an
 mpsc receiver shuts down cannot express that by putting the owner in `T`
 directly. Three shapes work:
 
-- **Guard a `Weak`** (the table's second row). `install_guard(Arc::downgrade(&v))`
-  and the instrumented code takes the `Arc` itself; hook bodies call
-  `v.upgrade()`, which is `Some` for as long as the test holds the value. The
-  assertion `assert!(v.upgrade().is_none())` after `drop(v)` then really means
-  "the destructor ran and nothing else kept it alive" — a test the leak cannot
-  fake. This costs the hook body one `upgrade()` per fire, which is exactly the
+- **Guard a `Weak`** (the table's second row). Pass `Arc::downgrade(&v)` as
+  `T` and let the instrumented code take the `Arc` itself. The hook closures
+  are `'static`, so they cannot borrow the test's `v`; give them their own
+  `Weak` clone to upgrade:
+
+  ```rust,ignore
+  let v = std::sync::Arc::new(Resource::open());
+  let w = std::sync::Arc::downgrade(&v);
+  let guard = MyModuleSp::install_guard(std::sync::Arc::downgrade(&v));
+  guard.before_close({
+      let w = w.clone(); // a Weak, never the Arc: an Arc here would keep
+                         // the value alive inside the leaked registration
+      move |_, _| {
+          if let Some(res) = w.upgrade() {
+              res.note_closed();
+          }
+      }
+  }).expect(1);
+  run_the_thing(std::sync::Arc::clone(&v)); // the code under test owns a strong Arc
+  drop(v);
+  assert!(w.upgrade().is_none(), "the destructor ran and nothing kept it alive");
+  ```
+
+  With `T = Weak<_>` the leak holds only a weak handle, so that last
+  assertion really means "the destructor ran" — a test the leak cannot fake.
+  This costs the hook body one `upgrade()` per fire, which is exactly the
   price of knowing who owns the value.
-- **Assert on a flag the destructor sets.** Put an `Arc<AtomicBool>` (or an
-  `Arc<Mutex<Vec<_>>`) both in `T` *and* in the test, and let the destructor
-  write it. `T` is never dropped, but the *other* `Arc` clone is, and the flag
-  records the event the test cares about. Use this when the destructor is
-  inside the instrumented type and cannot be bypassed.
+- **Assert on a flag the destructor sets.** The flag is a channel, not the
+  object under test — so name all four roles: the object that implements
+  `Drop` is a small `Dropped(Arc<AtomicBool>)` wrapper, owned by the
+  *instrumented type* (it lives inside the production value); it is dropped
+  when *the production value* releases it; and the flag itself lives in the
+  test's own `Arc<AtomicBool>` clone, which the leak cannot reach.
+
+  ```rust,ignore
+  struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+  impl Drop for Dropped {
+      fn drop(&mut self) {
+          self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+      }
+  }
+  struct Resource {
+      _watchdog: Dropped, // the destructor that runs is THIS one, inside T
+      // ... real fields ...
+  }
+
+  let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+  let resource = Resource { _watchdog: Dropped(flag.clone()) };
+  let guard = MyModuleSp::install_guard(()); // T is the unit: nothing is leaked on the T side
+  // ... drive the instrumented code so the production value releases `resource` ...
+  assert!(flag.load(std::sync::atomic::Ordering::SeqCst), "the watchdog ran");
+  ```
+
+  The point is that `T` never drops, so a destructor *inside* `T` can never
+  be the assertion — it must be a destructor the production code itself
+  triggers, reported through a handle the test also holds. Use this when the
+  destructor lives inside the instrumented type and cannot be bypassed.
 - **Test the destructor outside a sync point.** The leak is shadow-point's; the
   type's own `Drop` is ordinary Rust. `drop(map); assert!(file.is_closed())`
   needs no hook at all. Reserve the sync points for what only they can pin —
   the interleaving.
 
-The same logic applies to captures. An `every(...)` closure that runs a
-`tempfile::TempDir` or a `Child` into its environment leaks that handle too,
-because the registration is never consumed: capture a `Weak`, or capture
-nothing and read state through `T`.
+The same logic applies to captures. An `every(...)` closure that
+*captures* a `tempfile::TempDir` or a `Child` in its environment leaks that
+handle too, because the registration is never consumed: capture a `Weak`, or
+capture nothing and read state through `T`.
 
-Finally, `SP_TRACE` and the guard's `expect`/sequence assertions are all
-process-lifetime cheap, so a test suite that installs a few hundred times is
+Finally, each leaked state is small — counters, deque slots, captured
+handles — and bounded by the process lifetime, so a test suite that installs
+a few hundred times is
 fine; the leak becomes a real cost only when installs happen per-iteration in
 a benchmark or in a loop that never exits — which is why "do not call
 `install` in a long-lived loop" is the sentence in the API list.
@@ -700,7 +766,8 @@ eprintln!("{} #{} on {:?}", f.hook, f.index, std::thread::current().id());
 
 ### Panic messages
 
-Drop assertions include the install location:
+Drop assertions include the install location. Each diagnostic is one
+line; the samples below are wrapped for readability:
 
 ```
 sync point hook `before_insert` fired 1 time(s), expected 2
@@ -710,7 +777,8 @@ sync point hook `before_insert` fired 1 time(s), expected 2
 (In shared mode the location is marked `(shared, installed at ...)`.)
 
 The same message printed rather than raised, because the thread was
-already unwinding when the guard dropped — stderr, prefixed, and the run
+already unwinding when the guard (or the shared state's last `Arc`)
+dropped — stderr, prefixed, and the run
 continues:
 
 ```

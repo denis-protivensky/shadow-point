@@ -403,3 +403,93 @@ fn deref_and_current_fire() {
     );
     drop(g);
 }
+
+/// The cost the print-instead-of-raise trade accepts, pinned as a feature:
+/// `thread::panicking()` is true inside a `#[should_panic]` test too — the
+/// test unwinds by design, with no first failure behind it — so an
+/// incomplete scenario there passes with the assertion printed, not raised.
+/// The alternative was a double-panic abort of the whole binary (measured
+/// on a real consumer: one failing sp-test reported 3 of 73 tests and died
+/// on SIGABRT), so this is a deliberate, documented trade. If this test
+/// ever fails, the print path silently became a raise again.
+#[test]
+#[should_panic(expected = "expected panic")]
+fn should_panic_test_passes_with_an_incomplete_scenario() {
+    let g = single::SingleSp::install_guard(());
+    g.sequence(|q| {
+        q.a(|_, _| ());
+    });
+    // The guard is still alive: its drop assertions run while unwinding,
+    // are printed, and cannot abort — so the expected panic is what the
+    // harness sees, and the test passes.
+    panic!("expected panic");
+}
+
+/// The way a scenario keeps its teeth across an expected panic: drop the
+/// guard before panicking, and the assertion raises on the clean path,
+/// aborting none of the reporting. Pinned so the escape hatch the docs
+/// recommend is a behavior, not a hope.
+#[test]
+fn guard_dropped_before_the_expected_panic_still_asserts() {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let g = single::SingleSp::install_guard(());
+        g.sequence(|q| {
+            q.a(|_, _| ());
+        });
+        drop(g); // the assertion raises here, on a clean thread
+        panic!("unreachable");
+    }));
+    let msg = panic_message(&outcome);
+    assert!(
+        msg.contains("sequence not fully consumed"),
+        "the drop-time assertion is the payload, not the later panic: {msg:?}"
+    );
+}
+
+/// The raised path's payload, pinned for both assertion kinds, because
+/// consumers match on it. The sequence path went `assert!(cond, msg)` →
+/// `panic!(msg)` — the bare message, the same payload; the count path went
+/// `assert_eq!` → `panic!` and was put back to `assert_eq!` after review
+/// caught the loss of the `left == right` wrapper. An assertion that now
+/// prints instead of raising also lands here on the clean path, so the
+/// pin holds without unwinding.
+#[test]
+fn raised_assertions_keep_their_payload_shape() {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let g = single::SingleSp::install_guard(());
+        g.expect_calls(single::SingleSp::a, 3);
+        shadow_point::invoke!(single::SingleSp, a(0));
+        drop(g);
+    }));
+    let msg = panic_message(&outcome);
+    // The wrapper's own wording is version-dependent — stable prints
+    // "assertion `left == right` failed" and 1.65 prints
+    // "assertion failed: `(left == right)`" with backticked values — so pin
+    // the two properties that hold under both: the wrapper is present at all
+    // (a bare-message payload would mean the count path regressed to
+    // `panic!`), and the custom message consumers match is byte-for-byte in
+    // its place.
+    assert!(
+        msg.starts_with("assertion") && msg.contains("left") && msg.contains("right"),
+        "the count path lost its assert_eq! wrapper: {msg:?}"
+    );
+    assert!(
+        msg.contains(
+            "sync point hook `a` fired 1 time(s), expected 3 (installed at tests/single_thread.rs:"
+        ),
+        "the count path's custom message changed: {msg:?}"
+    );
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let g = single::SingleSp::install_guard(());
+        g.sequence(|q| {
+            q.a(|_, _| ());
+        });
+        drop(g);
+    }));
+    let msg = panic_message(&outcome);
+    assert!(
+        msg.starts_with("sync point sequence not fully consumed"),
+        "the sequence path must raise the bare message, no wrapper: {msg:?}"
+    );
+}

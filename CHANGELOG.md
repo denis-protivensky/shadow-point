@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - The generated public items carry doc comments, so a consumer that keeps
-  `#![deny(missing_docs)]` builds its **test** target with hooks installed.
+  `#![deny(missing_docs)]` builds the **test build of its library crate**
+  with hooks installed (`missing_docs` is inert in integration-test crates,
+  so `tests/` files never saw the lint).
   Before, every generated trait, method, struct, enum variant, builder and
   associated constant tripped the lint (production builds were clean because
   the caller gates `define_sp!` with `#[cfg(test)]`), which forced consumers
@@ -38,21 +40,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is buried under the abort. An incomplete scenario is a symptom of that
   failure, not a second one. The assertion is raised exactly as before on a
   thread that is not unwinding. The printed line carries
-  `(while unwinding)`; the raised path's message text is byte-for-byte what it
-  always was (verified against `v0.3.1` output), so a test matching the panic
-  text keeps matching it. The generated `install_shared` doc and the README
-  mode table, which both promised an unconditional drop-time panic, now state
-  the conditional form.
+  `(while unwinding)`; the **raised** path keeps its payload byte-for-byte:
+  the sequence assertion was `assert!(cond, msg)` (bare message, so `panic!`
+  reproduces it) and the count assertion was `assert_eq!(a, b, msg)` and is
+  raised that way again — the wrapper line and the left/right echo are part
+  of what consumers match (verified against `v0.3.1` on stable and 1.65;
+  `raised_assertions_keep_their_payload_shape` pins it). The generated
+  `install_shared` doc, the `SpGuard` doc and the README mode table, which
+  all promised an unconditional drop-time panic, now state the conditional
+  form — in both table cells, not just the private one.
+- The unwind trade now has a named cost: `thread::panicking()` is true in a
+  `#[should_panic]` test as well, so such a test **passes** with an
+  incomplete scenario where the old code aborted the binary. Documented in
+  the guide's "Keep a failure one test" (four habits), pinned by
+  `should_panic_test_passes_with_an_incomplete_scenario`, with the two
+  shapes that keep the teeth pinned beside it
+  (`guard_dropped_before_the_expected_panic_still_asserts`).
 - `docs/guide.md`: "The leak and what it owns" — the four measured leak cases
   (`Arc` in `T` never drops, `Weak` in `T` drops when the test decides, a
   consumed fire-once closure drops, an `every` closure never does) and the
   three test shapes that work with them; the guard API list now points there
-  and its drop-assertion bullet matches the new unwinding rule.
-- `docs/guide.md`: "Keep a failure one test" — the three test-writing habits
+  and its drop-assertion bullet matches the new unwinding rule. Reviewed and
+  corrected: the `Weak`-guarded shape now compiles as written (hook closures
+  are `'static`, so they need their own
+  `Weak` clone; the old text borrowed and then used a moved handle), the
+  flag shape names which object implements `Drop` and who owns it, and the
+  `try_unwrap` example gained the `.expect(1)` that makes its "drop
+  assertions end here" comment true — without it a hook that never fires
+  fails as an opaque `Err(Arc)`. The placeholder examples are fenced
+  `rust,ignore` like the rest of the guide. The narrow-scope example reads
+  the collected Vec under the lock instead of `Arc::try_unwrap`, which a
+  leaked registration clone can defeat.
+- Generated doc comments no longer link `[`define_sp!`](crate::define_sp)`:
+  inside a consumer crate `crate::` resolves against *that* crate's root and
+  rustdoc emits a dead `href="crate::define_sp"` (verified in a consumer's
+  rendered HTML; `-D warnings` does not catch it). The `SpExpect` doc said
+  "asserts nothing but the one-shot itself" for a handle whose drop checks
+  nothing at all.
+- `docs/guide.md`: "Keep a failure one test" — the four test-writing habits
   that make one bad scenario cost one test (guard in a narrow scope with
-  assertions after it, `expect(n)` when the claim is only a count, collect
-  through the closure instead of asserting inside it); the panic-behavior
-  paragraph and the debugging reference updated for the new shape.
+  assertions after it, `expect(n)` when the claim is only a count, finish
+  the scenario before a `#[should_panic]`, collect through the closure
+  instead of asserting inside it); the panic-behavior paragraph and the
+  debugging reference updated for the new shape, the double-panic rationale
+  now in one place with a link from the other.
 
 ## [0.3.1] - 2026-09-26
 
