@@ -525,7 +525,8 @@ macro_rules! define_sp {
                 /// nondeterministic; register before spawning workers;
                 /// join workers before dropping the last `Arc`. Violations
                 /// fail with a `sequence park timeout` or a drop-time
-                /// panic, never hang. The full list with rationale:
+                /// assertion (printed rather than raised while the thread is
+                /// already unwinding), never hang. The full list with rationale:
                 /// `docs/shared-mode.md` (Caveats).
                 #[track_caller]
                 $vis fn install_shared<T: Send + Sync + 'static>(

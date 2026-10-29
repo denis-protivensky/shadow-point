@@ -40,7 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thread that is not unwinding. The printed line carries
   `(while unwinding)`; the raised path's message text is byte-for-byte what it
   always was (verified against `v0.3.1` output), so a test matching the panic
-  text keeps matching it.
+  text keeps matching it. The generated `install_shared` doc and the README
+  mode table, which both promised an unconditional drop-time panic, now state
+  the conditional form.
 - `docs/guide.md`: "The leak and what it owns" — the four measured leak cases
   (`Arc` in `T` never drops, `Weak` in `T` drops when the test decides, a
   consumed fire-once closure drops, an `every` closure never does) and the
