@@ -155,11 +155,15 @@ builds.
 - **Derefs** to `&T` — call methods on the value directly through the guard.
 - **Registers closures** for hooks.
 - **Auto-counts** every hook fire.
-- **Asserts on drop** — unconsumed sequence entries and count mismatches
-  panic. Entries marked `.optional()` are exempt (see below).
+- **Asserts on drop** — an unconsumed sequence entry or a count mismatch
+  panics on a thread that is not unwinding; while the thread is already
+  unwinding the same message is printed instead (see
+  [Keep a failure one test](#keep-a-failure-one-test)). Entries marked
+  `.optional()` are exempt (see below).
 - **Leaks per-install state** (`Box::leak` by design — normal for test
   instantiation, but do not call `install` in a long-lived loop). Applies
-  to `install_shared` too.
+  to `install_shared` too. What that costs is measured, not guessed — see
+  [The leak and what it owns](#the-leak-and-what-it-owns).
 - **Restores on drop** — the guard binds this thread's dispatch for its
   lifetime and, on drop, restores the previously installed sync point
   (stacked installs unwind LIFO; after the drop, fires on this thread
@@ -213,10 +217,19 @@ Panic behavior: a panic inside a hook closure propagates from the
 `invoke!` site like any other panic and unwinds the instrumented
 operation. The state is unwind-safe — the consumed entry stays
 consumed, the fire stays counted, and every lock recovers from poison,
-so other threads keep running and reporting their own diagnostics. On
-the test thread, guard/`Arc` drop assertions run during unwinding and
-may panic on top of the first one — a double panic aborts the process;
-the first message is the real failure.
+so other threads keep running and reporting their own diagnostics.
+
+Guard/`Arc` drop assertions are **reported, not raised, while the thread
+is already unwinding**: the same message goes to stderr with
+`(while unwinding)` appended, and the process keeps running. A panic
+from a destructor during unwinding is a double panic, and a double panic
+aborts the test binary — the harness stops reporting, every test that had
+not started is lost, and the test's own failure (the real one) is buried
+under the abort. An incomplete scenario is a symptom of that failure, not
+a second failure. On a thread that is *not* unwinding the assertion is
+raised exactly as before: a test that ends with an unconsumed sequence or
+a wrong call count fails. See
+[Keep a failure one test](#keep-a-failure-one-test).
 
 - One fire-once slot per hook: a second registration for the same hook
   replaces the first (last wins).
@@ -438,6 +451,106 @@ fn get_survives_detach_underneath() {
 }
 ```
 
+## Keep a failure one test
+
+A drop assertion that fires while the test is already failing is a second
+panic on top of the first, and Rust turns a double panic into an abort:
+the test binary dies, the harness reports nothing after it, and the real
+failure — the test's own — is the only thing worth reading. The library
+now prints that diagnostic instead of raising it, so an unwinding drop
+cannot take the run down. Three habits keep the fix useful rather than
+merely survivable:
+
+- **Let the guard own a narrow scope, and assert outside it.** The drop
+  then happens on a thread that is not unwinding, so a genuinely
+  incomplete scenario still fails loudly with its own message, and the
+  test's own assertion fails separately:
+
+  ```rust
+  fn observed_by_the_hook() -> Vec<u32> {
+      let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+      {
+          let guard = MyModuleSp::install_guard(());
+          let s = seen.clone();
+          guard.before_insert(move |_, key| s.lock().unwrap().push(*key));
+          run_the_thing(); // the instrumented call, hooks fire here
+      } // the guard (and its drop assertions) end here
+      std::sync::Arc::try_unwrap(seen).unwrap().into_inner().unwrap()
+  }
+
+  #[test]
+  fn one_visit_per_key() {
+      assert_eq!(observed_by_the_hook(), vec![1, 2, 3]);
+  }
+  ```
+
+- **Prefer `expect(n)` to `sequence(...)` when the claim is only a
+  count.** `expect_calls` / `.expect(n)` asserts one number and cannot
+  strand a step. `sequence` is a choreography: an unfinished choreography
+  is exactly the message that used to abort the binary.
+
+- **Do not let a hook closure panic on an assertion it wants to make.**
+  A panic raised inside a closure propagates out of the `invoke!` site and
+  unwinds the instrumented operation mid-flight — which is the intended
+  way to stop a scenario, but the record belongs in the test body:
+  collect through the closure (the `seen` vector above) and assert after
+  the guard is gone.
+
+With these, one bad scenario costs one test. The third habit is the one
+that catches people first, because "assert inside the hook" reads as the
+natural way to check something at a linearization point.
+
+## The leak and what it owns
+
+`install_guard`/`install_shared` leak their state on purpose: the thread-local
+dispatch holds is `&'static dyn …`, and in shared mode that same state is
+published to worker threads, so reclamation would have to prove no thread is
+inside a dispatch at the moment the last handle goes away. For a `Vec` or a
+`Mutex` the leak is nothing — the process ends and the allocator wins. What it
+does change is **ownership of destructors**, and the four cases below are
+measured, not assumed:
+
+| What holds what | Dropped? | Consequence |
+|---|---|---|
+| `T` is an `Arc<_>` and the test clones it into `install_guard` | **never** | the leaked state keeps its own strong reference, so the test's `drop` is not the last one |
+| `T` is a `Weak<_>`, the test keeps the `Arc` | **when the test decides** | the leak holds only a weak handle; the destructor is the test's to schedule |
+| a fire-once closure that a fire actually took | **yes** | consuming the slot drops the closure and everything it captured |
+| an `every` closure, or a fire-once that never fired | **never** | the registration lives forever, and so does every handle it captured |
+
+So the rule is not "never put anything with a destructor in `T`" — it is
+**"do not let the thing you are asserting be a destructor the leak owns."**
+A test that wants to prove a file handle closes, a child process dies, or an
+mpsc receiver shuts down cannot express that by putting the owner in `T`
+directly. Three shapes work:
+
+- **Guard a `Weak`** (the table's second row). `install_guard(Arc::downgrade(&v))`
+  and the instrumented code takes the `Arc` itself; hook bodies call
+  `v.upgrade()`, which is `Some` for as long as the test holds the value. The
+  assertion `assert!(v.upgrade().is_none())` after `drop(v)` then really means
+  "the destructor ran and nothing else kept it alive" — a test the leak cannot
+  fake. This costs the hook body one `upgrade()` per fire, which is exactly the
+  price of knowing who owns the value.
+- **Assert on a flag the destructor sets.** Put an `Arc<AtomicBool>` (or an
+  `Arc<Mutex<Vec<_>>`) both in `T` *and* in the test, and let the destructor
+  write it. `T` is never dropped, but the *other* `Arc` clone is, and the flag
+  records the event the test cares about. Use this when the destructor is
+  inside the instrumented type and cannot be bypassed.
+- **Test the destructor outside a sync point.** The leak is shadow-point's; the
+  type's own `Drop` is ordinary Rust. `drop(map); assert!(file.is_closed())`
+  needs no hook at all. Reserve the sync points for what only they can pin —
+  the interleaving.
+
+The same logic applies to captures. An `every(...)` closure that runs a
+`tempfile::TempDir` or a `Child` into its environment leaks that handle too,
+because the registration is never consumed: capture a `Weak`, or capture
+nothing and read state through `T`.
+
+Finally, `SP_TRACE` and the guard's `expect`/sequence assertions are all
+process-lifetime cheap, so a test suite that installs a few hundred times is
+fine; the leak becomes a real cost only when installs happen per-iteration in
+a benchmark or in a loop that never exits — which is why "do not call
+`install` in a long-lived loop" is the sentence in the API list.
+
 ## Hook arguments
 
 Hooks return nothing: the generated trait methods have no return type,
@@ -595,6 +708,15 @@ sync point hook `before_insert` fired 1 time(s), expected 2
 ```
 
 (In shared mode the location is marked `(shared, installed at ...)`.)
+
+The same message printed rather than raised, because the thread was
+already unwinding when the guard dropped — stderr, prefixed, and the run
+continues:
+
+```
+shadow-point: sync point hook `before_insert` fired 1 time(s), expected 2
+(installed at src/my_module.rs:142:21) (while unwinding)
+```
 
 A private-mode ordering violation names the expected head and the fire
 that arrived:

@@ -11,6 +11,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/denis-protivensky/shadow-point/releases/tag/v0.1.0
 
+## [Unreleased]
+
+### Added
+- The generated public items carry doc comments, so a consumer that keeps
+  `#![deny(missing_docs)]` builds its **test** target with hooks installed.
+  Before, every generated trait, method, struct, enum variant, builder and
+  associated constant tripped the lint (production builds were clean because
+  the caller gates `define_sp!` with `#[cfg(test)]`), which forced consumers
+  into an `#[allow(missing_docs)]` wrapper module. Pinned by the crate's own
+  `deny(missing_docs)` plus a `#[cfg(test)] pub mod sp_docs` probe: the lint
+  is inert outside a library crate and for `#[doc(hidden)]` items, so only
+  this shape catches a generated item losing its doc comment.
+- `tests/cross_thread.rs`: `unattainable_head_reports_the_park_timeout`
+  (`#[ignore]` — it parks for the full `PARK_TIMEOUT` by design) pins that
+  the shared park arm fails with the timeout diagnostic instead of hanging.
+- `tests/single_thread.rs`: `second_sequence_replaces_the_first` pins that a
+  second `sequence` call swaps the whole deque rather than appending.
+
+### Changed
+- Drop-time assertions (`sequence` not fully consumed, `expect_calls`
+  mismatch) are **printed instead of raised when the thread is already
+  unwinding**. A panic from a `Drop` during unwinding is a double panic, and
+  a double panic aborts the test binary: the harness stops reporting, tests
+  that had not started are lost, and the test's own failure — the real one —
+  is buried under the abort. An incomplete scenario is a symptom of that
+  failure, not a second one. The assertion is raised exactly as before on a
+  thread that is not unwinding. The printed line carries
+  `(while unwinding)`; the raised path's message text is byte-for-byte what it
+  always was (verified against `v0.3.1` output), so a test matching the panic
+  text keeps matching it.
+- `docs/guide.md`: "The leak and what it owns" — the four measured leak cases
+  (`Arc` in `T` never drops, `Weak` in `T` drops when the test decides, a
+  consumed fire-once closure drops, an `every` closure never does) and the
+  three test shapes that work with them; the guard API list now points there
+  and its drop-assertion bullet matches the new unwinding rule.
+- `docs/guide.md`: "Keep a failure one test" — the three test-writing habits
+  that make one bad scenario cost one test (guard in a narrow scope with
+  assertions after it, `expect(n)` when the claim is only a count, collect
+  through the closure instead of asserting inside it); the panic-behavior
+  paragraph and the debugging reference updated for the new shape.
+
 ## [0.3.1] - 2026-09-26
 
 ### Changed

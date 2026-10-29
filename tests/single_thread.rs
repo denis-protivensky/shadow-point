@@ -205,6 +205,124 @@ fn expect_calls_mismatch_panics_at_drop() {
     drop(g);
 }
 
+// The drop assertions must not turn a test failure into a process abort.
+//
+// A panic raised while the thread is already unwinding is a double panic,
+// and a double panic aborts the whole process: the harness stops
+// reporting, every test that had not started is lost, and the real
+// failure — the test's own panic — is buried under the abort. So when
+// `assert_fires` runs during unwinding it prints the same diagnostic
+// instead of raising it, and the assertion still fires normally on the
+// clean-exit path.
+//
+// These tests are the in-process shape of that contract: the guarded
+// value is dropped by an unwind the test starts on purpose, and the
+// `catch_unwind` returns instead of the binary aborting. Without the
+// fix the whole test binary dies on SIGABRT rather than reporting a
+// single failed test — which is exactly why the regression can only be
+// pinned this way, not asserted as a `JoinHandle` error.
+
+#[test]
+fn guard_drop_assertion_does_not_abort_while_unwinding() {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let g = single::SingleSp::install_guard(());
+        g.sequence(|q| {
+            q.a(|_, _| ());
+        });
+        // Fail while the guard is still alive: its Drop runs during the
+        // unwinding, with the mandatory sequence entry unconsumed.
+        panic!("the test's own failure");
+    }));
+    assert!(
+        outcome.is_err(),
+        "the scenario failed as designed, and the drop rode it out"
+    );
+    // The TLS install of this thread was restored by that Drop: a fire
+    // now dispatches to the default no-op, so a fresh guard can assert
+    // normally again — the unwind path left no half-installed state.
+    let g = single::SingleSp::install_guard(());
+    g.sequence(|q| {
+        q.a(|_, _| ());
+    });
+    shadow_point::invoke!(single::SingleSp, a(1));
+    drop(g);
+}
+
+#[test]
+fn expect_mismatch_assertion_does_not_abort_while_unwinding() {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let g = single::SingleSp::install_guard(());
+        g.expect_calls(single::SingleSp::a, 3);
+        shadow_point::invoke!(single::SingleSp, a(0));
+        panic!("the test's own failure");
+    }));
+    assert!(
+        outcome.is_err(),
+        "the count mismatch was reported, not raised"
+    );
+}
+
+#[test]
+fn shared_last_arc_assertion_does_not_abort_while_unwinding() {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let shared = single::SingleSp::install_shared(());
+        shared.sequence(|q| {
+            q.a(|_, _| ());
+        });
+        let _inst = shared.install();
+        // Unwind drops `_inst` (one Arc clone) and then `shared` — the
+        // last reference — so the shared assertion fires mid-unwinding.
+        panic!("the test's own failure");
+    }));
+    assert!(outcome.is_err(), "the scenario failed as designed");
+}
+
+/// The clean-exit path keeps its teeth: a test that ends with an
+/// unconsumed sequence still fails, on a thread that is not unwinding.
+/// Pinned beside the unwind tests because both readings of `panicking()`
+/// are one branch, and only fixing the loud half would be the real bug.
+#[test]
+#[should_panic(expected = "sequence not fully consumed")]
+fn unconsumed_sequence_still_panics_on_a_clean_exit() {
+    let g = single::SingleSp::install_guard(());
+    g.sequence(|q| {
+        q.a(|_, _| ());
+    });
+    drop(g);
+}
+
+/// A second `sequence` call replaces the deque instead of appending to it:
+/// the first registration's steps must not survive and strand a drop
+/// assertion, and the second registration must be the only one enforced.
+#[test]
+fn second_sequence_replaces_the_first() {
+    let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+    let g = single::SingleSp::install_guard(());
+    g.sequence(|q| {
+        q.a({
+            let log = log.clone();
+            move |_, _| log.lock().unwrap().push("first-a")
+        });
+        q.b(|_, _| panic!("the first registration must be gone"));
+    });
+    g.sequence(|q| {
+        q.b({
+            let log = log.clone();
+            move |_, _| log.lock().unwrap().push("second-b")
+        });
+    });
+    // Only the replacement is in force: `b` is the head now, and a fire of
+    // `a` matches no entry at all (it falls through, it does not consume).
+    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::SingleSp, b(1));
+    drop(g);
+    assert_eq!(
+        log.lock().unwrap().clone(),
+        vec!["second-b"],
+        "the first registration ran nothing, and the head was the replacement's"
+    );
+}
+
 #[test]
 fn nested_invoke_of_same_sp_is_suppressed() {
     let g = single::SingleSp::install_guard(());
