@@ -782,6 +782,14 @@ sync point hook `before_insert` fired 1 time(s), expected 2
 
 (In shared mode the location is marked `(shared, installed at ...)`.)
 
+The unconsumed-sequence diagnostic names each remaining entry (hook
+names, comma-separated):
+
+```
+sync point sequence not fully consumed: 2 entries remaining [before_insert,
+after_commit] (installed at src/my_module.rs:142:21)
+```
+
 The same message printed rather than raised, because the thread was
 already unwinding when the guard (or the shared state's last `Arc`)
 dropped — stderr, prefixed, and the run

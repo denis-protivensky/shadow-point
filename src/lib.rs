@@ -432,7 +432,7 @@ macro_rules! define_sp {
             /// Every hook is a method with an empty default body, so a type
             /// that implements this trait may override only the hooks it
             /// cares about: an uninstrumented hook is the no-op it declares.
-            /// the `define_sp!` macro also implements it for the
+            /// The `define_sp!` macro also implements it for the
             /// hidden default (all no-ops) and for the generated state.
             $vis trait [<$prefix SyncPoint>]: $crate::SyncPoint {
                 $(
@@ -1237,7 +1237,8 @@ macro_rules! define_sp {
             /// the hooks. Derefs to the shared value. Drop (of the last
             /// `Arc` clone) asserts that all registered sequences were
             /// consumed and all `expect_calls` counts match — same
-            /// assertions as `{$prefix}SpGuard`.
+            /// assertions as `{$prefix}SpGuard`, on the same raise-or-print
+            /// rule.
             #[clippy::has_significant_drop]
             #[must_use]
             $vis struct [<$prefix SharedSp>]<T: Send + Sync + 'static> {

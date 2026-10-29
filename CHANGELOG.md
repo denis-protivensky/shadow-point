@@ -58,28 +58,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`guard_dropped_before_the_expected_panic_still_asserts`).
 - `docs/guide.md`: "The leak and what it owns" — the four leak cases, each
   derived from who holds what (`Arc` in `T` never drops, `Weak` in `T` drops
-  when the test decides, a
-  consumed fire-once closure drops, an `every` closure never does) and the
-  three test shapes that work with them; the guard API list now points there
-  and its drop-assertion bullet matches the new unwinding rule. Reviewed and
-  corrected: the `Weak`-guarded shape now compiles as written (hook closures
-  are `'static`, so they need their own
-  `Weak` clone; the old text borrowed and then used a moved handle), the
-  flag shape names which object implements `Drop` and who owns it, and the
-  narrow-scope example counts with `expect_calls` and collects with `every`:
-  a fire-once registration runs its closure on the FIRST fire only, so three
-  fires collect one key while `.expect(3)` still passes (the counter counts
-  fires, not closure runs) and the mismatch surfaces as a bare `assert_eq!`
-  in the test body. It also reads the collected Vec under the lock instead of
-  `Arc::try_unwrap`, which the leaked registration's own `Arc` clone defeats
-  with an opaque `Err(Arc)`. The placeholder examples are fenced
-  `rust,ignore` like the rest of the guide.
-- Generated doc comments no longer link `[`define_sp!`](crate::define_sp)`:
-  inside a consumer crate `crate::` resolves against *that* crate's root and
-  rustdoc emits a dead `href="crate::define_sp"` (verified in a consumer's
-  rendered HTML; `-D warnings` does not catch it). The `SpExpect` doc said
-  "asserts nothing but the one-shot itself" for a handle whose drop checks
-  nothing at all.
+  when the test decides, a consumed fire-once closure drops, an `every`
+  closure never does) and the three test shapes that work with them. The
+  shapes name the pitfalls they avoid: hook closures are `'static`, so the
+  `Weak`-guarded shape carries its own `Weak` clone, never the `Arc`; the
+  flag shape names which object implements `Drop` and who owns it; and the
+  narrow-scope example counts with `expect_calls` and collects with `every`
+  — a fire-once registration runs its closure on the FIRST fire only, so
+  three fires collect one key while `.expect(3)` still passes (the counter
+  counts fires, not closure runs) — and reads the collected Vec under the
+  lock instead of `Arc::try_unwrap`, which the leaked registration's own
+  `Arc` clone defeats with an opaque `Err(Arc)`. The guard API list points
+  at the section, and its drop-assertion bullet matches the new unwinding
+  rule.
+- Generated doc comments no longer link `[`Gate`](crate::Gate)` — v0.3.1's
+  one generated `crate::` link: inside a consumer crate `crate::` resolves
+  against *that* crate's root, so rustdoc renders a dead
+  `href="crate::Gate"` (verified in a consumer's rendered HTML;
+  `-D warnings` does not catch it).
 - `docs/guide.md`: "Keep a failure one test" — the four test-writing habits
   that make one bad scenario cost one test (guard in a narrow scope with
   assertions after it, `expect(n)` when the claim is only a count, finish
