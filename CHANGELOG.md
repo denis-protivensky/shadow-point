@@ -56,8 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `should_panic_test_passes_with_an_incomplete_scenario`, with the two
   shapes that keep the teeth pinned beside it
   (`guard_dropped_before_the_expected_panic_still_asserts`).
-- `docs/guide.md`: "The leak and what it owns" — the four measured leak cases
-  (`Arc` in `T` never drops, `Weak` in `T` drops when the test decides, a
+- `docs/guide.md`: "The leak and what it owns" — the four leak cases, each
+  derived from who holds what (`Arc` in `T` never drops, `Weak` in `T` drops
+  when the test decides, a
   consumed fire-once closure drops, an `every` closure never does) and the
   three test shapes that work with them; the guard API list now points there
   and its drop-assertion bullet matches the new unwinding rule. Reviewed and
@@ -65,9 +66,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are `'static`, so they need their own
   `Weak` clone; the old text borrowed and then used a moved handle), the
   flag shape names which object implements `Drop` and who owns it, and the
-  `try_unwrap` example gained the `.expect(1)` that makes its "drop
-  assertions end here" comment true — without it a hook that never fires
-  fails as an opaque `Err(Arc)`. The placeholder examples are fenced
+  narrow-scope example counts with `expect_calls` and collects with `every`:
+  a fire-once registration runs its closure on the FIRST fire only, so three
+  fires collect one key while `.expect(3)` still passes (the counter counts
+  fires, not closure runs) and the mismatch surfaces as a bare `assert_eq!`
+  in the test body. It also reads the collected Vec under the lock instead of
+  `Arc::try_unwrap`, which the registration's own `Arc` clone defeats with an
+  opaque `Err(Arc)`. The placeholder examples are fenced
   `rust,ignore` like the rest of the guide. The narrow-scope example reads
   the collected Vec under the lock instead of `Arc::try_unwrap`, which a
   leaked registration clone can defeat.

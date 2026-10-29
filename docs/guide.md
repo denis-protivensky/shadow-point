@@ -162,7 +162,7 @@ builds.
   `.optional()` are exempt (see below).
 - **Leaks per-install state** (`Box::leak` by design — normal for test
   instantiation, but do not call `install` in a long-lived loop). Applies
-  to `install_shared` too. What that costs is measured, not guessed — see
+  to `install_shared` too. What it owns, case by case — see
   [The leak and what it owns](#the-leak-and-what-it-owns).
 - **Restores on drop** — the guard binds this thread's dispatch for its
   lifetime and, on drop, restores the previously installed sync point
@@ -467,19 +467,24 @@ merely survivable:
       let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
       let out = {
           let guard = MyModuleSp::install_guard(());
+          // Collect on EVERY fire, and count separately. A fire-once
+          // registration runs its closure on the first fire only — the slot
+          // is consumed — so collecting three keys through one would
+          // collect one, while `.expect(3)` still passes: the counter counts
+          // FIRES, not closure runs. The mismatch would surface as a plain
+          // `assert_eq!` failure in the test body, far from its cause.
+          guard.expect_calls(MyModuleSp::before_insert, 3);
           let s = seen.clone();
-          // The count is what makes this a checked scenario: without
-          // `.expect(3)` the guard has no drop assertion at all, a hook
-          // that never fires is silent, and the Vec below comes back empty
-          // — an assert in the test body, not a scenario message here.
-          guard
-              .before_insert(move |_, key| s.lock().unwrap().push(*key))
-              .expect(3);
+          guard.every(|e| {
+              e.before_insert(move |_, key| {
+                  s.lock().unwrap().push(*key);
+              });
+          });
           run_the_thing(); // the instrumented call, hooks fire here
           // Read through the same lock instead of `Arc::try_unwrap`: the
-          // guard's registration may hold another `Arc` clone of `seen`
-          // (leaked until reclamation), and `try_unwrap` would fail with
-          // an opaque `Err(Arc)` rather than say the scenario was not run.
+          // registration holds another `Arc` clone of `seen` until the guard
+          // is dropped, so `try_unwrap` would fail with an opaque `Err(Arc)`
+          // exactly when the scenario did not run.
           seen.lock().unwrap().clone()
       }; // the guard (and its drop assertions) end here
       out
@@ -527,8 +532,8 @@ published to worker threads, so reclamation would have to prove no thread is
 inside a dispatch at the moment the last handle goes away. For a `Vec` or a
 `Mutex` the leak is nothing — the process ends and the OS reclaims its whole
 address space, leaked allocations included. What it
-does change is **ownership of destructors**, and the four cases below are
-measured, not assumed:
+does change is **ownership of destructors**, and the four cases below follow
+from who holds what:
 
 | What holds what | Dropped? | Consequence |
 |---|---|---|
@@ -585,13 +590,14 @@ directly. Three shapes work:
       }
   }
   struct Resource {
-      _watchdog: Dropped, // the destructor that runs is THIS one, inside T
+      _watchdog: Dropped, // the destructor that runs is THIS one: inside the
+                          // production value, NOT inside T
       // ... real fields ...
   }
 
   let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
   let resource = Resource { _watchdog: Dropped(flag.clone()) };
-  let guard = MyModuleSp::install_guard(()); // T is the unit: nothing is leaked on the T side
+  let guard = MyModuleSp::install_guard(()); // T is the unit: `Resource` is not T
   // ... drive the instrumented code so the production value releases `resource` ...
   assert!(flag.load(std::sync::atomic::Ordering::SeqCst), "the watchdog ran");
   ```
