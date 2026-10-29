@@ -5,13 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-[Unreleased]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/denis-protivensky/shadow-point/releases/tag/v0.1.0
 
-## [Unreleased]
+## [0.3.2] - 2026-10-30
 
 ### Added
 - The generated public items carry doc comments, so a consumer that keeps
@@ -40,7 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is buried under the abort. An incomplete scenario is a symptom of that
   failure, not a second one. The assertion is raised exactly as before on a
   thread that is not unwinding. The printed line carries
-  `(while unwinding)`; the **raised** path keeps its payload byte-for-byte:
+  `(while unwinding)`, and it is written with `let _ = writeln!(stderr(), ..)`
+  rather than `eprintln!`: a failed stderr write makes `eprintln!` panic, and
+  a panic raised while unwinding is the double panic this change removes —
+  measured against a failing stderr (`/dev/full`): exit 101 vs exit 0. The
+  **raised** path keeps its payload byte-for-byte:
   the sequence assertion was `assert!(cond, msg)` (bare message, so `panic!`
   reproduces it) and the count assertion was `assert_eq!(a, b, msg)` and is
   raised that way again — the wrapper line and the left/right echo are part
@@ -84,6 +89,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of asserting inside it); the panic-behavior paragraph and the
   debugging reference updated for the new shape, the double-panic rationale
   now in one place with a link from the other.
+
+### Internal
+- The `# Specification syntax` block in the `define_sp!` docs was fenced
+  ```` ```ignore ````, which still **collects** it as a doctest — and that
+  test does not compile (`define_sp!` unqualified in a doctest scope). It was
+  invisible because the default suite skips ignored items; it turned red the
+  moment the suite gained a test that is ignored by design, since
+  `cargo test -- --ignored` runs every ignored item in the crate. Now fenced
+  ```` ```text ````, like the sibling block in the same doc. This is what
+  makes an `-- --ignored` pass possible at all: before it, such a run could
+  not be green for any reason.
 
 ## [0.3.1] - 2026-09-26
 
