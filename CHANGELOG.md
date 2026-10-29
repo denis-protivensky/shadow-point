@@ -71,11 +71,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fires collect one key while `.expect(3)` still passes (the counter counts
   fires, not closure runs) and the mismatch surfaces as a bare `assert_eq!`
   in the test body. It also reads the collected Vec under the lock instead of
-  `Arc::try_unwrap`, which the registration's own `Arc` clone defeats with an
-  opaque `Err(Arc)`. The placeholder examples are fenced
-  `rust,ignore` like the rest of the guide. The narrow-scope example reads
-  the collected Vec under the lock instead of `Arc::try_unwrap`, which a
-  leaked registration clone can defeat.
+  `Arc::try_unwrap`, which the leaked registration's own `Arc` clone defeats
+  with an opaque `Err(Arc)`. The placeholder examples are fenced
+  `rust,ignore` like the rest of the guide.
 - Generated doc comments no longer link `[`define_sp!`](crate::define_sp)`:
   inside a consumer crate `crate::` resolves against *that* crate's root and
   rustdoc emits a dead `href="crate::define_sp"` (verified in a consumer's

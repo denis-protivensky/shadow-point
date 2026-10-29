@@ -482,9 +482,9 @@ merely survivable:
           });
           run_the_thing(); // the instrumented call, hooks fire here
           // Read through the same lock instead of `Arc::try_unwrap`: the
-          // registration holds another `Arc` clone of `seen` until the guard
-          // is dropped, so `try_unwrap` would fail with an opaque `Err(Arc)`
-          // exactly when the scenario did not run.
+          // leaked `every` registration holds another `Arc` clone of `seen`
+          // for the life of the process, so `try_unwrap` would fail with an
+          // opaque `Err(Arc)` even when the scenario ran.
           seen.lock().unwrap().clone()
       }; // the guard (and its drop assertions) end here
       out
