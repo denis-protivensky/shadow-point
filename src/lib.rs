@@ -407,7 +407,7 @@ impl Drop for ExecSink {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// define_sp! {
 ///     pub(in crate::core_array) prefix Array
 ///     {
