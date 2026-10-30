@@ -375,19 +375,31 @@ fn a_worker_guard_keeps_the_shared_value_alive_until_it_leaves() {
         }
     }
     let shared = ct::CtSp::install_shared(Dropped(flag.clone()));
+    // A handshake, not sleeps: the assertion below is only about "the worker
+    // holds a guard", and wall-clock guesses made this test fail on a loaded
+    // machine whenever the main thread lost its slot for longer than the
+    // worker's nap — the state then died before the drop it was measuring.
+    let (installed_tx, installed_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
     let worker = {
         let s = shared.clone();
         std::thread::spawn(move || {
             let _inst = s.install(); // holds a strong handle for its scope
-            std::thread::sleep(Duration::from_millis(40));
+            installed_tx.send(()).expect("the test is still listening");
+            release_rx
+                .recv()
+                .expect("the test releases the worker, not a dropped sender");
         })
     };
-    std::thread::sleep(Duration::from_millis(15));
+    installed_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the worker installed its guard");
     drop(shared); // the test's own last reference — a worker still holds one
     assert!(
         !flag.load(Ordering::SeqCst),
         "the value was freed while a worker's install still held the state"
     );
+    release_tx.send(()).expect("the worker is still waiting");
     worker.join().unwrap();
     assert!(
         flag.load(Ordering::SeqCst),
