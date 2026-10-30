@@ -5,13 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-[Unreleased]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/denis-protivensky/shadow-point/releases/tag/v0.1.0
 
-## [Unreleased]
+## [0.3.2] - 2026-10-30
 
 ### Added
 - The generated public items carry doc comments, so a consumer that keeps
@@ -40,7 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is buried under the abort. An incomplete scenario is a symptom of that
   failure, not a second one. The assertion is raised exactly as before on a
   thread that is not unwinding. The printed line carries
-  `(while unwinding)`; the **raised** path keeps its payload byte-for-byte:
+  `(while unwinding)`, and it is written with `let _ = writeln!(stderr(), ..)`
+  rather than `eprintln!`: a failed write makes `eprintln!` panic, and on this
+  path a second panic is exactly the abort the change removes. Writing to
+  `stderr()` directly also bypasses the harness's output capture, so the line
+  reaches the terminal even on a passing `#[should_panic]` test, where
+  `eprintln!` would be captured and discarded. The **raised** path keeps
+  its payload byte-for-byte:
   the sequence assertion was `assert!(cond, msg)` (bare message, so `panic!`
   reproduces it) and the count assertion was `assert_eq!(a, b, msg)` and is
   raised that way again — the wrapper line and the left/right echo are part
@@ -49,14 +56,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `install_shared` doc, the `SpGuard` doc and the README mode table, which
   all promised an unconditional drop-time panic, now state the conditional
   form — in both table cells, not just the private one (`install_shared`'s
-  Caveats and `SharedSp`'s drop doc among them).
+  Caveats and `SharedSp`'s drop doc among them); `docs/shared-mode.md` gains
+  the same rule at the last-`Arc` drop step of the install checklist.
 - The unwind trade now has a named cost: `thread::panicking()` is true in a
   `#[should_panic]` test as well, so such a test **passes** with an
   incomplete scenario where the old code aborted the binary. Documented in
   the guide's "Keep a failure one test" (four habits), pinned by
-  `should_panic_test_passes_with_an_incomplete_scenario`, with the two
-  shapes that keep the teeth pinned beside it
-  (`guard_dropped_before_the_expected_panic_still_asserts`).
+  `should_panic_test_passes_with_an_incomplete_scenario`. The two shapes
+  that keep the teeth are named beside it: end the scenario and
+  `drop(guard)` before the expected `panic!` (pinned by
+  `guard_dropped_before_the_expected_panic_still_asserts`), or keep the
+  guard outside a `catch_unwind`.
 - `docs/guide.md`: "The leak and what it owns" — the four leak cases, each
   derived from who holds what (`Arc` in `T` never drops, `Weak` in `T` drops
   when the test decides, a consumed fire-once closure drops, an `every`
@@ -64,14 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shapes name the pitfalls they avoid: hook closures are `'static`, so the
   `Weak`-guarded shape carries its own `Weak` clone, never the `Arc`; the
   flag shape names which object implements `Drop` and who owns it; and the
-  narrow-scope example counts with `expect_calls` and collects with `every`
-  — a fire-once registration runs its closure on the FIRST fire only, so
-  three fires collect one key while `.expect(3)` still passes (the counter
-  counts fires, not closure runs) — and reads the collected Vec under the
-  lock instead of `Arc::try_unwrap`, which the leaked registration's own
-  `Arc` clone defeats with an opaque `Err(Arc)`. The guard API list points
-  at the section, and its drop-assertion bullet matches the new unwinding
-  rule.
+  third tests the destructor outside the sync point entirely — ordinary
+  `Drop`, no hook. The guard API list points at the section, and its
+  drop-assertion bullet matches the new unwinding rule.
 - Generated doc comments no longer link `[`Gate`](crate::Gate)` — v0.3.1's
   one generated `crate::` link: inside a consumer crate `crate::` resolves
   against *that* crate's root, so rustdoc renders a dead
@@ -83,7 +88,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the scenario before a `#[should_panic]`, collect through the closure
   instead of asserting inside it); the panic-behavior paragraph and the
   debugging reference updated for the new shape, the double-panic rationale
-  now in one place with a link from the other.
+  now in one place with a link from the other. The narrow-scope example
+  counts with `expect_calls` and collects with `every` — a fire-once
+  registration runs its closure on the FIRST fire only, so three fires
+  collect one key while `.expect(3)` still passes (the counter counts
+  fires, not closure runs) — and reads the collected Vec under the lock
+  instead of `Arc::try_unwrap`, which the leaked registration's own `Arc`
+  clone defeats with an opaque `Err(Arc)`.
+
+### Internal
+- The `# Example` block in the `define_sp!` docs was fenced
+  ```` ```ignore ````, which still **collects** it as a doctest — and that
+  test does not compile (`define_sp!` unqualified in a doctest scope). It was
+  invisible because the default suite skips ignored items; it turned red the
+  moment the suite gained a test that is ignored by design, since
+  `cargo test -- --ignored` runs every ignored item in the crate. Now fenced
+  ```` ```text ````, like the sibling `# Specification syntax` block in the
+  same doc. This is what makes an `-- --ignored` pass possible at all:
+  before it, such a run could not be green for any reason.
 
 ## [0.3.1] - 2026-09-26
 
