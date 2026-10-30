@@ -343,16 +343,20 @@ fn two_threads_same_hook_entries() {
 // `Arc` on an unwinding thread would run a consumer destructor mid-unwind,
 // the exact abort 0.3.2 removed the crate's own raise for.
 
+/// A shared value whose `Drop` sets a flag, so a test can see the release
+/// without holding a strong handle to the value itself.
+struct MarksDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for MarksDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 #[test]
 fn the_shared_value_is_dropped_with_the_last_arc() {
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
-    impl Drop for Dropped {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
-    let shared = ct::CtSp::install_shared(Dropped(flag.clone()));
+    let shared = ct::CtSp::install_shared(MarksDrop(flag.clone()));
     assert!(
         !flag.load(Ordering::SeqCst),
         "the value is alive while its Arc is"
@@ -371,13 +375,7 @@ fn a_worker_guard_keeps_the_shared_value_alive_until_it_leaves() {
     // value. A worker's TLS entry is a strong handle, so a thread inside a
     // dispatch cannot be reading state that the main test just freed.
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
-    impl Drop for Dropped {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
-    let shared = ct::CtSp::install_shared(Dropped(flag.clone()));
+    let shared = ct::CtSp::install_shared(MarksDrop(flag.clone()));
     // A handshake, not sleeps: the assertion below is only about "the worker
     // holds a guard", and wall-clock guesses made this test fail on a loaded
     // machine whenever the main thread lost its slot for longer than the

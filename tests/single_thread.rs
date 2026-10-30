@@ -503,16 +503,20 @@ fn raised_assertions_keep_their_payload_shape() {
 // registration lived until the process did. Both are now observable, and
 // these tests are the contract — each one fails against the leaked build.
 
+/// A guarded value whose `Drop` sets a flag, so a test can see the release
+/// without holding a strong handle to the value itself.
+struct MarksDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for MarksDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[test]
 fn the_guarded_value_is_dropped_when_the_guard_drops() {
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
-    impl Drop for Dropped {
-        fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-    let g = single::SingleSp::install_guard(Dropped(flag.clone()));
+    let g = single::SingleSp::install_guard(MarksDrop(flag.clone()));
     assert!(
         !flag.load(std::sync::atomic::Ordering::SeqCst),
         "the value is alive while the guard is"
@@ -548,7 +552,7 @@ fn a_captured_handle_is_freed_with_the_state() {
         let g = single::SingleSp::install_guard(());
         let s = seen.clone();
         g.every(|q| {
-            q.a(move |_, _| s.lock().unwrap().push(1));
+            q.a(move |(), _| s.lock().unwrap().push(1));
         });
         shadow_point::invoke!(single::SingleSp, a(0));
         assert_eq!(seen.lock().unwrap().len(), 1);
@@ -568,7 +572,7 @@ fn a_fire_once_that_never_fired_is_freed_with_the_state() {
     let held = Arc::new(Mutex::new(0u32));
     let g = single::SingleSp::install_guard(());
     let h = held.clone();
-    g.a(move |_, _| drop(h)); // registered, never fired
+    g.a(move |(), _| drop(h)); // registered, never fired
     drop(g);
     assert_eq!(
         Arc::strong_count(&held),
@@ -586,17 +590,17 @@ fn install_inside_a_hook_and_a_reinstall_do_not_break_dispatch() {
     let g = single::SingleSp::install_guard(());
     let o = outer_hits.clone();
     g.every(|q| {
-        q.a(move |_, _| {
+        q.a(move |(), _| {
             *o.lock().unwrap() += 1;
             // A nested install on the same thread, dropped inside the fire.
             let inner = single::SingleSp::install_guard(());
-            inner.b(|_, _| ());
+            inner.b(|(), _| ());
             shadow_point::invoke!(single::SingleSp, b(0));
             drop(inner);
         });
     });
     g.sequence(|q| {
-        q.a(|_, _| ());
+        q.a(|(), _| ());
     });
     shadow_point::invoke!(single::SingleSp, a(0));
     assert_eq!(
@@ -608,7 +612,7 @@ fn install_inside_a_hook_and_a_reinstall_do_not_break_dispatch() {
     // And the thread's dispatch is clean afterwards: a fresh install works.
     let g2 = single::SingleSp::install_guard(());
     g2.sequence(|q| {
-        q.a(|_, _| ());
+        q.a(|(), _| ());
     });
     shadow_point::invoke!(single::SingleSp, a(1));
     drop(g2);
@@ -642,13 +646,7 @@ fn stacked_installs_release_the_inner_and_keep_the_outer_alive() {
     // The outer state lives on through the inner guard's `old` handle: the
     // outer fires must still reach it after the inner scope closes.
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
-    impl Drop for Dropped {
-        fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-    let outer = single::SingleSp::install_guard(Dropped(flag.clone()));
+    let outer = single::SingleSp::install_guard(MarksDrop(flag.clone()));
     let hits = Arc::new(Mutex::new(0u32));
     let h = hits.clone();
     outer.every(|q| {
@@ -658,7 +656,7 @@ fn stacked_installs_release_the_inner_and_keep_the_outer_alive() {
     {
         let inner = single::SingleSp::install_guard(());
         inner.sequence(|q| {
-            q.b(|_, _| ());
+            q.b(|(), _| ());
         });
         shadow_point::invoke!(single::SingleSp, b(0));
         drop(inner);
