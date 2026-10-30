@@ -210,8 +210,10 @@ fn the_park_reports_the_timeout_and_names_the_head() {
 /// which is where the sentinel bug lived.
 #[test]
 fn the_cache_honors_what_the_process_started_with() {
+    // `u64::MAX` is the cache's own unresolved marker; the resolver refuses
+    // it, so it must be expected as the default here too.
     let expected = match std::env::var("SP_PARK_TIMEOUT_MS") {
-        Ok(raw) if raw.trim().parse::<u64>().is_ok() => {
+        Ok(raw) if raw.trim().parse::<u64>().map_or(false, |ms| ms != u64::MAX) => {
             std::time::Duration::from_millis(raw.trim().parse().unwrap())
         }
         _ => shadow_point::PARK_TIMEOUT,

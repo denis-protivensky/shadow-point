@@ -297,13 +297,22 @@ impl Drop for CurrentFire {
 
 // --- Timeouts ---
 
-/// Maximum time a thread parks in shared mode while the sequence head is a
-/// different hook. Parking is a mutual-deadlock guard, not a synchronization
-/// mechanism: threads re-check the sequence after every wake and park only
-/// as long as the head still blocks them. A timeout therefore means the
-/// test's sequence can never advance (no thread will ever fire the head
-/// hook) — failing is better than hanging.
+/// The default park budget: how long a thread parks in shared mode while the
+/// sequence head is a different hook. Parking is a mutual-deadlock guard,
+/// not a synchronization mechanism: threads re-check the sequence after
+/// every wake and park only as long as the head still blocks them. A timeout
+/// therefore means the test's sequence can never advance (no thread will
+/// ever fire the head hook) — failing is better than hanging.
+///
+/// This is also the value [`park_timeout()`] resolves to when
+/// `SP_PARK_TIMEOUT_MS` is unset — that function, not this constant, is what
+/// a shared-mode park actually waits on.
 pub const PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The "not resolved yet" marker in [`park_timeout`]'s cache. A millisecond
+/// count equal to it can never be published, so the resolver rejects it
+/// instead of returning a ~584-million-year timeout.
+const UNRESOLVED_PARK_TIMEOUT: u64 = u64::MAX;
 
 /// The park timeout the shared-mode sequence actually uses: [`PARK_TIMEOUT`]
 /// unless `SP_PARK_TIMEOUT_MS` names a number of milliseconds.
@@ -326,13 +335,15 @@ pub const PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10)
 /// ```
 pub fn park_timeout() -> std::time::Duration {
     use std::sync::atomic::{AtomicU64, Ordering};
-    // The resolved value in milliseconds, `u64::MAX` while unresolved. A
-    // sentinel in one atomic rather than `Once` + a cell: the cache is a
-    // single integer, two racers computing the same answer is benign, and
-    // MSRV 1.65 has neither `OnceLock` nor a safe way to need one here.
-    static CACHED: AtomicU64 = AtomicU64::new(u64::MAX);
+    // The resolved value in milliseconds, `UNRESOLVED_PARK_TIMEOUT` while
+    // unresolved. A sentinel in one atomic rather than `Once` + a cell: the
+    // cache is a single integer, two racers computing the same answer is
+    // benign, and MSRV 1.65 has neither `OnceLock` nor a safe way to need
+    // one here. The resolver never produces the sentinel, which is what
+    // makes the fixed point below sound.
+    static CACHED: AtomicU64 = AtomicU64::new(UNRESOLVED_PARK_TIMEOUT);
     let cached = CACHED.load(Ordering::Relaxed);
-    if cached != u64::MAX {
+    if cached != UNRESOLVED_PARK_TIMEOUT {
         return std::time::Duration::from_millis(cached);
     }
     let resolved = resolve_park_timeout(std::env::var("SP_PARK_TIMEOUT_MS"));
@@ -340,14 +351,18 @@ pub fn park_timeout() -> std::time::Duration {
     // every thread in the process waits on one and the same timeout. Note the
     // shape of `compare_exchange`'s Ok arm: it yields the PREVIOUS value,
     // which on success is the unresolved sentinel — `unwrap_or_else` over it
-    // would hand back `u64::MAX` as if it were a timeout in milliseconds
+    // would hand back the sentinel as if it were a timeout in milliseconds
     // (a ~584-year park, caught by the end-to-end test in
     // `tests/park_timeout_env.rs`, not by the resolver's unit tests).
-    let winner =
-        match CACHED.compare_exchange(u64::MAX, resolved, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => resolved,
-            Err(current) => current,
-        };
+    let winner = match CACHED.compare_exchange(
+        UNRESOLVED_PARK_TIMEOUT,
+        resolved,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) {
+        Ok(_) => resolved,
+        Err(current) => current,
+    };
     std::time::Duration::from_millis(winner)
 }
 
@@ -355,27 +370,52 @@ pub fn park_timeout() -> std::time::Duration {
 /// the whole process (see `park_timeout`'s cache), which is also why the
 /// environment can only be tested in a separate binary.
 fn resolve_park_timeout(raw: Result<String, std::env::VarError>) -> u64 {
-    let default_ms = PARK_TIMEOUT.as_millis() as u64;
     match raw {
-        Err(std::env::VarError::NotPresent) => default_ms,
+        Err(std::env::VarError::NotPresent) => default_park_timeout_ms(),
         Err(_) => {
-            eprintln!(
-                "shadow-point: SP_PARK_TIMEOUT_MS is not valid UTF-8, \
-using the default {PARK_TIMEOUT:?}"
-            );
-            default_ms
+            note(format_args!(
+                "SP_PARK_TIMEOUT_MS is not valid UTF-8, using the default {PARK_TIMEOUT:?}"
+            ));
+            default_park_timeout_ms()
         }
         Ok(raw) => match raw.trim().parse::<u64>() {
-            Ok(v) => v,
+            // The sentinel is the cache's own marker: publishing it would
+            // both hand out a ~584-year timeout and leave the cache
+            // permanently unresolved.
+            Ok(UNRESOLVED_PARK_TIMEOUT) => {
+                note(format_args!(
+                    "SP_PARK_TIMEOUT_MS={UNRESOLVED_PARK_TIMEOUT} is too large to be a \
+timeout, using the default {PARK_TIMEOUT:?}"
+                ));
+                default_park_timeout_ms()
+            }
+            Ok(ms) => ms,
             Err(_) => {
-                eprintln!(
-                    "shadow-point: SP_PARK_TIMEOUT_MS={raw:?} is not a \
-number of milliseconds, using the default {PARK_TIMEOUT:?}"
-                );
-                default_ms
+                note(format_args!(
+                    "SP_PARK_TIMEOUT_MS={raw:?} is not a number of milliseconds, \
+using the default {PARK_TIMEOUT:?}"
+                ));
+                default_park_timeout_ms()
             }
         },
     }
+}
+
+/// [`PARK_TIMEOUT`] in the milliseconds the cache stores. The constant is
+/// ten seconds, so the conversion cannot fail; `try_from` keeps the cast out
+/// of the code (and off clippy's truncation lint).
+fn default_park_timeout_ms() -> u64 {
+    u64::try_from(PARK_TIMEOUT.as_millis())
+        .expect("the default park budget, ten seconds in ms, fits in u64")
+}
+
+/// One diagnostic line on stderr, best-effort. `eprintln!` panics when the
+/// write fails, and a warning about a misconfigured env must not fail the
+/// run it is warning about — the same reason the unwind path writes through
+/// `writeln!` and ignores the result.
+fn note(msg: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "shadow-point: {msg}");
 }
 
 // See CURRENT_FIRE: inline `const {}` blocks are experimental until 1.79.
@@ -1586,12 +1626,13 @@ pub mod sp_docs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn park_timeout_defaults_to_the_constant() {
         assert_eq!(
-            resolve_park_timeout(Err(std::env::VarError::NotPresent)),
-            PARK_TIMEOUT.as_millis() as u64
+            Duration::from_millis(resolve_park_timeout(Err(std::env::VarError::NotPresent))),
+            PARK_TIMEOUT
         );
     }
 
@@ -1609,18 +1650,24 @@ mod tests {
     /// a test on the cached path can.
     #[test]
     fn park_timeout_never_returns_the_unresolved_sentinel() {
-        use std::time::Duration;
         let t = park_timeout();
         assert!(
             t < Duration::from_secs(60 * 60),
             "a park timeout of {t:?} is a cache bug, not a timeout"
         );
-        assert!(
-            t >= Duration::from_millis(0),
-            "resolved once, and stable: {:?}",
-            park_timeout()
+        assert_eq!(park_timeout(), t, "resolved once, and stable");
+    }
+
+    /// The same sentinel, reached through the front door instead of through
+    /// the cache: an env value equal to the marker must not be published as
+    /// a timeout (the cache would then never resolve at all).
+    #[test]
+    fn a_value_colliding_with_the_unresolved_sentinel_falls_back() {
+        assert_eq!(
+            Duration::from_millis(resolve_park_timeout(Ok(u64::MAX.to_string()))),
+            PARK_TIMEOUT,
+            "the cache's marker is never a timeout"
         );
-        assert_eq!(park_timeout(), t, "one value for the whole process");
     }
 
     #[test]
@@ -1628,14 +1675,16 @@ mod tests {
         // A typo in a CI env must not silently change what the suite proves.
         for bad in ["", "abc", "-5", "10.5", "1_000"] {
             assert_eq!(
-                resolve_park_timeout(Ok(bad.into())),
-                PARK_TIMEOUT.as_millis() as u64,
+                Duration::from_millis(resolve_park_timeout(Ok(bad.into()))),
+                PARK_TIMEOUT,
                 "{bad:?} is not a number of milliseconds"
             );
         }
         assert_eq!(
-            resolve_park_timeout(Err(std::env::VarError::NotUnicode("not utf8".into()))),
-            PARK_TIMEOUT.as_millis() as u64
+            Duration::from_millis(resolve_park_timeout(Err(std::env::VarError::NotUnicode(
+                "not utf8".into()
+            )))),
+            PARK_TIMEOUT
         );
     }
 }
