@@ -9,6 +9,13 @@
 //! the whole file costs a fifth of a second. The fallback case is checked
 //! through `park_timeout()` directly: asserting it by parking would wait
 //! the full default, which is exactly the cost this knob exists to remove.
+//!
+//! What proves what (the wall-clock discipline): a loaded machine can
+//! freeze a healthy child for seconds — observed here: ~9.5 s mid-park —
+//! and that inflates any elapsed time. So elapsed time is asked only what
+//! a stall cannot fake ("the park really parked", a lower bound); WHICH
+//! budget the park used is read from the diagnostic, which names it; and a
+//! child that never returns is the watchdog's business (see `child`).
 
 use std::time::{Duration, Instant};
 
@@ -22,8 +29,9 @@ mod ct {
     }
 }
 
-/// Park with an unattainable head and report how long the wait was.
-fn park_and_report() -> Duration {
+/// Park with an unattainable head and report how long the wait was and
+/// what the diagnostic said.
+fn park_and_report() -> (Duration, String) {
     let shared = ct::CtSp::install_shared(());
     shared.sequence(|s| {
         s.b(|(), _| ()); // head: nothing will ever fire `b`
@@ -38,14 +46,15 @@ fn park_and_report() -> Duration {
     let err = outcome.expect_err("the parked fire must panic, not return");
     let msg = err
         .downcast_ref::<String>()
-        .expect("a formatted panic message");
+        .expect("a formatted panic message")
+        .clone();
     assert!(
         msg.contains("sequence park timeout"),
         "the parked fire reports the park, not a hang: {msg}"
     );
     // Replace the deque so the Arc's drop assertions pass on the way out.
     shared.sequence(|_s| {});
-    waited
+    (waited, msg)
 }
 
 /// Re-execute this binary as a child running exactly `test`, with `envs`
@@ -120,10 +129,37 @@ fn marker(text: &str, key: &str) -> u128 {
     raw.trim().parse().expect("the child printed a number")
 }
 
+/// The budget this process was configured with (`SP_PARK_TIMEOUT_MS`, set
+/// by the parent), as the diagnostic spells it: `Duration`'s `{:?}` —
+/// "200ms", "0ns".
+fn configured_budget() -> Duration {
+    let ms: u64 = std::env::var("SP_PARK_TIMEOUT_MS")
+        .expect("the child runs with the env its parent set")
+        .trim()
+        .parse()
+        .expect("the parent sets a parsable budget");
+    Duration::from_millis(ms)
+}
+
+/// The one claim a scheduler stall cannot fake: the diagnostic names the
+/// budget the park resolved to. Elapsed time cannot make this claim —
+/// "200 ms of park plus a 9 s stall" is indistinguishable from "parked the
+/// 10 s default" under any wall-clock bound — so the budget travels in the
+/// message instead, and elapsed time is asked only for a lower bound.
+fn assert_names_budget(msg: &str) {
+    let budget = format!("({:?})", configured_budget());
+    assert!(
+        msg.contains(&budget),
+        "the diagnostic must name the resolved budget {budget}: {msg}"
+    );
+}
+
 #[test]
 fn the_env_value_is_what_the_park_uses() {
     if std::env::var("SP_PARK_CHILD").is_ok() {
-        println!("SP_CHILD_WAITED={}", park_and_report().as_millis());
+        let (waited, msg) = park_and_report();
+        assert_names_budget(&msg);
+        println!("SP_CHILD_WAITED={}", waited.as_millis());
         return;
     }
     let (out, _, _) = child(
@@ -131,14 +167,13 @@ fn the_env_value_is_what_the_park_uses() {
         &[("SP_PARK_CHILD", "1"), ("SP_PARK_TIMEOUT_MS", "200")],
     );
     let waited = marker(&out, "SP_CHILD_WAITED=");
-    // The park is the env value and not the 10s default: this is the whole
-    // claim, and it fails loudly if dispatch still waits on the constant.
-    // The upper bound is loose on purpose — a scheduler under load can hold
-    // a thread past its deadline; it cannot hand back 200 ms from a 10 s
-    // wait.
+    // WHICH budget the park used is the child's own assertion (the
+    // diagnostic names it — stall-proof). Wall time here proves only what
+    // a stall cannot fake: the park really parked, it did not fail at
+    // once. Stalls inflate `waited`, never shrink it.
     assert!(
-        (150..3_000).contains(&waited),
-        "SP_PARK_TIMEOUT_MS=200 should park near 200 ms, measured {waited} ms"
+        waited >= 150,
+        "SP_PARK_TIMEOUT_MS=200 should really park, measured {waited} ms"
     );
 }
 
@@ -151,7 +186,7 @@ fn a_typo_in_the_env_falls_back_and_says_so() {
         );
         return;
     }
-    let (out, err, elapsed) = child(
+    let (out, err, _) = child(
         "a_typo_in_the_env_falls_back_and_says_so",
         &[("SP_PARK_BAD", "1"), ("SP_PARK_TIMEOUT_MS", "not-a-number")],
     );
@@ -164,30 +199,30 @@ fn a_typo_in_the_env_falls_back_and_says_so() {
         err.contains("is not a number"),
         "the fallback is announced, not silent: {err}"
     );
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "checking the fallback must not itself park for the default"
-    );
+    // No wall-clock bound: the child never parks on this path, and a hang
+    // is the watchdog's claim to make.
 }
 
+/// `0` is legal and must reach the park path, not fall back to the default:
+/// the failing park's diagnostic names a zero budget (a fall-back would
+/// name `(10s)`). The "reports at once" half of the promise is wall-clock,
+/// and a stall inflates any bound, so it is not pinned here; the watchdog
+/// covers "never returns".
 #[test]
-fn zero_means_fail_fast() {
-    // The documented escape hatch for a wrong choreography: the head is
-    // re-checked and the diagnostic raised on the next wake, so a test
-    // that can never advance reports instead of waiting.
+fn zero_budget_is_honored_not_ignored() {
     if std::env::var("SP_PARK_ZERO").is_ok() {
-        println!("SP_ZERO_WAITED={}", park_and_report().as_millis());
+        let (waited, msg) = park_and_report();
+        assert_names_budget(&msg);
+        println!("SP_ZERO_WAITED={}", waited.as_millis());
         return;
     }
     let (out, _, _) = child(
-        "zero_means_fail_fast",
+        "zero_budget_is_honored_not_ignored",
         &[("SP_PARK_ZERO", "1"), ("SP_PARK_TIMEOUT_MS", "0")],
     );
-    let waited = marker(&out, "SP_ZERO_WAITED=");
-    assert!(
-        waited < 1_000,
-        "SP_PARK_TIMEOUT_MS=0 should report at once, measured {waited} ms"
-    );
+    // The marker proves the child's branch ran; without it the child could
+    // have taken the parent branch and quietly recursed one level.
+    let _ = marker(&out, "SP_ZERO_WAITED=");
 }
 
 /// The diagnostic itself, in the same cheap child: the park must name the
