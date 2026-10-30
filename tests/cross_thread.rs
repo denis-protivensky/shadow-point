@@ -87,16 +87,19 @@ fn sequence_order_across_threads() {
 }
 
 /// The park arm must fail, not hang: a fire whose head can never advance
-/// waits `PARK_TIMEOUT` and reports the timeout diagnostic.
+/// waits the park budget and reports the timeout diagnostic.
 ///
 /// Ignored by default because the behavior under test *is* the wait — a
-/// run costs `PARK_TIMEOUT` (10s at the default), which belongs to a
-/// deliberate pass (`cargo test -- --ignored`) and not to the CI legs.
+/// run costs the whole budget (10 s at the default), which belongs to a
+/// deliberate pass (`cargo test -- --ignored`) and not to the CI legs. Set
+/// `SP_PARK_TIMEOUT_MS` to shorten that pass; the assertion below is
+/// expressed against `park_timeout()`, not against the constant, so the
+/// knob shortens the wait without turning this test red.
 /// The `sequence` replacement at the end is what lets the `Arc`'s drop
 /// assertions pass, and it is the second thing this test pins: a second
 /// `sequence` call swaps the whole deque, it does not append.
 #[test]
-#[ignore = "parks for the full PARK_TIMEOUT by design (10s)"]
+#[ignore = "parks for the whole budget by design (10 s at the default)"]
 fn unattainable_head_reports_the_park_timeout() {
     let shared = ct::CtSp::install_shared(());
     shared.sequence(|s| {
@@ -122,7 +125,7 @@ fn unattainable_head_reports_the_park_timeout() {
         "and names the blocking head: {msg}"
     );
     assert!(
-        waited >= PARK_TIMEOUT / 2,
+        waited >= shadow_point::park_timeout() / 2,
         "the thread really parked, it did not fail instantly ({waited:?})"
     );
     // Replace the whole deque (does not append): the abandoned entries are
