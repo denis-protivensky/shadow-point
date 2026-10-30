@@ -117,9 +117,10 @@ extra hook names.
 
 `MyModuleSyncPoint` has one method per hook (taking the declared
 arguments) with a default no-op body; its supertrait `SyncPoint` is a
-`Send + Sync` marker. The thread-local dispatch holds
-`&'static dyn MyModuleSyncPoint`, and a thread without an install is the
-default no-op impl — which is why firing a hook on an uninstalled thread
+`Send + Sync` marker. The thread-local dispatch holds the installed state
+behind an `Arc` — installed (or restored) by a guard, `None` on a thread
+that never installed — and a thread without an install dispatches to the
+default no-op impl, which is why firing a hook on an uninstalled thread
 is always safe. Concrete impls are generated internally; you interact
 with the trait through `&dyn MyModuleSyncPoint`, which lets you write
 test helpers generic over the sync point:
