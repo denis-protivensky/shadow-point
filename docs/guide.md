@@ -91,9 +91,10 @@ resolved.
 
 Every generated type carrying `T` (`MyModuleSpGuard<T>`,
 `MyModuleSharedSp<T>`, the builders) requires `T: Send + Sync + 'static`,
-and `install_guard` / `install_shared` carry the same bounds: the state
-is leaked (`Box::leak`) and may cross threads. Registered closures must
-be `Send + 'static` (`every` closures additionally `Sync`).
+and `install_guard` / `install_shared` carry the same bounds: the state is
+reference-counted (`Arc`) and may cross threads, and dispatch reaches it
+through a trait object, so `T` itself has to be shareable. Registered
+closures must be `Send + 'static` (`every` closures additionally `Sync`).
 
 `MyModuleHook` derives `Debug, Clone, Copy, PartialEq, Eq`; the hook
 list must contain at least one hook.
@@ -116,9 +117,10 @@ extra hook names.
 
 `MyModuleSyncPoint` has one method per hook (taking the declared
 arguments) with a default no-op body; its supertrait `SyncPoint` is a
-`Send + Sync` marker. The thread-local dispatch holds
-`&'static dyn MyModuleSyncPoint`, and a thread without an install is the
-default no-op impl — which is why firing a hook on an uninstalled thread
+`Send + Sync` marker. The thread-local dispatch holds the installed state
+behind an `Arc` — installed (or restored) by a guard, `None` on a thread
+that never installed — and a thread without an install dispatches to the
+default no-op impl, which is why firing a hook on an uninstalled thread
 is always safe. Concrete impls are generated internally; you interact
 with the trait through `&dyn MyModuleSyncPoint`, which lets you write
 test helpers generic over the sync point:
@@ -160,16 +162,19 @@ builds.
   unwinding the same message is printed instead (see
   [Keep a failure one test](#keep-a-failure-one-test)). Entries marked
   `.optional()` are exempt (see below).
-- **Leaks per-install state** (`Box::leak` by design — normal for test
-  instantiation, but do not call `install` in a long-lived loop). Applies
-  to `install_shared` too. What it owns, case by case — see
-  [The leak and what it owns](#the-leak-and-what-it-owns).
+- **Owns the state and releases it** — the guard holds the state, and
+  dropping the guard releases it: the guarded value's own `Drop` runs, at
+  guard drop, *after* the assertions above. In shared mode the last `Arc`
+  is that moment (see `shared-mode.md`). Before 0.4.0 the state was
+  `Box::leak`ed and none of this was observable — see
+  [Reclamation and what it owns](#reclamation-and-what-it-owns) for what
+  it costs and what it now lets a test assert.
 - **Restores on drop** — the guard binds this thread's dispatch for its
   lifetime and, on drop, restores the previously installed sync point
   (stacked installs unwind LIFO; after the drop, fires on this thread
   hit the previous install or the default no-op). Drop the guard on the
   thread that installed it: dropping a guard that was moved to another
-  thread clobbers that thread's dispatch pointer.
+  thread clobbers that thread's install.
 
 ### Registration precedence and lifetime
 
@@ -481,10 +486,10 @@ merely survivable:
               });
           });
           run_the_thing(); // the instrumented call, hooks fire here
-          // Read through the same lock instead of `Arc::try_unwrap`: the
-          // leaked `every` registration holds another `Arc` clone of `seen`
-          // for the life of the process, so `try_unwrap` would fail with an
-          // opaque `Err(Arc)` even when the scenario ran.
+          // Read through the same lock instead of `Arc::try_unwrap`: this
+          // runs while the guard is still alive, and its `every` registration
+          // holds another `Arc` clone of `seen`, so `try_unwrap` would fail
+          // with an opaque `Err(Arc)` even when the scenario ran.
           seen.lock().unwrap().clone()
       }; // the guard (and its drop assertions) end here
       out
@@ -524,42 +529,83 @@ With these, one bad scenario costs one test. The last habit is the one
 that catches people first, because "assert inside the hook" reads as the
 natural way to check something at a linearization point.
 
-## The leak and what it owns
+## Reclamation and what it owns
 
-`install_guard`/`install_shared` leak their state on purpose: the thread-local
-dispatch holds a `&'static dyn …`, and in shared mode that same state is
-published to worker threads, so reclamation would have to prove no thread is
-inside a dispatch at the moment the last handle goes away. For a `Vec` or a
-`Mutex` the leak is nothing — the process ends and the OS reclaims its whole
-address space, leaked allocations included. What it
-does change is **ownership of destructors**, and the four cases below follow
-from who holds what:
+`install_guard`/`install_shared` own their state in an `Arc` and release it.
+Up to 0.3.x the state was `Box::leak`ed, because the thread-local dispatch
+held a `&'static dyn …` and in shared mode the same state is published to
+worker threads — reclamation would have to prove no thread is inside a
+dispatch at the moment the last handle goes away. That proof is now carried
+by the reference count itself: every handle is a strong `Arc`, including the
+one a dispatch clones before calling out (see `with_dyn`), so a state cannot
+be freed while something is reading it, and no `unsafe` was needed for the
+change (`forbid(unsafe_code)` still holds).
 
-| What holds what | Dropped? | Consequence |
+**Who holds a strong reference.** The guard; this thread's TLS entry; in
+shared mode, one per worker that installed; and, for the duration of one
+fire, the dispatch itself. `EXEC_STACK` keys re-entry suppression on the
+state's *address*, which reclamation would otherwise make reusable under a
+live frame — the dispatch's clone is what keeps that impossible.
+
+**When the value goes.** The guard's drop is the release moment, in this
+order:
+
+1. restore this thread's TLS (dispatch can no longer reach the state, and
+   any outer install lives on through the guard's saved handle);
+2. run the drop assertions, while the state is fully readable — they read
+   counters and the deque, not `T`, so freeing `T` first would make them
+   true only by accident;
+3. release this guard's reference: if it was the last, the state is freed
+   and the guarded value's own `Drop` runs.
+
+In shared mode the same order is the last `Arc`'s drop (a worker's guard
+holds one, so the value cannot go while any worker is installed). On an
+unwinding thread step 3 deliberately **leaks instead**: a guarded value
+whose `Drop` panics would double-panic and abort the binary — the exact
+failure 0.3.2 removed the assertions for. A leak on a path that is already
+failing is the cheaper half of that trade.
+
+| What holds what | Since 0.4.0 | Consequence |
 |---|---|---|
-| `T` is an `Arc<_>` and the test clones it into `install_guard` | **never** | the leaked state keeps its own strong reference, so the test's `drop` is not the last one |
-| `T` is a `Weak<_>`, the test keeps the `Arc` | **when the test decides** | the leak holds only a weak handle; the destructor is the test's to schedule |
-| a fire-once closure that a fire actually took | **yes** | consuming the slot drops the closure and everything it captured |
-| an `every` closure, or a fire-once that never fired | **never** | the registration lives forever, and so does every handle it captured |
+| `T` is the value the test passes in | **dropped at guard drop** | the destructor is observable — see the migration note below |
+| `T` is an `Arc<_>` the test cloned | dropped when the *last* clone goes | usually the test's own `drop`, if it does not leak clones into hooks |
+| `T` is a `Weak<_>` | never by us | the test keeps full control of the timing |
+| an `every` closure, or a fire-once that never fired | **freed with the state** | a captured `TempDir`/`Child`/channel handle goes back with it |
+| any of the above, on an unwinding thread | **leaked, on purpose** | no abort, no destructor running mid-unwind |
 
-So the rule is not "never put anything with a destructor in `T`" — it is
-**"do not let the thing you are asserting be a destructor the leak owns."**
-A test that wants to prove a file handle closes, a child process dies, or an
-mpsc receiver shuts down cannot express that by putting the owner in `T`
-directly. Three shapes work:
+**What the change costs, measured** (min of 11 runs per fire, pinned to two
+cores, on a machine already loaded — treat the numbers as orders of
+magnitude, not as a bench): a fire through a live guard is ~60 ns either
+way, with reclaim costing ~5 ns more for the one extra `Arc` clone/drop;
+`install`+`drop` per cycle went from ~290 ns to ~95 ns — the leak made
+every cycle a first touch of fresh memory (200k cycles: +42 MB RSS,
+against +4 kB when the freed block is recycled), so reclaiming is the
+cheaper path, not the costly one; an uninstalled fire is test-only code
+(`invoke!` compiles away in a `#[cfg(test)]`-gated path) and went from
+1.7 to ~2.5 ns, the `RefCell` borrow and the count.
 
-- **Guard a `Weak`** (the table's second row). Pass `Arc::downgrade(&v)` as
-  `T` and let the instrumented code take the `Arc` itself. The hook closures
-  are `'static`, so they cannot borrow the test's `v`; give them their own
-  `Weak` clone to upgrade:
+**Migration note.** `T::drop` becoming observable is the point, and it is a
+semantic change: a test that asserts *inside* the value's `Drop` — a debug
+assert on internal invariants, for instance — used to pass because that
+assertion never ran, and now runs at guard drop, *after* the sync-point
+assertions. A scenario that abandoned entries or mis-ordered fires can now
+fail there for the first time. That is a real finding, not a regression, but
+it does not arrive silently-green.
+
+Three shapes still matter for destructor *timing*, now as choices rather
+than workarounds:
+
+- **Guard a `Weak`** when the test must decide the moment. Pass
+  `Arc::downgrade(&v)` as `T`; the hook closures are `'static`, so they take
+  their own `Weak` clone to upgrade, never the `Arc` (an `Arc` in a
+  registration would keep the value alive until the state is released):
 
   ```rust,ignore
   let v = std::sync::Arc::new(Resource::open());
   let w = std::sync::Arc::downgrade(&v);
   let guard = MyModuleSp::install_guard(std::sync::Arc::downgrade(&v));
   guard.before_close({
-      let w = w.clone(); // a Weak, never the Arc: an Arc here would keep
-                         // the value alive inside the leaked registration
+      let w = w.clone(); // a Weak, never the Arc
       move |_, _| {
           if let Some(res) = w.upgrade() {
               res.note_closed();
@@ -571,16 +617,14 @@ directly. Three shapes work:
   assert!(w.upgrade().is_none(), "the destructor ran and nothing kept it alive");
   ```
 
-  With `T = Weak<_>` the leak holds only a weak handle, so that last
-  assertion really means "the destructor ran" — a test the leak cannot fake.
-  This costs the hook body one `upgrade()` per fire, which is exactly the
-  price of knowing who owns the value.
-- **Assert on a flag the destructor sets.** The flag is a channel, not the
-  object under test — so name all four roles: the object that implements
-  `Drop` is a small `Dropped(Arc<AtomicBool>)` wrapper, owned by the
-  *instrumented type* (it lives inside the production value); it is dropped
-  when *the production value* releases it; and the flag itself lives in the
-  test's own `Arc<AtomicBool>` clone, which the leak cannot reach.
+  With `T = Weak<_>` the state holds no strong reference, so that last
+  assertion is the test's own timing, not ours. This costs the hook body one
+  `upgrade()` per fire.
+- **Assert on a flag the destructor sets** when the destructor lives inside
+  the instrumented type. Name all four roles: the object implementing `Drop`
+  is a small `Dropped(Arc<AtomicBool>)` wrapper, owned by the *instrumented
+  value*; it is dropped when the *production code* releases it; the flag
+  lives in the test's own clone.
 
   ```rust,ignore
   struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -602,26 +646,17 @@ directly. Three shapes work:
   assert!(flag.load(std::sync::atomic::Ordering::SeqCst), "the watchdog ran");
   ```
 
-  The point is that `T` never drops, so a destructor *inside* `T` can never
-  be the assertion — it must be a destructor the production code itself
-  triggers, reported through a handle the test also holds. Use this when the
-  destructor lives inside the instrumented type and cannot be bypassed.
-- **Test the destructor outside a sync point.** The leak is shadow-point's; the
-  type's own `Drop` is ordinary Rust. `drop(map); assert!(file.is_closed())`
-  needs no hook at all. Reserve the sync points for what only they can pin —
-  the interleaving.
+  Use this when you want the destructor's *moment to be the production
+  code's*, not the guard's; with reclaim the second option is simply `T`
+  itself, which now drops.
+- **Test the destructor outside a sync point.** The type's own `Drop` is
+  ordinary Rust: `drop(map); assert!(file.is_closed())` needs no hook at
+  all. Reserve the sync points for what only they can pin — the
+  interleaving.
 
-The same logic applies to captures. An `every(...)` closure that
-*captures* a `tempfile::TempDir` or a `Child` in its environment leaks that
-handle too, because the registration is never consumed: capture a `Weak`, or
-capture nothing and read state through `T`.
-
-Finally, each leaked state is small — counters, deque slots, captured
-handles — and bounded by the process lifetime, so a test suite that installs
-a few hundred times is
-fine; the leak becomes a real cost only when installs happen per-iteration in
-a benchmark or in a loop that never exits — which is why "do not call
-`install` in a long-lived loop" is the sentence in the API list.
+Captures follow the same rule in the other direction: an `every(...)`
+closure that captures a `tempfile::TempDir` or a `Child` used to keep it
+alive for the process; with the state released, the capture goes with it.
 
 ## Hook arguments
 

@@ -495,3 +495,244 @@ fn raised_assertions_keep_their_payload_shape() {
         "the sequence path must raise the bare message, no wrapper: {msg:?}"
     );
 }
+
+// ── Reclamation ──────────────────────────────────────────────────────
+//
+// The state used to be `Box::leak`ed, so the guarded value's `Drop` never
+// ran: a test could not assert on a destructor, and a capture inside a
+// registration lived until the process did. Both are now observable, and
+// these tests are the contract — each one fails against the leaked build.
+
+/// A guarded value whose `Drop` sets a flag, so a test can see the release
+/// without holding a strong handle to the value itself.
+struct MarksDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for MarksDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn the_guarded_value_is_dropped_when_the_guard_drops() {
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let g = single::SingleSp::install_guard(MarksDrop(flag.clone()));
+    assert!(
+        !flag.load(std::sync::atomic::Ordering::SeqCst),
+        "the value is alive while the guard is"
+    );
+    drop(g);
+    assert!(
+        flag.load(std::sync::atomic::Ordering::SeqCst),
+        "guard drop released the last reference: the destructor ran"
+    );
+}
+
+#[test]
+fn a_weak_guard_does_not_keep_the_value_alive() {
+    // The shape the guide recommends for asserting a destructor: T is the
+    // Weak, so the state holds no strong reference, and the test alone
+    // decides when the value goes.
+    let v = Arc::new(());
+    let w = Arc::downgrade(&v);
+    let g = single::SingleSp::install_guard(w.clone());
+    assert!(w.upgrade().is_some(), "the test holds the value alive");
+    drop(g);
+    assert!(w.upgrade().is_some(), "the guard was not the last owner");
+    drop(v);
+    assert!(w.upgrade().is_none(), "nothing leaked kept it alive");
+}
+
+#[test]
+fn a_captured_handle_is_freed_with_the_state() {
+    // The leak's other half: a closure an `every` registration holds is
+    // never consumed, so under `Box::leak` its captures were immortal.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    {
+        let g = single::SingleSp::install_guard(());
+        let s = seen.clone();
+        g.every(|q| {
+            q.a(move |(), _| s.lock().unwrap().push(1));
+        });
+        shadow_point::invoke!(single::SingleSp, a(0));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        drop(g);
+    }
+    // The registration's clone of `seen` is gone with the state; the only
+    // reference left is this test's.
+    assert_eq!(
+        Arc::strong_count(&seen),
+        1,
+        "the every closure's capture was not released — the state still leaks"
+    );
+}
+
+#[test]
+fn a_fire_once_that_never_fired_is_freed_with_the_state() {
+    let held = Arc::new(Mutex::new(0u32));
+    let g = single::SingleSp::install_guard(());
+    let h = held.clone();
+    g.a(move |(), _| drop(h)); // registered, never fired
+    drop(g);
+    assert_eq!(
+        Arc::strong_count(&held),
+        1,
+        "an unconsumed fire-once slot kept its capture alive"
+    );
+}
+
+#[test]
+fn install_inside_a_hook_and_a_reinstall_do_not_break_dispatch() {
+    // `with_dyn` must not call out through a live `RefCell` borrow: a hook
+    // that installs (or drops) a guard takes the same TLS slot mutably, and
+    // a live borrow would turn that into a harness-owned panic.
+    let outer_hits = Arc::new(Mutex::new(0u32));
+    let g = single::SingleSp::install_guard(());
+    let o = outer_hits.clone();
+    g.every(|q| {
+        q.a(move |(), _| {
+            *o.lock().unwrap() += 1;
+            // A nested install on the same thread, dropped inside the fire.
+            let inner = single::SingleSp::install_guard(());
+            inner.b(|(), _| ());
+            shadow_point::invoke!(single::SingleSp, b(0));
+            drop(inner);
+        });
+    });
+    g.sequence(|q| {
+        q.a(|(), _| ());
+    });
+    shadow_point::invoke!(single::SingleSp, a(0));
+    assert_eq!(
+        *outer_hits.lock().unwrap(),
+        1,
+        "the hook re-entered TLS safely"
+    );
+    drop(g);
+    // And the thread's dispatch is clean afterwards: a fresh install works.
+    let g2 = single::SingleSp::install_guard(());
+    g2.sequence(|q| {
+        q.a(|(), _| ());
+    });
+    shadow_point::invoke!(single::SingleSp, a(1));
+    drop(g2);
+}
+
+#[test]
+fn reuses_of_the_state_address_do_not_suppress_a_live_dispatch() {
+    // Re-entry suppression keys on the state's ADDRESS. Reclamation makes
+    // an address free to be handed to the next install, so a stale frame
+    // could suppress a fire that belongs to a different, live state. The
+    // dispatch holds a strong count for its whole duration, which is what
+    // prevents that; this loop is the shape that would catch it.
+    for i in 0..200 {
+        let g = single::SingleSp::install_guard(i);
+        let hits = Arc::new(Mutex::new(0u32));
+        let h = hits.clone();
+        g.every(|q| {
+            q.a(move |v, _| {
+                *h.lock().unwrap() += 1;
+                assert_eq!(*v, i, "the fire reached the state that owns it");
+            });
+        });
+        shadow_point::invoke!(single::SingleSp, a(0));
+        assert_eq!(*hits.lock().unwrap(), 1, "iteration {i} suppressed");
+        drop(g);
+    }
+}
+
+#[test]
+fn stacked_installs_release_the_inner_and_keep_the_outer_alive() {
+    // The outer state lives on through the inner guard's `old` handle: the
+    // outer fires must still reach it after the inner scope closes.
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let outer = single::SingleSp::install_guard(MarksDrop(flag.clone()));
+    let hits = Arc::new(Mutex::new(0u32));
+    let h = hits.clone();
+    outer.every(|q| {
+        q.a(move |_, _| *h.lock().unwrap() += 1);
+    });
+    shadow_point::invoke!(single::SingleSp, a(0));
+    {
+        let inner = single::SingleSp::install_guard(());
+        inner.sequence(|q| {
+            q.b(|(), _| ());
+        });
+        shadow_point::invoke!(single::SingleSp, b(0));
+        drop(inner);
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::SeqCst),
+            "dropping the inner guard must not release the outer state"
+        );
+    }
+    shadow_point::invoke!(single::SingleSp, a(0));
+    assert_eq!(*hits.lock().unwrap(), 2, "the outer install survived");
+    drop(outer);
+    assert!(
+        flag.load(std::sync::atomic::Ordering::SeqCst),
+        "the outer value is freed when its own guard goes"
+    );
+}
+
+#[test]
+fn an_unwinding_guard_does_not_run_the_value_destructor() {
+    // Step 3 of the drop order leaks on an unwinding thread on purpose: a
+    // guarded value whose `Drop` panics would double-panic and abort. Here
+    // the destructor must NOT run at all, and the run must survive.
+    static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct CountsDrops;
+    impl Drop for CountsDrops {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let before = DROPS.load(std::sync::atomic::Ordering::SeqCst);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _g = single::SingleSp::install_guard(CountsDrops);
+        panic!("the test's own failure");
+    }));
+    assert!(outcome.is_err(), "the scenario failed as designed");
+    assert_eq!(
+        DROPS.load(std::sync::atomic::Ordering::SeqCst),
+        before,
+        "the guarded value must be forgotten while unwinding, not dropped"
+    );
+}
+
+#[test]
+fn an_assertion_panic_does_not_run_the_value_destructor_mid_unwind() {
+    // The drop assertions are OUR panic and fire on a clean thread, so
+    // `SpGuard::drop` unwinds out of `assert_fires` rather than entering it
+    // with `panicking()` already true. The state must be out of the implicit
+    // drop path by then: a plain local `Arc` would be freed by that unwind,
+    // running `T::drop` mid-unwind — a second panic if the destructor raises,
+    // i.e. exactly the abort the assertion order exists to prevent.
+    static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct CountsDrops;
+    impl Drop for CountsDrops {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let before = DROPS.load(std::sync::atomic::Ordering::SeqCst);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let g = single::SingleSp::install_guard(CountsDrops);
+        g.sequence(|q| {
+            q.a(|_, _| ()); // left unconsumed: the drop assertion raises
+        });
+        drop(g);
+    }));
+    let err = outcome.expect_err("the unconsumed sequence fails the test");
+    let msg = err
+        .downcast_ref::<String>()
+        .expect("a formatted panic message");
+    assert!(
+        msg.contains("sequence not fully consumed"),
+        "the assertion is the failure, not the destructor: {msg}"
+    );
+    assert_eq!(
+        DROPS.load(std::sync::atomic::Ordering::SeqCst),
+        before,
+        "the state must leak when its own assertion unwinds, not free `T`"
+    );
+}

@@ -87,16 +87,19 @@ fn sequence_order_across_threads() {
 }
 
 /// The park arm must fail, not hang: a fire whose head can never advance
-/// waits `PARK_TIMEOUT` and reports the timeout diagnostic.
+/// waits the park budget and reports the timeout diagnostic.
 ///
 /// Ignored by default because the behavior under test *is* the wait — a
-/// run costs `PARK_TIMEOUT` (10s at the default), which belongs to a
-/// deliberate pass (`cargo test -- --ignored`) and not to the CI legs.
+/// run costs the whole budget (10 s at the default), which belongs to a
+/// deliberate pass (`cargo test -- --ignored`) and not to the CI legs. Set
+/// `SP_PARK_TIMEOUT_MS` to shorten that pass; the assertion below is
+/// expressed against `park_timeout()`, not against the constant, so the
+/// knob shortens the wait without turning this test red.
 /// The `sequence` replacement at the end is what lets the `Arc`'s drop
 /// assertions pass, and it is the second thing this test pins: a second
 /// `sequence` call swaps the whole deque, it does not append.
 #[test]
-#[ignore = "parks for the full PARK_TIMEOUT by design (10s)"]
+#[ignore = "parks for the whole budget by design (10 s at the default)"]
 fn unattainable_head_reports_the_park_timeout() {
     let shared = ct::CtSp::install_shared(());
     shared.sequence(|s| {
@@ -122,7 +125,7 @@ fn unattainable_head_reports_the_park_timeout() {
         "and names the blocking head: {msg}"
     );
     assert!(
-        waited >= PARK_TIMEOUT / 2,
+        waited >= shadow_point::park_timeout() / 2,
         "the thread really parked, it did not fail instantly ({waited:?})"
     );
     // Replace the whole deque (does not append): the abandoned entries are
@@ -328,5 +331,147 @@ fn two_threads_same_hook_entries() {
         log.lock().unwrap().len(),
         2,
         "both same-hook entries are consumed exactly once; order is un-fixed"
+    );
+}
+
+// ── Shared-mode reclamation ──────────────────────────────────────────
+//
+// `install_shared` leaked its state through `Box::leak` too, so the shared
+// path had the same blind spot as the guard. Reaching the last `Arc` now
+// frees the state — and the guarded value's `Drop` runs there, which is why
+// the ORDER inside `SharedSp::drop` is load-bearing: without it, the last
+// `Arc` on an unwinding thread would run a consumer destructor mid-unwind,
+// the exact abort 0.3.2 removed the crate's own raise for.
+
+/// A shared value whose `Drop` sets a flag, so a test can see the release
+/// without holding a strong handle to the value itself.
+struct MarksDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for MarksDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn the_shared_value_is_dropped_with_the_last_arc() {
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shared = ct::CtSp::install_shared(MarksDrop(flag.clone()));
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "the value is alive while its Arc is"
+    );
+    drop(shared);
+    assert!(
+        flag.load(Ordering::SeqCst),
+        "the last Arc released the state, and the guarded value with it"
+    );
+}
+
+#[test]
+fn a_worker_guard_keeps_the_shared_value_alive_until_it_leaves() {
+    // The docs already promise this for the ASSERTIONS ("they run only after
+    // every worker has dropped its guard"); reclamation extends it to the
+    // value. A worker's TLS entry is a strong handle, so a thread inside a
+    // dispatch cannot be reading state that the main test just freed.
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shared = ct::CtSp::install_shared(MarksDrop(flag.clone()));
+    // A handshake, not sleeps: the assertion below is only about "the worker
+    // holds a guard", and wall-clock guesses made this test fail on a loaded
+    // machine whenever the main thread lost its slot for longer than the
+    // worker's nap — the state then died before the drop it was measuring.
+    let (installed_tx, installed_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = {
+        let s = shared.clone();
+        std::thread::spawn(move || {
+            let _inst = s.install(); // holds a strong handle for its scope
+            installed_tx.send(()).expect("the test is still listening");
+            release_rx
+                .recv()
+                .expect("the test releases the worker, not a dropped sender");
+        })
+    };
+    installed_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the worker installed its guard");
+    drop(shared); // the test's own last reference — a worker still holds one
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "the value was freed while a worker's install still held the state"
+    );
+    release_tx.send(()).expect("the worker is still waiting");
+    worker.join().unwrap();
+    assert!(
+        flag.load(Ordering::SeqCst),
+        "the value went when the last handle — the worker's guard — left"
+    );
+}
+
+#[test]
+fn a_panicking_last_arc_does_not_run_the_shared_value_destructor() {
+    // The release step is the last thing `SharedSp::drop` does, and on an
+    // unwinding thread it is skipped: `T::drop` is consumer code, and one
+    // that panics here would double-panic and abort the run. The state
+    // field is an `Option` precisely so this step can be withheld — an
+    // implicitly dropped `Arc` field could not be.
+    static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct CountsDrops;
+    impl Drop for CountsDrops {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let before = DROPS.load(Ordering::SeqCst);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let shared = ct::CtSp::install_shared(CountsDrops);
+        shared.sequence(|q| {
+            q.a(|_, _| ()); // left unconsumed on purpose: asserts fire at the end
+        });
+        let _inst = shared.install();
+        // Unwinding drops `_inst` (one handle) and then `shared` — the last
+        // one — so both the assertions and the release run mid-unwind.
+        panic!("the test's own failure");
+    }));
+    assert!(outcome.is_err(), "the scenario failed as designed");
+    assert_eq!(
+        DROPS.load(Ordering::SeqCst),
+        before,
+        "the shared value must be forgotten while unwinding, not dropped"
+    );
+}
+
+#[test]
+fn an_assertion_panic_at_the_last_arc_does_not_run_the_shared_value_destructor() {
+    // Same hole, shared side: `SharedSp::drop` raises its assertions on a
+    // clean thread, and the state has to be out of the implicit drop path
+    // before that, or the unwind frees it and runs `T::drop` mid-unwind.
+    static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct CountsDrops;
+    impl Drop for CountsDrops {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let before = DROPS.load(Ordering::SeqCst);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let shared = ct::CtSp::install_shared(CountsDrops);
+        shared.sequence(|q| {
+            q.a(|_, _| ()); // left unconsumed: the drop assertion raises
+        });
+        drop(shared); // the last `Arc` — the assertions run here
+    }));
+    let err = outcome.expect_err("the unconsumed sequence fails the test");
+    let msg = err
+        .downcast_ref::<String>()
+        .expect("a formatted panic message");
+    assert!(
+        msg.contains("sequence not fully consumed"),
+        "the assertion is the failure, not the destructor: {msg}"
+    );
+    assert_eq!(
+        DROPS.load(Ordering::SeqCst),
+        before,
+        "the state must leak when its own assertion unwinds, not free `T`"
     );
 }

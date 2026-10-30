@@ -48,6 +48,9 @@ Each step exists to make the next one deterministic; do not reorder:
    unwinding the same assertions are printed rather than raised
    (double panic), like the guard's in private mode —
    see [Keep a failure one test](guide.md#keep-a-failure-one-test).
+   If this drop is the release that frees the state, the guarded
+   value's own `Drop` runs here, after the assertions — see
+   [Reclamation and what it owns](guide.md#reclamation-and-what-it-owns).
 
 A worker that never calls `install()` dispatches to the default no-op
 and its fires vanish silently — that is the shared-mode version of the
@@ -58,10 +61,11 @@ do not need to bind.
 
 A worker that fires a hook the sequence expects only at a *later*
 position parks instead of panicking, and re-checks the head after
-every wake. The panic fires only when a full `PARK_TIMEOUT` (a
-crate-root `Duration` constant of 10 s, not per-install configurable)
+every wake. The panic fires only when a full `park_timeout()` (the
+`PARK_TIMEOUT` constant of 10 s, unless `SP_PARK_TIMEOUT_MS` names
+another value for the process — see below)
 elapses with no wake and the head still blocks the fire — a thread
-that keeps getting woken can park longer than 10 s in total. This is what makes shared mode
+that keeps getting woken can park longer than the budget in total. This is what makes shared mode
 composable: *any* thread may arrive out of order, and the sequence
 sorts arrivals — each same-hook entry is consumed exactly once, the
 thread that fires the head hook pops it and wakes the next in line.
@@ -70,9 +74,16 @@ Fires matching no entry at all never park; they fall through (see
 
 Parking is a mutual-deadlock guard, **not** a synchronization
 mechanism: if the head can never advance (no live thread will fire it),
-the parked worker panics at `PARK_TIMEOUT` with a `sequence park
+the parked worker panics at the budget with a `sequence park
 timeout` diagnostic naming the waiting hook, the head hook, and the
 install site. The test fails loudly; it does not hang.
+
+**Lowering the budget.** `SP_PARK_TIMEOUT_MS=200 cargo test` shortens the
+wait for a whole process (read once, cached; an unparsable value falls back
+to the default and says so). Use it for a deliberate pass over tests that
+*are* the wait, not as a CI default: the budget is the deadlock guard, so a
+small one can mistake a loaded scheduler for a stuck head and fail a correct
+test: on a busy machine a runnable thread can wait seconds for its slice.
 
 `Gate::must_wait` / `wait_timeout` take any `Duration` — the examples
 reuse `PARK_TIMEOUT` merely as a convenient budget.
@@ -227,8 +238,9 @@ The `parked` gate is what makes this run the *park* path: without it
 `after_commit` in order and never park — so the choreography would
 silently stop exercising the rendezvous. The failure mode the gate
 guards against is a head that never advances: if `before_insert` never
-fires, T2's park ends in a `sequence park timeout` panic at
-`PARK_TIMEOUT`. A wrong choreography fails the test; it never hangs it.
+fires, T2's park ends in a `sequence park timeout` panic once the budget
+elapses (`park_timeout()`: `PARK_TIMEOUT`, unless `SP_PARK_TIMEOUT_MS`
+names another). A wrong choreography fails the test; it never hangs it.
 
 ### Example: counting fires across threads
 

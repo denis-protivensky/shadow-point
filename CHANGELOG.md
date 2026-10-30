@@ -12,6 +12,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/denis-protivensky/shadow-point/releases/tag/v0.1.0
 
+## [Unreleased]
+
+### Added
+- `park_timeout()`, the value the shared-mode sequence actually parks for:
+  `PARK_TIMEOUT` unless `SP_PARK_TIMEOUT_MS` names milliseconds. The public
+  constant keeps its meaning and stays the default, so a consumer importing
+  it is untouched; the env is read once per process and cached in one atomic
+  (no `unsafe`, no `OnceLock`, so MSRV 1.65 holds). A value that does not
+  parse falls back to the default **and says so on stderr** — a typo in a CI
+  env should not silently change what a suite proves. `0` is legal: a
+  choreography that can never advance then reports at once instead of
+  parking. Resolution is unit-tested, and the park itself end-to-end in
+  `tests/park_timeout_env.rs` (child processes with their own env, since the
+  cache is per-process).
+  Set the env for the ignored `unattainable_head_reports_the_park_timeout`
+  to make that pass cheap; do **not** set it for a whole CI leg — parking is
+  a mutual-deadlock guard, and a 200 ms budget can mistake a loaded
+  scheduler for a stuck head and fail a correct test.
+
+### Changed
+- **Breaking (semantics): the sync-point state is reclaimed, not leaked.**
+  `install_guard`/`install_shared` held it through `Box::leak`, so the
+  guarded value's `Drop` never ran and everything a registration captured
+  lived until the process did. Both now own it through `Arc`, and the last
+  handle releases it — the guarded value's destructor becomes observable at
+  guard drop (shared mode: at the last `Arc`), and an `every` closure's or an
+  unconsumed fire-once's captures go with the state. No public signature
+  changed and no `unsafe` appeared (`forbid(unsafe_code)` holds): the
+  reference count replaced the `'static` proof — dispatch clones the handle
+  before it calls out, which also keeps `EXEC_STACK`'s address identity
+  from aliasing a freed state.
+  On a thread that is already unwinding the state is **deliberately leaked**
+  rather than freed: running a consumer's `Drop` there risks a double panic,
+  the abort this crate's 0.3.2 work exists to prevent.
+  Cost, measured (min of 11, two pinned cores, loaded machine): a fire
+  through a live guard ~60 ns either way (≈+5 ns for the clone/drop),
+  `install`+`drop` per cycle 290 ns → 95 ns, an uninstalled fire 1.7 →
+  2.5 ns (test-only path).
+  **Migration:** a test whose guarded value asserts inside its own `Drop`
+  used to have that assertion silently skipped and now runs it, after the
+  sync-point assertions. Verified against a real consumer's whole
+  shadow-point suite: **0 tests changed verdict** (54 passed), so this is a
+  risk to check, not a cost measured in the wild.
+  The `Weak` and flag shapes are reframed as choices about the destructor's
+  *moment* rather than workarounds for a leak; the API list's "Leaks
+  per-install state" entry, the `'static` bound's rationale and the generated
+  `SpGuard`/`SharedSp`/`install` doc comments (which stated the value is
+  never dropped) are updated to match.
+- `docs/guide.md`: "The leak and what it owns" → **"Reclamation and what it
+  owns"**, because the leak it described is gone. The section now states who
+  holds a strong reference (the guard, the TLS entry, one per worker, and the
+  dispatch for the length of one fire), the release order (TLS restore →
+  assertions → release), the new ownership table, the measured cost, and a
+  migration note. `with_dyn` documents the clone-before-call rule and why a
+  hook may install or drop a guard without breaking the TLS borrow.
+- `docs/shared-mode.md`: the parking section names `park_timeout()` instead
+  of asserting that `PARK_TIMEOUT` is "not per-install configurable", and
+  adds how to lower the budget — with the warning that it is a deadlock
+  guard, so a short budget on a busy machine can fail a correct test.
+
 ## [0.3.2] - 2026-10-30
 
 ### Added
