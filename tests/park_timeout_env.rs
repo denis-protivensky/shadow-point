@@ -54,6 +54,12 @@ fn park_and_report() -> Duration {
 /// A child that fails is reported with both streams: its marker line lives
 /// on stdout, but its panic message lives on stderr, and "the marker is
 /// missing" alone would hide the reason.
+///
+/// The wait is BOUNDED, and that is the point: the regression this file
+/// pins manifests as a park that never returns, so a child waited on
+/// forever would hang the suite instead of failing it — the exact failure
+/// mode the park timeout itself exists to prevent. A child that outlives
+/// the watchdog is killed and reported as a hang, with both streams.
 fn child(test: &str, envs: &[(&str, &str)]) -> (String, String, std::time::Duration) {
     let exe = std::env::current_exe().expect("the test binary path");
     let mut cmd = std::process::Command::new(exe);
@@ -66,22 +72,44 @@ fn child(test: &str, envs: &[(&str, &str)]) -> (String, String, std::time::Durat
         cmd.env(k, v);
     }
     let started = Instant::now();
-    let output = cmd
-        .spawn()
-        .and_then(std::process::Child::wait_with_output)
-        .expect("the child ran");
+    let mut child = cmd.spawn().expect("the child ran");
+    // Poll instead of `wait_with_output`: the pipes only ever hold the
+    // child's small marker output, so blocking on them is not what protects
+    // the suite — the deadline is. `try_wait` caches the exit status, so the
+    // `wait_with_output` below still collects the streams afterwards.
+    // 30 s of headroom: a loaded machine can freeze a healthy child for
+    // seconds at a time (observed: ~9.5 s wall-clock jumps mid-park), and a
+    // watchdog that kills healthy children is worse than one that fires
+    // late. The child under test parks for at most 200 ms, so 30 s still
+    // means "never returned", not "slow".
+    let deadline = Duration::from_secs(30);
+    let hung = loop {
+        match child.try_wait().expect("the child's status is readable") {
+            Some(_) => break false,
+            None if started.elapsed() >= deadline => {
+                let _ = child.kill();
+                break true;
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    let output = child.wait_with_output().expect("the child ran");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        !hung,
+        "the child running `{test}` was still running after {deadline:?} \
+         and was killed — its park never returned?\n--- stdout ---\n{stdout}\n\
+         --- stderr ---\n{stderr}"
+    );
     assert!(
         output.status.success(),
         "the child running `{test}` failed ({:?})\n--- stdout ---\n{}\n--- stderr ---\n{}",
         output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+        stdout,
+        stderr,
     );
-    (
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-        started.elapsed(),
-    )
+    (stdout, stderr, started.elapsed())
 }
 
 fn marker(text: &str, key: &str) -> u128 {
