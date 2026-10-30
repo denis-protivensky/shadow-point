@@ -62,9 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `#[should_panic]` test as well, so such a test **passes** with an
   incomplete scenario where the old code aborted the binary. Documented in
   the guide's "Keep a failure one test" (four habits), pinned by
-  `should_panic_test_passes_with_an_incomplete_scenario`, with the two
-  shapes that keep the teeth pinned beside it
-  (`guard_dropped_before_the_expected_panic_still_asserts`).
+  `should_panic_test_passes_with_an_incomplete_scenario`. The two shapes
+  that keep the teeth are named beside it: end the scenario and
+  `drop(guard)` before the expected `panic!` (pinned by
+  `guard_dropped_before_the_expected_panic_still_asserts`), or keep the
+  guard outside a `catch_unwind`.
 - `docs/guide.md`: "The leak and what it owns" — the four leak cases, each
   derived from who holds what (`Arc` in `T` never drops, `Weak` in `T` drops
   when the test decides, a consumed fire-once closure drops, an `every`
@@ -72,14 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shapes name the pitfalls they avoid: hook closures are `'static`, so the
   `Weak`-guarded shape carries its own `Weak` clone, never the `Arc`; the
   flag shape names which object implements `Drop` and who owns it; and the
-  narrow-scope example counts with `expect_calls` and collects with `every`
-  — a fire-once registration runs its closure on the FIRST fire only, so
-  three fires collect one key while `.expect(3)` still passes (the counter
-  counts fires, not closure runs) — and reads the collected Vec under the
-  lock instead of `Arc::try_unwrap`, which the leaked registration's own
-  `Arc` clone defeats with an opaque `Err(Arc)`. The guard API list points
-  at the section, and its drop-assertion bullet matches the new unwinding
-  rule.
+  third tests the destructor outside the sync point entirely — ordinary
+  `Drop`, no hook. The guard API list points at the section, and its
+  drop-assertion bullet matches the new unwinding rule.
 - Generated doc comments no longer link `[`Gate`](crate::Gate)` — v0.3.1's
   one generated `crate::` link: inside a consumer crate `crate::` resolves
   against *that* crate's root, so rustdoc renders a dead
@@ -91,18 +88,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the scenario before a `#[should_panic]`, collect through the closure
   instead of asserting inside it); the panic-behavior paragraph and the
   debugging reference updated for the new shape, the double-panic rationale
-  now in one place with a link from the other.
+  now in one place with a link from the other. The narrow-scope example
+  counts with `expect_calls` and collects with `every` — a fire-once
+  registration runs its closure on the FIRST fire only, so three fires
+  collect one key while `.expect(3)` still passes (the counter counts
+  fires, not closure runs) — and reads the collected Vec under the lock
+  instead of `Arc::try_unwrap`, which the leaked registration's own `Arc`
+  clone defeats with an opaque `Err(Arc)`.
 
 ### Internal
-- The `# Specification syntax` block in the `define_sp!` docs was fenced
+- The `# Example` block in the `define_sp!` docs was fenced
   ```` ```ignore ````, which still **collects** it as a doctest — and that
   test does not compile (`define_sp!` unqualified in a doctest scope). It was
   invisible because the default suite skips ignored items; it turned red the
   moment the suite gained a test that is ignored by design, since
   `cargo test -- --ignored` runs every ignored item in the crate. Now fenced
-  ```` ```text ````, like the sibling block in the same doc. This is what
-  makes an `-- --ignored` pass possible at all: before it, such a run could
-  not be green for any reason.
+  ```` ```text ````, like the sibling `# Specification syntax` block in the
+  same doc. This is what makes an `-- --ignored` pass possible at all:
+  before it, such a run could not be green for any reason.
 
 ## [0.3.1] - 2026-09-26
 
