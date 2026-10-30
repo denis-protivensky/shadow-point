@@ -238,8 +238,9 @@ The `parked` gate is what makes this run the *park* path: without it
 `after_commit` in order and never park — so the choreography would
 silently stop exercising the rendezvous. The failure mode the gate
 guards against is a head that never advances: if `before_insert` never
-fires, T2's park ends in a `sequence park timeout` panic at
-`PARK_TIMEOUT`. A wrong choreography fails the test; it never hangs it.
+fires, T2's park ends in a `sequence park timeout` panic once the budget
+elapses (`park_timeout()`: `PARK_TIMEOUT`, unless `SP_PARK_TIMEOUT_MS`
+names another). A wrong choreography fails the test; it never hangs it.
 
 ### Example: counting fires across threads
 

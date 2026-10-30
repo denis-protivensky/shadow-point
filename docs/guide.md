@@ -577,9 +577,11 @@ failing is the cheaper half of that trade.
 cores, on a machine already loaded — treat the numbers as orders of
 magnitude, not as a bench): a fire through a live guard is ~60 ns either
 way, with reclaim costing ~5 ns more for the one extra `Arc` clone/drop;
-`install`+`drop` per cycle went from ~290 ns to ~95 ns, because the leak
-built the state once and never gave it back; an uninstalled fire is test-only
-code (`invoke!` compiles away in a `#[cfg(test)]`-gated path) and went from
+`install`+`drop` per cycle went from ~290 ns to ~95 ns — the leak made
+every cycle a first touch of fresh memory (200k cycles: +42 MB RSS,
+against +4 kB when the freed block is recycled), so reclaiming is the
+cheaper path, not the costly one; an uninstalled fire is test-only code
+(`invoke!` compiles away in a `#[cfg(test)]`-gated path) and went from
 1.7 to ~2.5 ns, the `RefCell` borrow and the count.
 
 **Migration note.** `T::drop` becoming observable is the point, and it is a

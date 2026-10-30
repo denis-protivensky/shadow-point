@@ -40,9 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guard drop (shared mode: at the last `Arc`), and an `every` closure's or an
   unconsumed fire-once's captures go with the state. No public signature
   changed and no `unsafe` appeared (`forbid(unsafe_code)` holds): the
-  reference count replaced the `'static` proof, dispatch cloning the handle
-  before it calls out, which also keeps `EXEC_STACK`'s address identity from
-  aliasing a freed state.
+  reference count replaced the `'static` proof — dispatch clones the handle
+  before it calls out, which also keeps `EXEC_STACK`'s address identity
+  from aliasing a freed state.
   On a thread that is already unwinding the state is **deliberately leaked**
   rather than freed: running a consumer's `Drop` there risks a double panic,
   the abort this crate's 0.3.2 work exists to prevent.

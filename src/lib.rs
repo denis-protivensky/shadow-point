@@ -353,7 +353,7 @@ pub fn park_timeout() -> std::time::Duration {
     // shape of `compare_exchange`'s Ok arm: it yields the PREVIOUS value,
     // which on success is the unresolved sentinel — `unwrap_or_else` over it
     // would hand back the sentinel as if it were a timeout in milliseconds
-    // (a ~584-year park, caught by the end-to-end test in
+    // (a ~584-million-year park, caught by the end-to-end test in
     // `tests/park_timeout_env.rs`, not by the resolver's unit tests).
     let winner = match CACHED.compare_exchange(
         UNRESOLVED_PARK_TIMEOUT,
@@ -381,7 +381,7 @@ fn resolve_park_timeout(raw: Result<String, std::env::VarError>) -> u64 {
         }
         Ok(raw) => match raw.trim().parse::<u64>() {
             // The sentinel is the cache's own marker: publishing it would
-            // both hand out a ~584-year timeout and leave the cache
+            // both hand out a ~584-million-year timeout and leave the cache
             // permanently unresolved.
             Ok(UNRESOLVED_PARK_TIMEOUT) => {
                 note(format_args!(
@@ -1647,8 +1647,8 @@ mod tests {
     /// The cached accessor, pinned separately from the resolution rule: the
     /// value that comes out of `park_timeout` is what a park waits on, and
     /// the first version of the cache returned its own "unresolved" sentinel
-    /// as a timeout (~584 years). The pure resolver cannot see that bug; only
-    /// a test on the cached path can.
+    /// as a timeout (~584 million years). The pure resolver cannot see that
+    /// bug; only a test on the cached path can.
     ///
     /// The bound mirrors the env this process started with, so a legitimate
     /// `SP_PARK_TIMEOUT_MS` on the runner is honored, not flagged — the same
