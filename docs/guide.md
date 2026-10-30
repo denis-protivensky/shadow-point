@@ -165,7 +165,7 @@ builds.
 - **Owns the state and releases it** — the guard holds the state, and
   dropping the guard releases it: the guarded value's own `Drop` runs, at
   guard drop, *after* the assertions above. In shared mode the last `Arc`
-  is that moment (see `docs/shared-mode.md`). Before 0.4.0 the state was
+  is that moment (see `shared-mode.md`). Before 0.4.0 the state was
   `Box::leak`ed and none of this was observable — see
   [Reclamation and what it owns](#reclamation-and-what-it-owns) for what
   it costs and what it now lets a test assert.
@@ -174,7 +174,7 @@ builds.
   (stacked installs unwind LIFO; after the drop, fires on this thread
   hit the previous install or the default no-op). Drop the guard on the
   thread that installed it: dropping a guard that was moved to another
-  thread clobbers that thread's dispatch pointer.
+  thread clobbers that thread's install.
 
 ### Registration precedence and lifetime
 

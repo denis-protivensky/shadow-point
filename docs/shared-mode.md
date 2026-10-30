@@ -48,6 +48,9 @@ Each step exists to make the next one deterministic; do not reorder:
    unwinding the same assertions are printed rather than raised
    (double panic), like the guard's in private mode —
    see [Keep a failure one test](guide.md#keep-a-failure-one-test).
+   If this drop is the release that frees the state, the guarded
+   value's own `Drop` runs here, after the assertions — see
+   [Reclamation and what it owns](guide.md#reclamation-and-what-it-owns).
 
 A worker that never calls `install()` dispatches to the default no-op
 and its fires vanish silently — that is the shared-mode version of the
