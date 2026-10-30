@@ -327,8 +327,9 @@ const UNRESOLVED_PARK_TIMEOUT: u64 = u64::MAX;
 /// A value that does not parse, or is empty, is ignored with one printed
 /// note: a typo in a CI env should not silently change what the suite
 /// proves, and should not fail a run either. `0` is legal and means "do not
-/// wait": the head is re-checked and the timeout diagnostic raised on the
-/// next wake, so a wrong choreography fails instantly instead of parking.
+/// wait": the zero wait returns already timed out, the head is re-checked,
+/// and the timeout diagnostic is raised at once — so a wrong choreography
+/// fails instantly instead of parking.
 ///
 /// ```text
 /// SP_PARK_TIMEOUT_MS=200 cargo test
