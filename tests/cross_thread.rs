@@ -427,3 +427,38 @@ fn a_panicking_last_arc_does_not_run_the_shared_value_destructor() {
         "the shared value must be forgotten while unwinding, not dropped"
     );
 }
+
+#[test]
+fn an_assertion_panic_at_the_last_arc_does_not_run_the_shared_value_destructor() {
+    // Same hole, shared side: `SharedSp::drop` raises its assertions on a
+    // clean thread, and the state has to be out of the implicit drop path
+    // before that, or the unwind frees it and runs `T::drop` mid-unwind.
+    static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct CountsDrops;
+    impl Drop for CountsDrops {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let before = DROPS.load(Ordering::SeqCst);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let shared = ct::CtSp::install_shared(CountsDrops);
+        shared.sequence(|q| {
+            q.a(|_, _| ()); // left unconsumed: the drop assertion raises
+        });
+        drop(shared); // the last `Arc` — the assertions run here
+    }));
+    let err = outcome.expect_err("the unconsumed sequence fails the test");
+    let msg = err
+        .downcast_ref::<String>()
+        .expect("a formatted panic message");
+    assert!(
+        msg.contains("sequence not fully consumed"),
+        "the assertion is the failure, not the destructor: {msg}"
+    );
+    assert_eq!(
+        DROPS.load(Ordering::SeqCst),
+        before,
+        "the state must leak when its own assertion unwinds, not free `T`"
+    );
+}

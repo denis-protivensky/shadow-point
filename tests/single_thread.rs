@@ -700,3 +700,41 @@ fn an_unwinding_guard_does_not_run_the_value_destructor() {
         "the guarded value must be forgotten while unwinding, not dropped"
     );
 }
+
+#[test]
+fn an_assertion_panic_does_not_run_the_value_destructor_mid_unwind() {
+    // The drop assertions are OUR panic and fire on a clean thread, so
+    // `SpGuard::drop` unwinds out of `assert_fires` rather than entering it
+    // with `panicking()` already true. The state must be out of the implicit
+    // drop path by then: a plain local `Arc` would be freed by that unwind,
+    // running `T::drop` mid-unwind — a second panic if the destructor raises,
+    // i.e. exactly the abort the assertion order exists to prevent.
+    static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct CountsDrops;
+    impl Drop for CountsDrops {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let before = DROPS.load(std::sync::atomic::Ordering::SeqCst);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let g = single::SingleSp::install_guard(CountsDrops);
+        g.sequence(|q| {
+            q.a(|_, _| ()); // left unconsumed: the drop assertion raises
+        });
+        drop(g);
+    }));
+    let err = outcome.expect_err("the unconsumed sequence fails the test");
+    let msg = err
+        .downcast_ref::<String>()
+        .expect("a formatted panic message");
+    assert!(
+        msg.contains("sequence not fully consumed"),
+        "the assertion is the failure, not the destructor: {msg}"
+    );
+    assert_eq!(
+        DROPS.load(std::sync::atomic::Ordering::SeqCst),
+        before,
+        "the state must leak when its own assertion unwinds, not free `T`"
+    );
+}

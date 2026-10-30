@@ -1370,19 +1370,29 @@ macro_rules! define_sp {
                     // printed assertions exist to prevent. A leak on a path
                     // that is already failing is the cheaper half of that
                     // trade, and the OS reclaims it at process end.
+                    //
+                    // The state is taken out FIRST, into a `ManuallyDrop`,
+                    // because step 2 can panic on its own: `assert_fires`
+                    // raises our diagnostics on a clean thread, and a plain
+                    // local `Arc` would be dropped by that unwind — freeing
+                    // the state and running a consumer `Drop` mid-unwind,
+                    // i.e. the very double panic this order avoids. With
+                    // `ManuallyDrop`, any panic out of this function leaks
+                    // the state instead of freeing it.
+                    let sp = std::mem::ManuallyDrop::new(
+                        self
+                            .sp
+                            .take()
+                            .expect("shadow-point: guard dropped twice"),
+                    );
                     __SP_TL.with(|__c| {
                         *(__c.borrow_mut()) = self.old.take()
                     });
-                    let sp = self
-                        .sp
-                        .take()
-                        .expect("shadow-point: guard dropped twice");
                     sp.assert_fires(false);
                     if std::thread::panicking() {
-                        std::mem::forget(sp);
-                    } else {
-                        drop(sp);
+                        return;
                     }
+                    drop(std::mem::ManuallyDrop::into_inner(sp));
                 }
             }
 
@@ -1512,16 +1522,21 @@ macro_rules! define_sp {
                     // destructor is consumer code; panicking inside it here
                     // would be a double panic, and no leaked registration is
                     // worth trading the run's report for.
-                    let sp = self
-                        .sp
-                        .take()
-                        .expect("shadow-point: shared state dropped twice");
+                    // `ManuallyDrop` for the same reason as the guard's: the
+                    // assertion below panics on its own, and a plain local
+                    // `Arc` would be freed by that unwind, running `T::drop`
+                    // mid-unwind.
+                    let sp = std::mem::ManuallyDrop::new(
+                        self
+                            .sp
+                            .take()
+                            .expect("shadow-point: shared state dropped twice"),
+                    );
                     sp.assert_fires(true);
                     if std::thread::panicking() {
-                        std::mem::forget(sp);
-                    } else {
-                        drop(sp);
+                        return;
                     }
+                    drop(std::mem::ManuallyDrop::into_inner(sp));
                 }
             }
 
