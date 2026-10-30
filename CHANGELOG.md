@@ -42,10 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure, not a second one. The assertion is raised exactly as before on a
   thread that is not unwinding. The printed line carries
   `(while unwinding)`, and it is written with `let _ = writeln!(stderr(), ..)`
-  rather than `eprintln!`: a failed stderr write makes `eprintln!` panic, and
-  a panic raised while unwinding is the double panic this change removes —
-  measured against a failing stderr (`/dev/full`): exit 101 vs exit 0. The
-  **raised** path keeps its payload byte-for-byte:
+  rather than `eprintln!`: a failed write makes `eprintln!` panic, and on this
+  path a second panic is exactly the abort the change removes. Writing to
+  `stderr()` directly also bypasses the harness's output capture, so the line
+  reaches the terminal even on a passing `#[should_panic]` test, where
+  `eprintln!` would be captured and discarded. The **raised** path keeps
+  its payload byte-for-byte:
   the sequence assertion was `assert!(cond, msg)` (bare message, so `panic!`
   reproduces it) and the count assertion was `assert_eq!(a, b, msg)` and is
   raised that way again — the wrapper line and the left/right echo are part
@@ -54,7 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `install_shared` doc, the `SpGuard` doc and the README mode table, which
   all promised an unconditional drop-time panic, now state the conditional
   form — in both table cells, not just the private one (`install_shared`'s
-  Caveats and `SharedSp`'s drop doc among them).
+  Caveats and `SharedSp`'s drop doc among them); `docs/shared-mode.md` gains
+  the same rule at the last-`Arc` drop step of the install checklist.
 - The unwind trade now has a named cost: `thread::panicking()` is true in a
   `#[should_panic]` test as well, so such a test **passes** with an
   incomplete scenario where the old code aborted the binary. Documented in
