@@ -50,6 +50,10 @@ fn park_and_report() -> Duration {
 
 /// Re-execute this binary as a child running exactly `test`, with `envs`
 /// added, and return its stdout, stderr and measured duration.
+///
+/// A child that fails is reported with both streams: its marker line lives
+/// on stdout, but its panic message lives on stderr, and "the marker is
+/// missing" alone would hide the reason.
 fn child(test: &str, envs: &[(&str, &str)]) -> (String, String, std::time::Duration) {
     let exe = std::env::current_exe().expect("the test binary path");
     let mut cmd = std::process::Command::new(exe);
@@ -64,8 +68,15 @@ fn child(test: &str, envs: &[(&str, &str)]) -> (String, String, std::time::Durat
     let started = Instant::now();
     let output = cmd
         .spawn()
-        .and_then(|c| c.wait_with_output())
+        .and_then(std::process::Child::wait_with_output)
         .expect("the child ran");
+    assert!(
+        output.status.success(),
+        "the child running `{test}` failed ({:?})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
