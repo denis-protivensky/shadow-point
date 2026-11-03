@@ -3,8 +3,8 @@
 //! T1 stores 1 and its `after_store` closure sets a `Gate`; T2 waits on that
 //! gate before storing 2. The `sequence` orders T1's before/after steps, and
 //! the `every` closures record T2's fires. The final log and value are
-//! deterministic: 1 is stored before 2, and the gate proves T1 finished its
-//! `after_store` dispatch before T2 proceeded.
+//! deterministic: 1 is stored before 2, and the gate proves T1's `after_store`
+//! closure (with the store already done) ran before T2 proceeded.
 //!
 //! Run with:
 //!
@@ -98,8 +98,8 @@ mod tests {
         let s2 = shared.clone();
         let t2 = std::thread::spawn(move || {
             let _g = s2.install();
-            // Completion, not just consumption: wait until T1's after_store
-            // dispatch has run, so its 1 is already in the register.
+            // Completion, not just consumption: T1 sets the gate from inside
+            // its after_store closure, so its 1 is already in the register.
             stored.must_wait(PARK_TIMEOUT);
             s2.store(2);
         });
