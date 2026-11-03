@@ -73,10 +73,13 @@ as a block's trailing value. Outside test builds it compiles to nothing.
 
 Under `[dev-dependencies]` the call site carries its own `#[cfg(test)]`: in
 a production build the crate name does not resolve at all (`E0433`), before
-the macro ever strips its body. Repeat the attribute per call, or wrap it
-once in a local `macro_rules!` seam — see the `invoke!` documentation,
-"Dev-dependency seam". With a regular `[dependencies]` no gating is needed;
-the crate is linked in production but every `invoke!` compiles away.
+the macro ever strips its body. The quick start repeats the attribute per
+call — fine for a handful of sites, but one forgotten attribute breaks
+`cargo build`. Past a few call sites, hide the attribute once in a local
+`macro_rules!` seam (`sp_invoke!(Sp, hook(…))`): the FAQ below and the
+`invoke!` documentation, "Dev-dependency seam", carry the full pattern.
+With a regular `[dependencies]` no gating is needed; the crate is linked in
+production but every `invoke!` compiles away.
 
 ### 3. A guard test
 
@@ -215,6 +218,25 @@ fires a hook must install the sync point on its own thread. With the
 fires without parking the executor; a parked thread holds production locks,
 which is fatal on a `current_thread` runtime. Order `sequence` so the head
 consumer never needs a parked thread's lock.
+
+**Keeping shadow-point out of production builds.** A regular
+`[dependencies]` entry needs no call-site ceremony — `invoke!` compiles
+away in non-test builds on its own — but the crate stays in the production
+dependency graph: resolved and compiled for every release build. Under
+`[dev-dependencies]` production never sees the crate; in return each
+`invoke!` call site needs a `#[cfg(test)]` gate, and a forgotten attribute
+breaks `cargo build` with `E0433`. The robust wiring is a seam: one local
+`macro_rules!` that carries the attribute, wired with `#[macro_use]` ahead
+of the modules using it, so call sites read
+`sp_invoke!(RegisterSp, before_store(value))` and the crate path appears
+exactly once in the whole crate. Check it holds with `cargo build` (must
+compile while the dev-dependency does not resolve) and `cargo test` (must
+dispatch). The `invoke!` documentation, "Dev-dependency seam", has the
+snippet and the scope rules. The `examples/` in this crate call
+`shadow_point::invoke!` ungated: example targets compile against the
+library itself, so the path resolves there — the ungated form does not
+transfer to a consumer's `src/` under `[dev-dependencies]`, where the call
+site needs the gate or the seam.
 
 **Limitations (0.3.x).** The hook state is `Box::leak`ed: the guarded
 value's `Drop` does not run, and captured values live until the process ends.
