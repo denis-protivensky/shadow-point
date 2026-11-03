@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PARK_TIMEOUT` unless `SP_PARK_TIMEOUT_MS` names milliseconds. The public
   constant keeps its meaning and stays the default, so a consumer importing
   it is untouched; the env is read once per process and cached in one atomic
-  (no `unsafe`, no `OnceLock`, so MSRV 1.65 holds). A value that does not
+  (no `unsafe`, no `OnceLock`, so MSRV 1.65 holds). The cache is `AtomicUsize`,
+  not `AtomicU64`, so the function compiles on targets without 64-bit atomics
+  (e.g. `armv5te`, the 32-bit floor consumers gate on); a value at or above
+  `usize::MAX` milliseconds is refused like the sentinel. A value that does not
   parse falls back to the default **and says so on stderr** — a typo in a CI
   env should not silently change what a suite proves. `0` is legal: a
   choreography that can never advance then reports at once instead of

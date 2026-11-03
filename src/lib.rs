@@ -310,9 +310,11 @@ impl Drop for CurrentFire {
 pub const PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The "not resolved yet" marker in [`park_timeout`]'s cache. A millisecond
-/// count equal to it can never be published, so the resolver rejects it
-/// instead of returning a ~584-million-year timeout.
-const UNRESOLVED_PARK_TIMEOUT: u64 = u64::MAX;
+/// count equal to or above it can never be published, so the resolver rejects
+/// it instead of returning an implausibly large timeout. `usize`, not `u64`:
+/// the cache must compile on targets without 64-bit atomics (e.g. `armv5te`),
+/// and on 32-bit the ceiling is ~49 days.
+const UNRESOLVED_PARK_TIMEOUT: usize = usize::MAX;
 
 /// The park timeout the shared-mode sequence actually uses: [`PARK_TIMEOUT`]
 /// unless `SP_PARK_TIMEOUT_MS` names a number of milliseconds.
@@ -335,25 +337,28 @@ const UNRESOLVED_PARK_TIMEOUT: u64 = u64::MAX;
 /// SP_PARK_TIMEOUT_MS=200 cargo test
 /// ```
 pub fn park_timeout() -> std::time::Duration {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     // The resolved value in milliseconds, `UNRESOLVED_PARK_TIMEOUT` while
     // unresolved. A sentinel in one atomic rather than `Once` + a cell: the
     // cache is a single integer, two racers computing the same answer is
     // benign, and MSRV 1.65 has neither `OnceLock` nor a safe way to need
     // one here. The resolver never produces the sentinel, which is what
-    // makes the fixed point below sound.
-    static CACHED: AtomicU64 = AtomicU64::new(UNRESOLVED_PARK_TIMEOUT);
+    // makes the fixed point below sound. `usize` keeps the cache compilable
+    // on targets without 64-bit atomics; the resolver rejects a value that
+    // would not fit.
+    static CACHED: AtomicUsize = AtomicUsize::new(UNRESOLVED_PARK_TIMEOUT);
     let cached = CACHED.load(Ordering::Relaxed);
     if cached != UNRESOLVED_PARK_TIMEOUT {
-        return std::time::Duration::from_millis(cached);
+        return std::time::Duration::from_millis(cached as u64);
     }
-    let resolved = resolve_park_timeout(std::env::var("SP_PARK_TIMEOUT_MS"));
+    let resolved = usize::try_from(resolve_park_timeout(std::env::var("SP_PARK_TIMEOUT_MS")))
+        .expect("the resolver keeps the value below the sentinel");
     // Publish the winner, or adopt the value the first writer settled on, so
     // every thread in the process waits on one and the same timeout. Note the
     // shape of `compare_exchange`'s Ok arm: it yields the PREVIOUS value,
     // which on success is the unresolved sentinel — `unwrap_or_else` over it
     // would hand back the sentinel as if it were a timeout in milliseconds
-    // (a ~584-million-year park, caught by the end-to-end test in
+    // (an absurdly long park, caught by the end-to-end test in
     // `tests/park_timeout_env.rs`, not by the resolver's unit tests).
     let winner = match CACHED.compare_exchange(
         UNRESOLVED_PARK_TIMEOUT,
@@ -364,7 +369,7 @@ pub fn park_timeout() -> std::time::Duration {
         Ok(_) => resolved,
         Err(current) => current,
     };
-    std::time::Duration::from_millis(winner)
+    std::time::Duration::from_millis(winner as u64)
 }
 
 /// The resolution rule, as a pure function of the env lookup: one value for
@@ -381,11 +386,13 @@ fn resolve_park_timeout(raw: Result<String, std::env::VarError>) -> u64 {
         }
         Ok(raw) => match raw.trim().parse::<u64>() {
             // The sentinel is the cache's own marker: publishing it would
-            // both hand out a ~584-million-year timeout and leave the cache
-            // permanently unresolved.
-            Ok(UNRESOLVED_PARK_TIMEOUT) => {
+            // both hand out an implausibly large timeout and leave the cache
+            // permanently unresolved. On 32-bit a value at or above
+            // `usize::MAX` would also fail to fit the cache, so the same
+            // guard refuses it on every target.
+            Ok(ms) if ms >= UNRESOLVED_PARK_TIMEOUT as u64 => {
                 note(format_args!(
-                    "SP_PARK_TIMEOUT_MS={UNRESOLVED_PARK_TIMEOUT} is too large to be a \
+                    "SP_PARK_TIMEOUT_MS={ms} is too large to be a \
 timeout, using the default {PARK_TIMEOUT:?}"
                 ));
                 default_park_timeout_ms()
@@ -1660,7 +1667,7 @@ mod tests {
     fn park_timeout_never_returns_the_unresolved_sentinel() {
         let expected = match std::env::var("SP_PARK_TIMEOUT_MS") {
             Ok(raw) => match raw.trim().parse::<u64>() {
-                Ok(ms) if ms != u64::MAX => Duration::from_millis(ms),
+                Ok(ms) if ms < UNRESOLVED_PARK_TIMEOUT as u64 => Duration::from_millis(ms),
                 // The sentinel is refused, so the cache must hold the default.
                 _ => PARK_TIMEOUT,
             },
@@ -1680,7 +1687,9 @@ mod tests {
     #[test]
     fn a_value_colliding_with_the_unresolved_sentinel_falls_back() {
         assert_eq!(
-            Duration::from_millis(resolve_park_timeout(Ok(u64::MAX.to_string()))),
+            Duration::from_millis(resolve_park_timeout(
+                Ok(UNRESOLVED_PARK_TIMEOUT.to_string())
+            )),
             PARK_TIMEOUT,
             "the cache's marker is never a timeout"
         );
