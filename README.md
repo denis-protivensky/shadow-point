@@ -137,7 +137,7 @@ most common wrong-mode mistake — those fires disappear.
 | count only | `guard.expect_calls(MySp::a, n)` |
 | every fire | `guard.every(\|e\| e.<name>(f))` |
 | ordered | `guard.sequence(\|s\| { s.a(f).b(g); })` |
-| conditional step | `s.a_when(pred, f)` — only inside `sequence` |
+| conditional step | `s.a_when(pred, f)` — only inside `sequence`; one-shot on the first fire that passes `pred` |
 | shared | `install_shared`, then `shared.install()` per firing thread |
 
 `<name>` is the hook name declared in `define_sp!`; `define_sp!` generates
