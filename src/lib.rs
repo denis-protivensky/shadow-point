@@ -1697,6 +1697,29 @@ mod tests {
         );
     }
 
+    /// The cache's boundary is exclusive, and the value just below it is
+    /// still a legal timeout. The upper half is reachable only where
+    /// `usize` is narrower than `u64` (the 32-bit `test32` CI job); on a
+    /// 64-bit host `checked_add` returns `None` and only the lower half
+    /// runs. This is the test that distinguishes `>=` from `==` at the
+    /// boundary: the exact-sentinel test above cannot.
+    #[test]
+    fn the_cache_boundary_is_exclusive() {
+        let below = UNRESOLVED_PARK_TIMEOUT - 1;
+        assert_eq!(
+            resolve_park_timeout(Ok(below.to_string())),
+            below as u64,
+            "the value just below the cache's capacity must be accepted"
+        );
+        if let Some(above) = (UNRESOLVED_PARK_TIMEOUT as u64).checked_add(1) {
+            assert_eq!(
+                Duration::from_millis(resolve_park_timeout(Ok(above.to_string()))),
+                PARK_TIMEOUT,
+                "a value above the cache's capacity must not be published"
+            );
+        }
+    }
+
     #[test]
     fn a_value_that_does_not_parse_falls_back_to_the_default() {
         // A typo in a CI env must not silently change what the suite proves.
