@@ -47,8 +47,9 @@ shadow_point::define_sp! {
 ```
 
 `prefix Register` generates `RegisterSp` (the entry point), `RegisterHook`
-(hook identifiers), the guard/shared types, and the `sequence`/`every`
-builders. One `define_sp!` per module: the macro also emits prefix-free
+(hook identifiers, also exposed as associated constants — `RegisterSp::before_store`),
+the guard/shared types, and the `sequence`/`every` builders. One `define_sp!`
+per module: the macro also emits prefix-free
 helper names, so two invocations in one module collide. Put each sync point
 in its own file, or in its own `mod { … }`.
 
@@ -93,6 +94,10 @@ mod tests {
 }
 ```
 
+These snippets are excerpts: they assume `struct Register(AtomicU32);` and
+`use std::sync::atomic::{AtomicU32, Ordering};`; the complete file is
+`examples/register_private.rs`.
+
 The guard derefs to `&T`, so `guard.store(…)` and `guard.0` are the guarded
 value's own API. A nested fire of the same sync point on the same thread is
 suppressed: calling instrumented code inside a hook does not recurse.
@@ -103,13 +108,18 @@ suppressed: calling instrumented code inside a hook does not recurse.
   thread's fires. The guard derefs to `&T`, and assertions run at guard drop.
   This is concurrency without parallelism: the operation under test and the
   interferer alternate on one thread at the hook. A fire from any other
-  thread hits the default no-op and vanishes.
+  thread hits the default no-op and vanishes. An out-of-order fire panics if
+  a later sequence entry still expects that hook; a fire matching no entry
+  falls through.
 - **`install_shared` — shared.** `install_shared(value)` returns an
   `Arc<…SharedSp<T>>`; every firing thread calls `shared.install()` first,
   so its TLS dispatch points at the shared state. Cross-thread order comes
   from `sequence`, which parks an out-of-order arrival at the sequence head
-  (`PARK_TIMEOUT`, 10 s by default) instead of letting it pass. Assertions
-  run at the last `Arc` drop, after the workers are joined.
+  for up to `PARK_TIMEOUT` (a fixed 10 s constant), then panics instead of
+  hanging. `sequence` orders consumption, not completion: use `Gate` — a
+  reusable boolean rendezvous (`Gate::new()`, shared with the workers) — to
+  prove that one thread is inside dispatch before another proceeds.
+  Assertions run at the last `Arc` drop, after the workers are joined.
 
 The decision rule: one thread under test → private guard. Several threads →
 if each worker's local contract is what you assert, use one private guard
@@ -187,6 +197,9 @@ run happens to produce; simulators replace the runtime. `shadow-point` leaves
 both the runtime and the production API alone and scripts one chosen
 interleaving inside them.
 
+The alternatives find, inject, detect, or replace; `shadow-point` scripts
+one chosen interleaving.
+
 **Tokio and thread-locals.** The dispatch is per-thread; every worker that
 fires a hook must install the sync point on its own thread. With the
 `tokio-async` feature, `TokioAsyncGate` lets an async test body wait on
@@ -208,29 +221,18 @@ MSRV is Rust 1.65 (edition 2021). The only default dependency is `paste`,
 used at macro-expansion time and re-exported by the crate; consumers never
 declare it themselves. Behind the non-default `tokio-async` feature, optional
 `tokio` (default features off, `sync` only, ≥ 1.21) is added — default builds
-never resolve tokio.
-
-## Comparison, in one line each
-
-- **Schedule explorers and race detectors** (`loom`, `shuttle`, Miri, TSan)
-  find an interleaving or race you did not choose. `shadow-point` replays the
-  one you did.
-- **Failure injectors** (`fail`, failpoints) act on control flow at a named
-  point. `shadow-point` runs the competing operation with the call's typed
-  arguments.
-- **Environment replacers and mocks** (`madsim`, `turmoil`, `mockall`,
-  hand-rolled barriers) replace the runtime or reshape the production API.
-  `shadow-point` leaves both alone and scripts one point inside them.
-
-The alternatives find, inject, detect, or replace; `shadow-point` scripts one
-chosen interleaving.
+never resolve tokio. On Rust 1.65–1.69 pin `tokio` to ≤ 1.38: 1.39 requires
+Rust 1.70. The full public API is documented at
+<https://docs.rs/shadow-point>.
 
 ## Debugging
 
 Set `SP_TRACE` (any value, including `0`) to print every hook fire to stderr,
-with the hook name, fire index, and firing thread. `current_fire()` reports
-the same metadata from inside a closure, and `trace_enabled()` answers the
-same question programmatically. Every drop assertion names the install site.
+with the hook name, fire index, and firing thread. Inside a closure,
+`current_fire()` reports the hook name and the fire index; the closure runs
+on the firing thread, so take thread info from `std::thread::current()`.
+`trace_enabled()` answers the same question programmatically. Every drop
+assertion names the install site.
 
 ## License
 
