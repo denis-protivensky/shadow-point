@@ -6,293 +6,231 @@
 [![License](https://img.shields.io/crates/l/shadow-point)](#license)
 [![CI](https://github.com/denis-protivensky/shadow-point/actions/workflows/ci.yml/badge.svg)](https://github.com/denis-protivensky/shadow-point/actions/workflows/ci.yml)
 
-Hook points let tests inject code at linearization points of concurrent
-operations and *shadow* the competing one: the closure runs in place of
-what the other thread would have done. The same `invoke!` call sites
-serve two install modes — a private guard drives hooks on one thread, a
-shared sync point drives them from any thread (a parking rendezvous at
-the sequence head). Under the two modes sit three usage patterns: one
-guard on the test thread, one guard per worker thread, and one shared
-sync point bound by every worker. Nested fires of the same sync point
-on the same thread are silently suppressed. In production they compile
-to nothing.
+**No more flaky tests.** `shadow-point` lets you name one interleaving of a
+concurrent operation and replay it. A hook sits at the operation's
+*linearization point* — the instant it takes effect — and the hook closure
+runs the competing operation right there, on the same value. One test, one
+trace, the same result every run.
 
-## Contents
+The private mode gets that determinism by giving up parallelism, not
+concurrency: two logical actors — the operation under test and the
+interferer — alternate at the hook on one real thread. That is also why the
+instrumented type must use **interior mutability**: hooks receive `&T`, never
+`&mut T`, and both actors mutate through shared references. The shared mode
+adds real threads: workers race for real, and `sequence`/`Gate` pin the
+chosen interleaving down.
 
-- [Quick start](#quick-start)
-- [Install modes and usage patterns](#install-modes-and-usage-patterns)
-- [Debugging](#debugging)
-- [Production safety](#production-safety)
-- [Compatibility](#compatibility)
-- [Loom](#loom)
-- [Comparison with similar crates](#comparison-with-similar-crates)
-- [License](#license)
-
-The reference material lives in [`docs/`](docs/):
-
-| Document | Contents |
-|---|---|
-| [Guide](docs/guide.md) | what `define_sp!` generates; private-mode guard API and dispatch order; fire-once, `sequence`, predicate-gated entries, `every`, `expect_calls`; hook arguments; per-worker guards; worked "what you can test" scenarios; `current_fire()` and panic-message formats |
-| [Shared mode](docs/shared-mode.md) | one sync point across threads: lifecycle, the parking rendezvous, `Gate`, worked examples (ordering, parking, counting), caveats |
-| [Integration](docs/integration.md) | shadow-point as a dev-dependency (the seam macro); async (tokio) consumers and `TokioAsyncGate` |
+In production, hooks compile to nothing.
 
 ## Quick start
 
 ```toml
 # Cargo.toml
-[dependencies]
+[dev-dependencies]
 shadow-point = "0.3"
 ```
 
-### 1. Declare hooks
+### 1. Declare the hooks
 
-At module level, gate with `#[cfg(test)]` and call `define_sp!`:
+Call `define_sp!` in the module that owns the instrumented code, gated with
+`#[cfg(test)]`. Production builds drop the whole declaration.
 
-```rust
-// src/my_module.rs
+```rust,ignore
+// src/register.rs
 
 #[cfg(test)]
 shadow_point::define_sp! {
-    pub(crate) prefix MyModule
-    {
-        // `K` is this module's key type — use yours or a concrete type.
-        before_insert(key: &K),
-        before_remove(id: usize),
-        after_commit(),
+    pub(crate) prefix Register {
+        before_store(value: u32),
     }
 }
 ```
 
-In production builds `#[cfg(test)]` removes the call entirely.
+`prefix Register` generates `RegisterSp` (the entry point), `RegisterHook`
+(hook identifiers), the guard/shared types, and the `sequence`/`every`
+builders. One `define_sp!` per module: the macro also emits prefix-free
+helper names, so two invocations in one module collide. Put each sync point
+in its own file, or in its own `mod { … }`.
 
-One `define_sp!` per module — the macro also emits prefix-free names
-(`__Sp`, `EveryClosures`, …), so two invocations in one module collide.
-Separate modules fix it (the usual layout is one sync point per file); the
-collision list and the `invoke!` path rule it implies are in
-[What `define_sp!` generates](docs/guide.md#what-define_sp-generates).
-
-### 2. Insert `invoke!` calls
-
-At the points in your production code where tests need to hook in:
-
-```rust
-shadow_point::invoke!(MyModuleSp, before_insert(&key));
-// ... do the insert ...
-shadow_point::invoke!(MyModuleSp, after_commit());
-```
-
-`invoke!` takes the entry-point struct and a plain `hook(args…)` call.
-The struct's name is the `define_sp!` `prefix` with `Sp` appended —
-`prefix MyModule` generates `MyModuleSp` (every generated name derives
-from the prefix that way; see the
-[guide](docs/guide.md#what-define_sp-generates)). The arguments
-in the hook call are exactly the *declared* ones — without the guarded
-`&T`: dispatch prepends it to the closure parameters, so
-`invoke!(MyModuleSp, before_insert(&key))` fires the hook declared
-`before_insert(key: &K)` as the closure `|data, key|`. It expands to a
-*statement*
-(an `#[cfg(test)]`-attributed block), so it cannot be used in
-expression position — not as a closure's expression body
-(`|| invoke!(…)`), not as a block's trailing value; write `invoke!(…);`
-as its own statement or hoist such fires into a function.
-In production `invoke!` compiles to nothing — the `#[cfg(test)]`
-block is stripped.
-
-### 3. Smoke test: verify dispatch
-
-Before trying a race, verify the basic dispatch path. This deliberately avoids
-threads, a map, and the race scenario.
+### 2. Fire at the linearization point
 
 ```rust,ignore
-#[cfg(test)]
-mod tests {
-    use super::MyModuleSp;
-
-    #[test]
-    fn hook_is_dispatched() {
-        let guard = MyModuleSp::install_guard(());
-
-        guard
-            .before_remove(|_, id| assert_eq!(id, 7))
-            .expect(1);
-
-        shadow_point::invoke!(MyModuleSp, before_remove(7));
+impl Register {
+    fn store(&self, value: u32) {
+        shadow_point::invoke!(RegisterSp, before_store(value));
+        self.0.store(value, Ordering::SeqCst);
     }
 }
 ```
 
-### 4. Worked example: shadow the competing operation
+`invoke!` takes the entry point and a plain `hook(args…)` call, using exactly
+the arguments declared in `define_sp!` — without the guarded `&T`, which
+dispatch prepends. It expands to a statement (an `#[cfg(test)]`-attributed
+block), so write `invoke!(…);` on its own line: not as a closure's body, not
+as a block's trailing value. Outside test builds it compiles to nothing.
 
-The interesting case is a *shadow*: the hook closure runs the operation
-the competing thread would have run, at the exact linearization point.
-Here the map's own `insert` fires `before_insert` between "key 1 is free"
-and the write — so the closure steals the slot first, and the outer insert
-is made to lose the race on demand:
+### 3. A guard test
 
 ```rust,ignore
 #[cfg(test)]
 mod tests {
-    // The entry point lives in the parent module — the file that ran
-    // `define_sp!`. (If the declaration sits in its own `mod writer_sp`,
-    // import it from there: `use super::writer_sp::WriterSp;`.)
-    use super::MyModuleSp;
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn insert_loses_the_race() {
-        // A concurrent map: interior mutability, mutates through &self.
-        let guard = MyModuleSp::install_guard(my_map());
+    fn the_hook_runs_before_the_store() {
+        let guard = RegisterSp::install_guard(Register(AtomicU32::new(0)));
 
-        // before_insert fires at the linearization point: the lookup
-        // already passed ("key 1 is free"), the write has not. Shadow
-        // the rival thread here — take the slot it was about to take.
-        guard.before_insert(|map, key| {
-            map.insert(*key, "rival"); // the competing op, run in place
+        // The closure runs on the first fire, with the call's arguments.
+        // `.expect(1)` pins how many times the HOOK must fire.
+        guard.before_store(|_register, value| {
+            assert_eq!(value, 7);
         }).expect(1);
 
-        // The real insert now finds the key taken: it must report a
-        // duplicate, NOT overwrite the value the hook just wrote.
-        assert!(guard.insert(1, "mine").is_err());
-        assert_eq!(guard.get(&1), Some(&"rival"));
+        guard.store(7);
+        assert_eq!(guard.0.load(Ordering::SeqCst), 7);
     }
 }
 ```
 
-`MyModuleSp` is the only import: a test module nested inside the
-instrumented file takes it from the parent module, and hooks need no
-import at all — they are associated constants on the entry-point struct.
+The guard derefs to `&T`, so `guard.store(…)` and `guard.0` are the guarded
+value's own API. A nested fire of the same sync point on the same thread is
+suppressed: calling instrumented code inside a hook does not recurse.
 
-Beyond `install_guard` and the registration methods, nothing here is
-shadow-point API: `my_map()` is your constructor, and `guard.insert(...)`
-/ `guard.get(...)` are *your* `T`'s methods — the guard derefs to `&T`, so
-the guarded value's own methods are callable through it. The nested
-`map.insert` inside the closure does not recurse into `before_insert`:
-fires of the same sync point on a thread already inside a hook are
-suppressed (see the intro), which is what keeps the count at `.expect(1)`.
+## The two install modes
 
-This is the private mode: the guard sees only fires from this thread.
-For hooks fired from several threads there are two ways to go — per-worker
-private guards when each thread's contract is what you assert
-([guide](docs/guide.md#per-worker-guards-private-mode-on-real-threads)),
-or one `install_shared` sync point when the cross-thread order/counts
-*are* the assertion
-([shared mode](docs/shared-mode.md#shared-mode-one-sync-point-across-threads)).
-Hook declarations and `invoke!` calls are identical in all of them.
+- **`install_guard` — private.** One guard on one thread; hooks see only that
+  thread's fires. The guard derefs to `&T`, and assertions run at guard drop.
+  This is concurrency without parallelism: the operation under test and the
+  interferer alternate on one thread at the hook. A fire from any other
+  thread hits the default no-op and vanishes.
+- **`install_shared` — shared.** `install_shared(value)` returns an
+  `Arc<…SharedSp<T>>`; every firing thread calls `shared.install()` first,
+  so its TLS dispatch points at the shared state. Cross-thread order comes
+  from `sequence`, which parks an out-of-order arrival at the sequence head
+  (`PARK_TIMEOUT`, 10 s by default) instead of letting it pass. Assertions
+  run at the last `Arc` drop, after the workers are joined.
 
-## Install modes and usage patterns
+The decision rule: one thread under test → private guard. Several threads →
+if each worker's local contract is what you assert, use one private guard
+**inside each worker**; if the cross-thread order or total counts are the
+assertion, use one shared sync point and install it in every firing thread.
+A guard installed on the test thread while the hooks fire on workers is the
+most common wrong-mode mistake — those fires disappear.
 
-There are two install *modes* — how the `invoke!` dispatch is bound to
-threads — but three *usage patterns* people actually write, and the
-mapping is not one-to-one: the private mode serves both the
-single-thread test and the per-worker-guard choreography. Both modes
-dispatch the same `invoke!` call sites — you choose per test by how you
-install, not by how you declare hooks or fire them.
+## Cheat sheet
 
-The two modes:
+| Need | Current API |
+|---|---|
+| one-shot | `guard.<name>(f).expect(n)` — the closure runs on the first fire |
+| every fire | `guard.every(\|e\| e.<name>(f))` |
+| ordered | `guard.sequence(\|s\| { s.a(f).b(g); })` |
+| conditional step | `s.a_when(pred, f)` — only inside `sequence` |
+| count only | `guard.expect_calls(MySp::a, n)` |
+| shared | `install_shared`, then `shared.install()` per firing thread |
 
-| | `install_guard` — private | `install_shared` — shared |
-|---|---|---|
-| Whose fires are seen | only the installing thread | every worker that called `install()` on its thread |
-| Fires from other threads | silently dropped (they hit the default no-op) | counted, sequenced, aggregated |
-| Out-of-order sequence fire | panics immediately if a later entry expects the hook (otherwise the fire falls through) | parks the early thread at the head, panics on `PARK_TIMEOUT` |
-| Expected counts | checked at guard drop (raised, or printed if the thread is unwinding) | aggregated across threads, checked at last `Arc` drop (same raise-or-print rule) |
+`<name>` is the hook name declared in `define_sp!`. There is no generic
+`guard.hook(f)` method, no `exact`, no chained `.every()`, and no
+guard-level `_when`. **`expect` counts fires, not closure runs**: a one-shot
+closure runs once even when its hook fires several times (a retry loop can
+do that), so a correct test may need `.expect(2)`.
 
-The three patterns:
+`optional()` marks the most recently pushed sequence entry as allowed to
+remain unconsumed at drop — the trailing-sentinel pattern. It is a weak
+tool: a non-matching predicate or a different hook firing first can leave
+the sentinel in place, and the sentinel closure may never run. Prefer a
+mandatory entry; use `optional` only when the branch genuinely may not
+happen.
 
-| Pattern | Mode and threads | Where cross-thread order is asserted | Typical scenario |
-|---|---|---|---|
-| 1. Scripted interferer | Single-threaded, private guard on the test thread | n/a — one thread scripts everything | shadow a rival operation at the linearization point (see [What you can test](docs/guide.md#what-you-can-test)) |
-| 2. Per-worker guards | Multi-threaded, private guard installed **in each worker thread** | your own gates/atomics, in the test's code | each worker's hook behavior is a local contract; workers must merely not overlap |
-| 3. Shared sync point | Multi-threaded, `install_shared` + `install()` per worker | the macro: `sequence` parks out-of-order arrivals | cross-thread order/counts *are* the assertion |
+## Examples
 
-Decision rule: a private guard is a thread-local — it sees only its own
-thread's fires. A thread without an install dispatches to the default
-no-op and its fires disappear: the most common wrong-mode mistake is a
-guard installed on the *test* thread while the hooks fire on workers.
-One thread under test → pattern 1. Several threads → the trigger is
-*what you assert*: per-worker local contracts, cross-thread order held
-by your own gates → pattern 2; the order/counts *are* the assertion →
-pattern 3, and every firing worker installs.
+Two runnable examples sit in `examples/`; both are test targets:
 
-The split has two readings — concurrency vs parallelism, and `&T`-only
-mutation — spelled out in the
-[guide](docs/guide.md#two-readings-of-the-mode-split).
-
-## Debugging
-
-### SP_TRACE
-
-Set the `SP_TRACE` environment variable to print every hook fire to
-stderr (with the firing thread's name — `<unnamed>` for unnamed
-threads). Presence is what matters, not the value: any
-setting — including `SP_TRACE=0` — enables tracing.
+- `examples/register_private.rs` — an `AtomicU32` register with a `store`
+  and a CAS-loop `increment`. The hook shadows the rival store; the CAS
+  retries once, so the hook fires twice while the one-shot closure runs once
+  (`.expect(2)`).
+- `examples/register_shared.rs` — the same register through
+  `install_shared`; two writer threads, a `sequence` and a `Gate` prove that
+  one writer is inside dispatch before the other proceeds.
 
 ```sh
-SP_TRACE=1 cargo test -- --nocapture
+cargo test --example register_private
+cargo test --example register_shared
 ```
 
-Output:
-```
-[sp] before_insert call #1 thread=worker-1
-[sp] after_commit call #1 thread=worker-1
-[sp] after_commit call #2 thread=main
-```
+`cargo test` alone does not run example tests; use `--examples` or
+`--all-targets` in CI.
 
-Useful for discovering expected sequences and call counts. The same
-check is available programmatically as `shadow_point::trace_enabled()`.
-Inside a hook closure, `current_fire()` reports the hook name and the
-fire index (the closure runs on the firing thread, so thread info is
-`std::thread::current()`); every drop assertion prints the
-install site — formats and details are in the
-[debugging reference](docs/guide.md#debugging-reference).
+## FAQ
 
-## Production safety
+**What is a linearization point?** The instant a concurrent operation takes
+effect — the store that publishes the value, the CAS that wins, the lookup
+that decides the key is free. Put the hook there and the competing operation
+runs exactly between "the decision" and "the effect", without touching the
+production API or the runtime.
 
-- `invoke!` expands to a `#[cfg(test)]`-attributed block; outside test
-  builds the attribute strips the whole statement, so the call site
-  compiles to nothing (not even an empty block).
-- `define_sp!` is gated with `#[cfg(test)]` by the caller.
-- Zero cost — verified with `cargo build --release`.
+**Why not loom or shuttle?** They *find* an interleaving you did not choose.
+`shadow-point` pins the one you already chose, in real code. Use them
+together: find the bad schedule with a model checker, then write a
+deterministic regression test for it here.
+
+**Why not failpoints?** Failpoints inject a failure at a named point. A
+shadow hook runs the competing operation, with the call's typed arguments,
+at the linearization point. Different property, different tool.
+
+**Why not Miri/TSan or a simulator?** Miri and TSan *detect* whatever race a
+run happens to produce; simulators replace the runtime. `shadow-point` leaves
+both the runtime and the production API alone and scripts one chosen
+interleaving inside them.
+
+**Tokio and thread-locals.** The dispatch is per-thread; every worker that
+fires a hook must install the sync point on its own thread. With the
+`tokio-async` feature, `TokioAsyncGate` lets an async test body wait on
+fires without parking the executor; a parked thread holds production locks,
+which is fatal on a `current_thread` runtime. Order `sequence` so the head
+consumer never needs a parked thread's lock.
+
+**Limitations (0.3.x).** The hook state is `Box::leak`ed: the guarded
+value's `Drop` does not run, and captured values live until the process ends.
+The guarded type must be `Send + Sync + 'static` and mutate through `&self`.
+Hooks are side-effect only — they cannot change what the instrumented
+function returns. One hook per `invoke!` site: a fire is identified by hook
+name alone, so two sites sharing a name are indistinguishable to `sequence`
+and `expect_calls`.
 
 ## Compatibility
 
-MSRV is Rust 1.65 (edition 2021). The only default dependency is `paste`, used
-at macro-expansion time and re-exported by the crate — `define_sp!` reaches it
-via `$crate::paste`, so consumers never declare it themselves. Behind the
-non-default `tokio-async` feature, optional `tokio` (default-features off,
-`sync` only, ≥ 1.21) is added
-— default builds never resolve tokio; tokio ≤ 1.38 is within the crate's
-MSRV (tokio 1.38 requires Rust ≥ 1.63), while tokio ≥ 1.39 requires
-Rust ≥ 1.70. In test builds a hook fire costs a TLS read plus a few mutex
-operations; uninstalled threads dispatch to a no-op impl. The full public
-API is documented at [`docs.rs/shadow-point`](https://docs.rs/shadow-point).
+MSRV is Rust 1.65 (edition 2021). The only default dependency is `paste`,
+used at macro-expansion time and re-exported by the crate; consumers never
+declare it themselves. Behind the non-default `tokio-async` feature, optional
+`tokio` (default features off, `sync` only, ≥ 1.21) is added — default builds
+never resolve tokio.
 
-## Loom
+## Comparison, in one line each
 
-There is no loom integration: nothing in `shadow-point` is gated on
-`cfg(loom)`, and dispatch runs on std `Mutex`/`Condvar`/`Cell`
-throughout. Under `--cfg loom` the macros compile and behave exactly as
-in normal test builds — `define_sp!` generates the full infrastructure
-and `invoke!` dispatches through `with_dyn`, with guards installing for
-real — but loom does not model std synchronization, so the hook-dispatch
-path contributes nothing to loom's race detection. What loom still
-checks is the instrumented code itself; the sync-point machinery is
-invisible to its model.
+- **Schedule explorers and race detectors** (`loom`, `shuttle`, Miri, TSan)
+  find an interleaving or race you did not choose. `shadow-point` replays the
+  one you did.
+- **Failure injectors** (`fail`, failpoints) act on control flow at a named
+  point. `shadow-point` runs the competing operation with the call's typed
+  arguments.
+- **Environment replacers and mocks** (`madsim`, `turmoil`, `mockall`,
+  hand-rolled barriers) replace the runtime or reshape the production API.
+  `shadow-point` leaves both alone and scripts one point inside them.
 
-Modeling the dispatch state with loom analogs is future work.
+The alternatives find, inject, detect, or replace; `shadow-point` scripts one
+chosen interleaving.
 
-## Comparison with similar crates
+## Debugging
 
-How shadow-point differs from `fail` (failpoints), loom, shuttle,
-Miri/ThreadSanitizer, madsim, turmoil, and mocks — with a decision
-rule for each — is in
-[docs/alternatives.md](docs/alternatives.md). In one line: shadow-point
-*scripts* one chosen interleaving at a named point in real code, where
-the alternatives inject failures, explore or detect schedules, replace
-the environment, or reshape the API.
+Set `SP_TRACE` (any value, including `0`) to print every hook fire to stderr,
+with the hook name, fire index, and firing thread. `current_fire()` reports
+the same metadata from inside a closure, and `trace_enabled()` answers the
+same question programmatically. Every drop assertion names the install site.
 
 ## License
 
 Dual-licensed under your choice of either the MIT license or the Apache
-License, Version 2.0. The SPDX field is in [Cargo.toml](Cargo.toml); the
-texts ship as [LICENSE-MIT](LICENSE-MIT) and
-[LICENSE-APACHE](LICENSE-APACHE).
+License, Version 2.0. The SPDX field is in `Cargo.toml`; the texts ship as
+`LICENSE-MIT` and `LICENSE-APACHE`.
