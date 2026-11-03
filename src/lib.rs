@@ -1,16 +1,4 @@
-//! Hook points for testing concurrent scenarios at linearization points —
-//! single-threaded via guards, or shared across threads via
-//! `install_shared` (see [`define_sp!`](macro@define_sp)).
-//!
-//! The [`invoke!`](macro@invoke) macro compiles away to a no-op in production
-//! builds (when `cfg(test)` is `false` on the consuming crate), so this crate
-//! has zero cost in production builds.
-//! There is no loom integration: nothing is gated on `cfg(loom)`, and
-//! under `--cfg loom` (with `cfg(test)`) dispatch behaves exactly as in
-//! normal test builds. Loom does not model the std synchronization the
-//! dispatch uses, so hook fires contribute nothing to loom's race
-//! detection.
-
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 // The crate dogfoods the lint its consumers are subject to. `define_sp!`
 // emits public items (trait, hook methods, entry struct, hook enum,
@@ -44,8 +32,65 @@ pub trait SyncPoint: Send + Sync {}
 
 /// Invoke the currently installed sync-point hook.
 ///
-/// Expands to a real dispatch under `#[cfg(test)]` (evaluated at the call-site
-/// crate's test mode), and to a no-op otherwise.
+/// Takes the generated entry point and a plain `hook(args…)` call; dispatch
+/// prepends the guarded `&T`, so it is not written at the call site. It
+/// expands to a statement (an `#[cfg(test)]`-attributed block); write
+/// `invoke!(…);` on its own line, not as a closure body or a block's trailing
+/// value.
+///
+/// Expands to a real dispatch under `#[cfg(test)]` (evaluated at the call
+/// site's crate) and to a no-op otherwise — production builds have no
+/// dispatch code and do not reference the crate.
+///
+/// # Dev-dependency seam
+///
+/// As a regular dependency the crate is still linked in production. To drop
+/// that coupling too, put it under `[dev-dependencies]`. A dev-dependency
+/// is in the extern prelude only when building tests, so a plain
+/// `shadow_point::invoke!` path in a production build fails to resolve
+/// (`E0433`) — the invocation path is resolved before the macro expands and
+/// strips its `cfg(test)` body. Hide the path in a local `macro_rules!`
+/// seam:
+///
+/// ```rust,ignore
+/// // src/seam.rs — plain macro_rules; nothing here depends on the crate
+/// macro_rules! sp_invoke {
+///     ($($t:tt)*) => {
+///         #[cfg(test)]
+///         ::shadow_point::invoke!($($t)*);
+///     };
+/// }
+/// ```
+///
+/// ```rust,ignore
+/// // src/lib.rs — textual macro scope: the seam module must precede every
+/// // module that calls sp_invoke!; an explicit `use` per module works too
+/// #[macro_use]
+/// mod seam;
+/// ```
+///
+/// Call sites then drop the crate path entirely:
+/// `sp_invoke!(MyModuleSp, before_insert(&key))`. In production the seam
+/// expands to a stripped statement, so the crate is never resolved; in
+/// tests it dispatches. Gating each call site with its own `#[cfg(test)]`
+/// also works and needs no seam file, but the attribute is then repeated
+/// per call. `define_sp!` needs no seam: the caller already gates it with
+/// `#[cfg(test)]`. Check the seam holds with `cargo build` (must compile
+/// while the dev-dependency is unresolvable) and `cargo test` (must
+/// dispatch to the real hooks).
+///
+/// # Threads and async
+///
+/// Dispatch is per-thread: every worker that fires a hook must install the
+/// sync point on its own thread first. A worker that installs nothing
+/// silently no-ops. TLS follows the OS thread, not the task: a future resumed
+/// on another worker after an `.await` fires into that thread's install
+/// (usually none). Keep the instrumented section await-free, or run it under
+/// `spawn_blocking` and install inside that closure. `TokioAsyncGate` waits
+/// on fire milestones without parking a `current_thread` executor.
+/// `TokioAsyncGate::wait_at_least` has no timeout by design: await only a
+/// count the scenario is guaranteed to reach; a missed threshold hangs until
+/// the CI job timeout, unlike `Gate::must_wait` and sequence parking.
 #[macro_export]
 macro_rules! invoke {
     ($sp:path, $func:ident ( $($args:expr),* $(,)? )) => {
@@ -79,6 +124,21 @@ pub fn trace_enabled() -> bool {
 /// [`must_wait`](Self::must_wait)) until another thread calls
 /// [`set`](Self::set). Reusable: [`clear`](Self::clear) arms it for the
 /// next wait.
+///
+/// # Completion, not just consumption
+///
+/// `sequence` releases a waiter when its entry is popped; the step closure
+/// may still be running and may still hold production locks. A gate waits
+/// for a step to actually finish: set it at the end of the step and wait on
+/// it where the next action must not start.
+///
+/// Inside a hook or step closure use [`must_wait`](Self::must_wait), never
+/// [`wait`](Self::wait): a missed [`set`](Self::set) must fail with a
+/// diagnostic rather than hang the suite. [`wait`](Self::wait) belongs in
+/// the test body. `wait_timeout`/`must_wait` accept any duration, zero
+/// included: zero inspects the flag without waiting, and
+/// `must_wait(Duration::ZERO)` fails the test at once when the gate is
+/// unset. Shared-mode parking uses the fixed [`PARK_TIMEOUT`].
 ///
 /// The gate is panic-safe: a poisoned lock (a panicking waiter) is
 /// transparently recovered via [`into_inner`](std::sync::PoisonError::into_inner).
@@ -303,6 +363,11 @@ impl Drop for CurrentFire {
 /// as long as the head still blocks them. A timeout therefore means the
 /// test's sequence can never advance (no thread will ever fire the head
 /// hook) — failing is better than hanging.
+///
+/// The value is fixed at 10 s by design; shared mode has no per-install
+/// budget. A thread that keeps being woken may park longer in total. The
+/// timeout panic names the waiting hook, the head hook, and the install
+/// site.
 pub const PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // See CURRENT_FIRE: inline `const {}` blocks are experimental until 1.79.
@@ -360,38 +425,73 @@ impl Drop for ExecSink {
 ///
 /// Given a `$prefix` like `Array`, generates:
 ///
-/// - `trait {$prefix}SyncPoint` — extension trait with default (no-op) bodies
-/// - `enum {$prefix}Hook` — hook identifiers
-/// - `struct {$prefix}Sp` — entry point: `install_guard()`, `with_dyn()`,
-///   and associated constants for each hook
-/// - `struct {$prefix}SpGuard<T>` — guard with `Deref`, fire-once / sequence
-///   / every registration, `expect_calls`, and `Drop` assertions
-/// - `struct {$prefix}SeqBuilder<T>` — builder for `guard.sequence(...)`
-/// - Un-prefixed (carry the visibility token): `EveryClosures`, `SpExpect`
-/// - Internal: `__Sp<T>` (state), `__SpDefault`, `__SP_DEFAULT`, `SeqEntry`,
-///   `__SP_TL` (thread-local)
+/// | Item | Role |
+/// |---|---|
+/// | `trait {$prefix}SyncPoint` | extension trait with default (no-op) bodies |
+/// | `enum {$prefix}Hook` | hook identifiers; `Debug` prints the hook name |
+/// | `struct {$prefix}Sp` | entry point: `install_guard()`, `install_shared()`, `with_dyn()`, associated hook constants |
+/// | `struct {$prefix}SpGuard<T>` | private guard: `Deref`, fire-once/sequence/every registration, `expect_calls`, drop assertions |
+/// | `struct {$prefix}SharedSp<T>` | shared state: same registration API plus `install()` per worker |
+/// | `struct {$prefix}SharedGuard<T>` | per-thread TLS install of a shared sync point |
+/// | `struct {$prefix}SeqBuilder<T>` | builder for `sequence(...)` |
+/// | `EveryClosures<T>` | builder for `every(...)` |
+/// | `SpExpect<'_, T>` | fire-once handle; chain `.expect(n)` |
 ///
-/// # Limitations
+/// The visibility token before `prefix` applies to every generated public
+/// item in the table; the internal machinery (`__Sp`, `__SpDefault`,
+/// `__SP_DEFAULT`, `__SP_TL`, `SeqEntry`) stays private. Associated constants
+/// on the entry point name a hook without importing the enum:
+/// `MyModuleSp::before_insert` has type `MyModuleHook`.
 ///
-/// One invocation per module. Besides the prefixed names, the macro emits
-/// private machinery (`__Sp`, `__SpDefault`, `__SP_DEFAULT`, `__SP_TL`,
-/// `SeqEntry`) and the two un-prefixed types that carry
-/// the visibility token, `EveryClosures` / `SpExpect` — so two invocations
-/// in one module collide on those names (E0252/E0428, then an
-/// E0034/E0592/E0119/E0308 cascade).
-/// The fix is scoping: separate modules have separate scopes, so wrap each
-/// `define_sp!` in its own `mod { … }` — one module per sync point, even
-/// when several share a file (the usual layout, one sync point per file,
-/// avoids the issue by construction). The scoped entry struct also changes
-/// `invoke!` call sites outside that module: reference the path
-/// (`invoke!(writer_sp::WriterSp, …)`); inside the module the bare name
-/// still resolves.
+/// Every generated type carrying `T` requires `T: Send + Sync + 'static`;
+/// registered closures are `Send + 'static` (`every` closures are also
+/// `Sync`). `{$prefix}Hook` derives `Debug, Clone, Copy, PartialEq, Eq`; the
+/// list must contain at least one hook.
+///
+/// # One invocation per module
+///
+/// Besides the prefixed names, the macro emits the un-prefixed
+/// `EveryClosures` and `SpExpect` plus private helper names, so two
+/// invocations in one module collide. The usual layout — one sync point per
+/// file, declared at the top of the production module it instruments —
+/// avoids the issue by construction. When several share a file, give each
+/// its own module:
+///
+/// ```text
+/// #[cfg(test)]
+/// mod writer_sp {
+///     shadow_point::define_sp! { pub(crate) prefix Writer { commit(), } }
+/// }
+/// ```
+///
+/// The scoped entry point changes `invoke!` call sites outside that module:
+/// name the path (`invoke!(writer_sp::WriterSp, commit())`) or `use` it;
+/// inside the module the bare name resolves. Production builds strip the
+/// `#[cfg(test)]` module before the path is resolved.
 ///
 /// # Hook placement
 ///
-/// One hook per `invoke!` site — a fire is identified by hook name alone,
-/// so two sites sharing a name are indistinguishable to tests. Details:
-/// `docs/guide.md` ("Hook placement").
+/// Give each `invoke!` site its own hook. A fire is identified by hook name
+/// alone, so two sites sharing a name are indistinguishable to `sequence`,
+/// `expect_calls`, and ordering diagnostics. Repeated fires of the *same*
+/// site are expected (loops, retries); distinguish them by arguments with
+/// `s.<hook>_when(pred, …)` on the sequence builder, not by extra hook names.
+///
+/// Hooks return nothing: the generated trait methods have no return type and
+/// `invoke!` expands to a statement. A closure can observe and mutate
+/// through `&T`, but cannot change what the instrumented operation returns.
+/// Arguments are passed by value through dispatch; declare a reference
+/// (`key: &K`) or a raw pointer (`root: *const ()`) when the call site must
+/// keep the value. The closure signature is `|&T, args…|`.
+///
+/// # Extension trait and `with_dyn`
+///
+/// `{$prefix}SyncPoint` has one method per hook with a no-op default body;
+/// its `SyncPoint` supertrait is a `Send + Sync` marker. The thread-local
+/// dispatch holds `&'static dyn {$prefix}SyncPoint`, and an uninstalled
+/// thread sees the default no-op impl. `{$prefix}Sp::with_dyn(f)` runs `f`
+/// with the sync point installed on the calling thread; `invoke!` is exactly
+/// that dispatch.
 ///
 /// # Specification syntax
 ///
@@ -494,10 +594,126 @@ macro_rules! define_sp {
                     __SP_TL.with(|__c| __f(__c.get()))
                 }
 
-                /// Install a guard that drives sync-point hooks for `value`.
+                /// Install a private guard that drives this sync point for
+                /// `value`.
                 ///
-                /// The guard derefs to `&T`, so test code can call `T`'s
-                /// methods directly on it.
+                /// The guard derefs to `&T`, so test code calls `T`'s methods
+                /// directly on it. It binds this thread's dispatch for its
+                /// lifetime and restores the previously installed sync point
+                /// on drop (stacked installs unwind LIFO). Drop the guard on
+                /// the thread that installed it: TLS is per-thread, and
+                /// moving a guard across threads clobbers the destination's
+                /// dispatch pointer.
+                ///
+                /// # Registration
+                ///
+                /// - one-shot: `guard.<hook>(f)` — the closure runs on the
+                ///   first fire; no count is checked. The real method is the
+                ///   declared hook, e.g. `guard.before_insert(f)`.
+                /// - counted one-shot: `guard.<hook>(f).expect(n)` — the hook
+                ///   must fire `n` times; the closure still runs only once.
+                /// - ordered: `guard.sequence(|s| { s.a(f).b(g); })` — entries
+                ///   are consumed in order; unmatched fires panic if a later
+                ///   entry expects their hook.
+                /// - every fire: `guard.every(|e| e.a(f))` — runs on every
+                ///   non-suppressed fire of that hook.
+                /// - count only: `guard.expect_calls(hook, n)` — no closure.
+                ///
+                /// A second fire-once registration for the same hook replaces
+                /// the first, and a second `every` closure for the same hook
+                /// replaces the first (last wins). A second
+                /// `sequence`/`every` call replaces the whole builder,
+                /// including hooks it does not mention. `.expect(n)` and
+                /// `expect_calls` write the same expectation; for the same
+                /// hook the last call wins.
+                ///
+                /// # Dispatch order
+                ///
+                /// One state machine governs private and shared mode alike:
+                ///
+                /// 1. **Count + trace.** The fire takes its zero-based
+                ///    per-hook index first. The counter is per hook per
+                ///    install, shared by all bound threads; `SP_TRACE` prints
+                ///    it 1-based.
+                /// 2. **`every`.** Its closure runs before the sequence head
+                ///    is consulted, on every non-suppressed fire — consumed
+                ///    or not, and even on a fire that goes on to panic or
+                ///    park.
+                /// 3. **Sequence.** An empty deque falls through to
+                ///    fire-once. If the head expects this hook and its
+                ///    predicate passes (or is absent), the entry is popped,
+                ///    waiters are notified, and the step runs. If the
+                ///    predicate fails, the entry stays and this fire ends
+                ///    without arming fire-once. If the head is a different
+                ///    hook and no later entry matches, fall through to
+                ///    fire-once; if a later entry matches, private mode
+                ///    panics with an ordering violation, while shared mode
+                ///    parks and re-checks after every wake. In shared mode a
+                ///    head marked `optional` is skipped.
+                /// 4. **Fire-once.** Runs at most once per hook, on the fire
+                ///    whose counter was 0 *and* whose sequence fell through
+                ///    to it. A first fire consumed by a sequence entry or
+                ///    stopped by a failing predicate never runs the closure.
+                ///
+                /// A nested fire of the same sync point on the same thread
+                /// is suppressed before it counts or consumes; concurrent
+                /// fires from other threads always proceed.
+                ///
+                /// # Panic and drop behavior
+                ///
+                /// A panic inside a hook closure propagates from the
+                /// `invoke!` site like any other panic. The state is
+                /// unwind-safe: consumed entries stay consumed, fires stay
+                /// counted, and poisoned locks are recovered, so other
+                /// threads can still report.
+                ///
+                /// Drop asserts that every mandatory sequence entry was
+                /// consumed and every count expectation matches. `.optional()`
+                /// entries are exempt. On a clean thread the assertion
+                /// panics; while the thread is already unwinding the same
+                /// diagnostic is printed to stderr with `(while unwinding)`
+                /// instead, so a failing test does not abort the whole
+                /// binary with a double panic. A `#[should_panic]` test
+                /// unwinds by design, so finish the scenario (or drop the
+                /// guard) before the expected panic if its assertions must
+                /// still raise.
+                ///
+                /// The diagnostics are one line each:
+                ///
+                /// ```text
+                /// sync point hook `before_insert` fired 1 time(s), expected 2 (installed at ...)
+                /// sync point sequence not fully consumed: 2 entries remaining [before_insert, after_commit] (installed at ...)
+                /// sync point ordering violation: expected `before_insert` next but `after_commit` fired
+                /// shadow-point: sequence park timeout (10s): thread waiting for `after_commit`, head is `before_insert` (installed at ...)
+                /// ```
+                ///
+                /// The remaining-entry list is comma-separated. In shared
+                /// mode the location reads `(shared, installed at ...)`;
+                /// while unwinding the whole line is printed with
+                /// `(while unwinding)` instead of raised.
+                ///
+                /// # The leak
+                ///
+                /// The state is `Box::leak`ed on purpose: TLS holds a
+                /// `&'static` dispatch, and `T` may cross threads. The
+                /// guarded value's destructor never runs, and a registered
+                /// closure that is never consumed (an `every`, or a
+                /// fire-once that never fired) lives for the process.
+                /// A fire-once closure that did fire is dropped when its
+                /// slot is taken. Do not assert on a destructor owned by the
+                /// leaked state: guard a `Weak` and keep the strong `Arc` in
+                /// the test, or report through a flag the production value
+                /// drops. Do not call `install` per iteration in a
+                /// long-lived loop.
+                ///
+                /// # Per-worker guards
+                ///
+                /// To run private mode on several real threads, install one
+                /// guard inside each worker and register that worker's
+                /// hooks there. Each guard asserts its own thread's counts
+                /// at drop; cross-thread order must come from the test's own
+                /// gates, atomics, or channels. This pattern never parks
+                /// inside the instrumented path.
                 #[track_caller]
                 $vis fn install_guard<T: Send + Sync + 'static>(
                     value: T,
@@ -515,21 +731,89 @@ macro_rules! define_sp {
                 /// instrumented code. `invoke!` then dispatches into the
                 /// shared state on the firing thread. Derefs to `&T`.
                 ///
+                /// # Lifecycle — six steps
+                ///
+                /// 1. **Install** on the test thread: `install_shared(value)`
+                ///    returns an `Arc<{$prefix}SharedSp<T>>`.
+                /// 2. **Register** `sequence`/`every`/fire-once/
+                ///    `expect_calls` before spawning workers. Registration is
+                ///    lock-guarded and safe from any thread, but a fire that
+                ///    beats it falls through silently.
+                /// 3. **Bind each firing thread**: clone the `Arc` into the
+                ///    worker and call `let _g = shared.install();` as its
+                ///    first act. TLS is per-thread; the test thread must bind
+                ///    too if it fires. Keep the guard alive while the worker
+                ///    touches instrumented code, and drop it on the thread
+                ///    that installed it.
+                /// 4. **Drive** the real API; hooks dispatch into the shared
+                ///    state.
+                /// 5. **Join every worker.**
+                /// 6. **Drop the last `Arc`**: shared assertions run there,
+                ///    after the joins, so they cannot race an in-flight fire.
+                ///
+                /// Step 6 uses the same raise-or-print rule as
+                /// `install_guard`: on a clean thread the assertion raises;
+                /// while unwinding it prints with `(while unwinding)`. The
+                /// state is `Box::leak`ed like the private guard, so the
+                /// destructor-ownership rules and the "do not install per
+                /// iteration" warning in `install_guard` apply here
+                /// unchanged.
+                ///
+                /// A worker that never calls `install()` dispatches to the
+                /// default no-op and its fires vanish silently.
+                ///
+                /// # Parking
+                ///
+                /// A fire of a hook that the sequence expects only at a later
+                /// position parks at the head and re-checks after every
+                /// wake. It panics with a `sequence park timeout` diagnostic
+                /// after a full [`PARK_TIMEOUT`](shadow_point::PARK_TIMEOUT) with no progress; a thread
+                /// that keeps being woken may park longer in total. Fires
+                /// matching no entry fall through instead of parking.
+                /// Parking is a mutual-deadlock guard, not a synchronization
+                /// mechanism.
+                ///
+                /// # Completion
+                ///
+                /// `sequence` orders *consumption*, not
+                /// completion: a waiter is released when its entry is
+                /// popped, while the step closure may still be running and
+                /// holding production locks. To wait for a step to finish,
+                /// use a [`Gate`](shadow_point::Gate): set it at the end of the
+                /// step and `must_wait` where the next action must not
+                /// start.
+                ///
+                /// # Sequence vs `every` + trace
+                ///
+                /// `sequence` asserts global order — the strong property. It
+                /// costs parking inside the instrumented path (production
+                /// locks held) and cannot absorb unbounded legitimate fires
+                /// (retry loops, background churn): every extra in-order fire
+                /// still consumes an entry. `every` plus a `Mutex<Vec<_>>`
+                /// trace asserts membership, counts, and causal pairs without
+                /// a strict order; assert the trace after joining every
+                /// worker, and use a gate for "now". Prefer `sequence` when
+                /// the order itself is the bug class.
+                ///
                 /// # Caveats
                 ///
-                /// A parked thread is inside the instrumented code path
-                /// and holds production locks — order `sequence` so the
-                /// head consumer never needs a parked thread's lock.
-                /// `sequence` orders consumption, not completion (use
-                /// the `Gate` type); fire-once winners are
-                /// nondeterministic; register before spawning workers;
-                /// join workers before dropping the last `Arc`. Violations
-                /// fail with a `sequence park timeout` or a drop-time
-                /// assertion (raised on a clean thread, printed rather
-                /// than raised while the thread is already unwinding —
-                /// a panic from `Drop` there is a double panic), never
-                /// hang. The full list with rationale:
-                /// `docs/shared-mode.md` (Caveats).
+                /// A parked thread is inside the instrumented code path and
+                /// holds production locks — order `sequence` so the head
+                /// consumer never needs a parked thread's lock. Fire-once
+                /// winners are nondeterministic in shared mode; use
+                /// `sequence` for deterministic ordering. Register before
+                /// spawning workers. Same-named entries are each consumed
+                /// exactly once, but wake order is not FIFO. An `optional`
+                /// entry at the head is skipped when another hook fires;
+                /// join workers and drop their guards before dropping the
+                /// last `Arc`. Predicates on gated entries run under the
+                /// sequence lock and must be pure. Inside step closures use
+                /// [`Gate::must_wait`](shadow_point::Gate::must_wait), never
+                /// [`Gate::wait`](shadow_point::Gate::wait).
+                ///
+                /// The runnable two-writer example is
+                /// `examples/register_shared.rs`; the README's Examples
+                /// section shows both commands.
                 #[track_caller]
                 $vis fn install_shared<T: Send + Sync + 'static>(
                     value: T,
@@ -538,8 +822,8 @@ macro_rules! define_sp {
                         value,
                         std::panic::Location::caller(),
                     ));
-                    // Read by dispatch without a lock; written here before
-                    // the `Arc` is published to worker threads.
+                    // Read by dispatch without a lock; written here before the
+                    // `Arc` is published to worker threads.
                     sp.shared = true;
                     ::std::sync::Arc::new([<$prefix SharedSp>] {
                         sp: Box::leak(sp),
@@ -626,6 +910,13 @@ macro_rules! define_sp {
             /// the same hook twice — or calling
             /// `every` twice — replaces, never appends; hooks not mentioned
             /// become no-ops.
+            ///
+            /// `every` runs **before** the sequence head is consulted, on
+            /// every non-suppressed fire of the hook — consumed or not, and
+            /// even on a fire that goes on to panic or park. In shared mode
+            /// a fire the head cannot consume goes on to park; this ordering
+            /// lets an `every` closure record "inside dispatch, just before a
+            /// possible park".
             #[allow(dead_code)]
             $vis struct EveryClosures<T: Send + Sync + 'static> {
                 $( $method: Option<
@@ -1058,6 +1349,25 @@ macro_rules! define_sp {
             /// arguments; `optional` marks the last step as allowed to stay
             /// unconsumed. A step's closure runs on the firing thread at the
             /// moment the sequence consumes it.
+            ///
+            /// # Dispatch
+            ///
+            /// On a fire, the head entry must match the hook. A fire of a
+            /// different hook is an ordering violation only when a *later*
+            /// entry expects the fired hook: private mode panics immediately;
+            /// shared mode parks at the head (see `install_shared`). With no
+            /// later match, the fire falls through to fire-once. Extra fires
+            /// after the deque is consumed are not an ordering error: they
+            /// still count, and a fire-once that has not fired yet still runs.
+            ///
+            /// A gated entry whose predicate fails stays at the head; that
+            /// fire does not arm fire-once. The predicate runs under the
+            /// sequence lock in both modes and must be pure — no hook calls
+            /// and no blocking. A mandatory entry left at drop fails the drop
+            /// assertion; [`optional`](Self::optional) exempts the most
+            /// recently pushed entry (typically a trailing sentinel). A
+            /// second `sequence(...)` call replaces the whole deque; it does
+            /// not append.
             #[allow(dead_code)]
             $vis struct [<$prefix SeqBuilder>]<T: Send + Sync + 'static> {
                 seq: ::std::collections::VecDeque<SeqEntry<T>>,
@@ -1132,9 +1442,12 @@ macro_rules! define_sp {
             /// The fluent handle returned by registering a fire-once closure:
             /// chain `.expect(n)` to pin how many times that hook must fire
             /// before the guard (or the last `Arc` of a shared sync point) is
-            /// dropped. Dropping the handle without `.expect(n)` leaves the
-            /// one-shot registered — it still runs on the first fire — and
-            /// checks no count.
+            /// dropped. The count is for **all** hook fires, not closure
+            /// runs: a one-shot closure still runs only on the first fire.
+            /// For the same hook, `.expect(n)` and `expect_calls(hook, n)`
+            /// write the same expectation; the last call wins. Dropping the
+            /// handle without `.expect(n)` leaves the one-shot registered —
+            /// it still runs on the first fire — and checks no count.
             #[allow(dead_code)]
             $vis struct SpExpect<'a, T: Send + Sync + 'static> {
                 sp: &'a __Sp<T>,
@@ -1156,8 +1469,11 @@ macro_rules! define_sp {
             /// Derefs to the guarded value. Drop asserts that all registered
             /// sequences were consumed and all `expect_calls` counts match —
             /// raised on a clean thread, printed rather than raised while the
-            /// thread is already unwinding. The guarded value is never
-            /// dropped here — see `docs/guide.md`, "The leak".
+            /// thread is already unwinding. The state is `Box::leak`ed by
+            /// design; the guarded value's destructor never runs. See the
+            /// `install_guard` documentation for the registration model,
+            /// dispatch order, and the ownership rules around leaked
+            /// destructors.
             ///
             /// Drop the guard on the thread that installed it: the guard
             /// restores the previously installed sync point of ITS OWN thread
