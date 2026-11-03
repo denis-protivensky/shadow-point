@@ -326,12 +326,14 @@ const UNRESOLVED_PARK_TIMEOUT: usize = usize::MAX;
 /// pays a relaxed load per wake, not a `getenv` — and `unsafe` is not needed
 /// (the crate forbids it, and MSRV 1.65 has no `OnceLock`).
 ///
-/// A value that does not parse, or is empty, is ignored with one printed
-/// note: a typo in a CI env should not silently change what the suite
-/// proves, and should not fail a run either. `0` is legal and means "do not
-/// wait": the zero wait returns already timed out, the head is re-checked,
-/// and the timeout diagnostic is raised at once — so a wrong choreography
-/// fails instantly instead of parking.
+/// A value that does not parse, is empty, or does not fit the internal
+/// cache (`usize::MAX` milliseconds or more — ~49 days on a 32-bit target)
+/// is ignored with one printed note: a typo in a CI env should not
+/// silently change what the suite proves, and should not fail a run
+/// either. `0` is legal and means "do not wait": the zero wait returns
+/// already timed out, the head is re-checked, and the timeout diagnostic
+/// is raised at once — so a wrong choreography fails instantly instead of
+/// parking.
 ///
 /// ```text
 /// SP_PARK_TIMEOUT_MS=200 cargo test
