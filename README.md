@@ -228,8 +228,8 @@ dependency graph: resolved and compiled for every release build. Under
 breaks `cargo build` with `E0433`. The robust wiring is a seam: one local
 `macro_rules!` that carries the attribute, wired with `#[macro_use]` ahead
 of the modules using it, so call sites read
-`sp_invoke!(RegisterSp, before_store(value))` and the crate path appears
-exactly once in the whole crate. Check it holds with `cargo build` (must
+`sp_invoke!(RegisterSp, before_store(value))` and the `invoke!` path
+appears exactly once, in the seam. Check it holds with `cargo build` (must
 compile while the dev-dependency does not resolve) and `cargo test` (must
 dispatch). The `invoke!` documentation, "Dev-dependency seam", has the
 snippet and the scope rules. The `examples/` in this crate call
