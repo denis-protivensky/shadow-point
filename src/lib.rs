@@ -45,12 +45,15 @@ pub trait SyncPoint: Send + Sync {}
 /// # Dev-dependency seam
 ///
 /// As a regular dependency the crate is still linked in production. To drop
-/// that coupling too, put it under `[dev-dependencies]`. A plain
-/// `shadow_point::invoke!` path in production then fails to resolve
-/// (`E0433`) before the macro's `cfg(test)` body is stripped. Hide the path
-/// in a local `macro_rules!` seam:
+/// that coupling too, put it under `[dev-dependencies]`. A dev-dependency
+/// is in the extern prelude only when building tests, so a plain
+/// `shadow_point::invoke!` path in a production build fails to resolve
+/// (`E0433`) — the invocation path is resolved before the macro expands and
+/// strips its `cfg(test)` body. Hide the path in a local `macro_rules!`
+/// seam:
 ///
 /// ```rust,ignore
+/// // src/seam.rs — plain macro_rules; nothing here depends on the crate
 /// macro_rules! sp_invoke {
 ///     ($($t:tt)*) => {
 ///         #[cfg(test)]
@@ -59,9 +62,22 @@ pub trait SyncPoint: Send + Sync {}
 /// }
 /// ```
 ///
-/// In production the seam expands to a stripped statement, so the crate is
-/// never resolved; in tests it dispatches. `define_sp!` needs no seam: the
-/// caller already gates it with `#[cfg(test)]`.
+/// ```rust,ignore
+/// // src/lib.rs — textual macro scope: the seam module must precede every
+/// // module that calls sp_invoke!; an explicit `use` per module works too
+/// #[macro_use]
+/// mod seam;
+/// ```
+///
+/// Call sites then drop the crate path entirely:
+/// `sp_invoke!(MyModuleSp, before_insert(&key))`. In production the seam
+/// expands to a stripped statement, so the crate is never resolved; in
+/// tests it dispatches. Gating each call site with its own `#[cfg(test)]`
+/// also works and needs no seam file, but the attribute is then repeated
+/// per call. `define_sp!` needs no seam: the caller already gates it with
+/// `#[cfg(test)]`. Check the seam holds with `cargo build` (must compile
+/// while the dev-dependency is unresolvable) and `cargo test` (must
+/// dispatch to the real hooks).
 ///
 /// # Threads and async
 ///
