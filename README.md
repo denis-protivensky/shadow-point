@@ -131,9 +131,12 @@ most common wrong-mode mistake — those fires disappear.
 
 `<name>` is the hook name declared in `define_sp!`; `define_sp!` generates
 one registration method per hook, and the table covers the registration
-surface. **`expect` counts fires, not closure runs**: a one-shot closure
-runs once even when its hook fires several times (a retry loop can do that),
-so a correct test may need `.expect(2)`.
+surface. **`.expect(n)` asserts how many times the hook fires, not how many
+times the closure runs.** A one-shot closure runs on the first fire only; an
+operation that retries (the CAS loop in the private example below) fires the
+hook again, so a correct trace can be two fires with one closure run — that
+is what `.expect(2)` pins. Without `.expect`, the closure is still
+registered, but no count is checked.
 
 `optional()` marks the most recently pushed sequence entry as allowed to
 remain unconsumed at drop — the trailing-sentinel pattern. It is a weak
