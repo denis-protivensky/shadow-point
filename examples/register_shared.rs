@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(test)]
 shadow_point::define_sp! {
-    pub prefix Reg {
+    pub(crate) prefix Register {
         before_store(value: u32),
         after_store(value: u32),
     }
@@ -33,9 +33,9 @@ impl Register {
     }
 
     fn store(&self, value: u32) {
-        shadow_point::invoke!(RegSp, before_store(value));
+        shadow_point::invoke!(RegisterSp, before_store(value));
         self.0.store(value, Ordering::SeqCst);
-        shadow_point::invoke!(RegSp, after_store(value));
+        shadow_point::invoke!(RegisterSp, after_store(value));
     }
 }
 
@@ -59,7 +59,7 @@ mod tests {
         let log: Log = Arc::new(Mutex::new(Vec::new()));
         let stored = Arc::new(Gate::new());
 
-        let shared = RegSp::install_shared(Register::new(0));
+        let shared = RegisterSp::install_shared(Register::new(0));
         shared.sequence(|s| {
             s.before_store({
                 let log = log.clone();

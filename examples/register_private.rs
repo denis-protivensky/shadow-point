@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(test)]
 shadow_point::define_sp! {
-    pub prefix Reg {
+    pub(crate) prefix Register {
         before_store(value: u32),
         before_cas(expected: u32),
     }
@@ -31,7 +31,7 @@ impl Register {
     }
 
     fn store(&self, value: u32) {
-        shadow_point::invoke!(RegSp, before_store(value));
+        shadow_point::invoke!(RegisterSp, before_store(value));
         self.0.store(value, Ordering::SeqCst);
     }
 
@@ -39,7 +39,7 @@ impl Register {
     fn increment(&self) -> u32 {
         let mut cur = self.0.load(Ordering::SeqCst);
         loop {
-            shadow_point::invoke!(RegSp, before_cas(cur));
+            shadow_point::invoke!(RegisterSp, before_cas(cur));
             match self
                 .0
                 .compare_exchange(cur, cur + 1, Ordering::SeqCst, Ordering::SeqCst)
@@ -54,7 +54,7 @@ impl Register {
     /// store. It loses a rival update between the load and the store.
     fn naive_increment(&self) -> u32 {
         let cur = self.0.load(Ordering::SeqCst);
-        shadow_point::invoke!(RegSp, before_cas(cur));
+        shadow_point::invoke!(RegisterSp, before_cas(cur));
         self.0.store(cur + 1, Ordering::SeqCst);
         cur + 1
     }
@@ -74,8 +74,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_store_fires_its_hook() {
-        let guard = RegSp::install_guard(Register::new(0));
+    fn the_hook_runs_before_the_store() {
+        let guard = RegisterSp::install_guard(Register::new(0));
         guard
             .before_store(|_, value| assert_eq!(value, 7))
             .expect(1);
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn the_cas_loop_keeps_the_rival_update() {
-        let guard = RegSp::install_guard(Register::new(0));
+        let guard = RegisterSp::install_guard(Register::new(0));
         // The shadow lands on the first attempt and stores 100. The CAS then
         // fails and retries: the hook fires twice, the closure runs once.
         guard
@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn the_naive_load_store_loses_it() {
-        let guard = RegSp::install_guard(Register::new(0));
+        let guard = RegisterSp::install_guard(Register::new(0));
         guard
             .before_cas(|reg, _expected| {
                 reg.0.store(100, Ordering::SeqCst);

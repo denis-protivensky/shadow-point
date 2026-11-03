@@ -164,7 +164,7 @@ Two runnable examples sit in `examples/`; both are test targets:
   and a CAS-loop `increment`. The hook shadows the rival store; the CAS
   retries once, so the hook fires twice while the one-shot closure runs once
   (`.expect(2)`).
-- `examples/register_shared.rs` — the same register through
+- `examples/register_shared.rs` — a register through
   `install_shared`; two writer threads, a `sequence` and a `Gate` prove that
   one writer is inside dispatch before the other proceeds.
 
