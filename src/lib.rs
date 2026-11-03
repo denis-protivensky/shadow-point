@@ -749,7 +749,7 @@ macro_rules! define_sp {
                 /// A fire of a hook that the sequence expects only at a later
                 /// position parks at the head and re-checks after every
                 /// wake. It panics with a `sequence park timeout` diagnostic
-                /// after a full [`PARK_TIMEOUT`] with no progress; a thread
+                /// after a full [`PARK_TIMEOUT`](shadow_point::PARK_TIMEOUT) with no progress; a thread
                 /// that keeps being woken may park longer in total. Fires
                 /// matching no entry fall through instead of parking.
                 /// Parking is a mutual-deadlock guard, not a synchronization
@@ -761,7 +761,7 @@ macro_rules! define_sp {
                 /// completion: a waiter is released when its entry is
                 /// popped, while the step closure may still be running and
                 /// holding production locks. To wait for a step to finish,
-                /// use a [`Gate`](crate::Gate): set it at the end of the
+                /// use a [`Gate`](shadow_point::Gate): set it at the end of the
                 /// step and `must_wait` where the next action must not
                 /// start.
                 ///
@@ -790,8 +790,8 @@ macro_rules! define_sp {
                 /// join workers and drop their guards before dropping the
                 /// last `Arc`. Predicates on gated entries run under the
                 /// sequence lock and must be pure. Inside step closures use
-                /// [`Gate::must_wait`](crate::Gate::must_wait), never
-                /// [`Gate::wait`](crate::Gate::wait).
+                /// [`Gate::must_wait`](shadow_point::Gate::must_wait), never
+                /// [`Gate::wait`](shadow_point::Gate::wait).
                 ///
                 /// The runnable two-writer example is
                 /// `examples/register_shared.rs`; the README's Examples
