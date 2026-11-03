@@ -129,11 +129,11 @@ most common wrong-mode mistake — those fires disappear.
 | count only | `guard.expect_calls(MySp::a, n)` |
 | shared | `install_shared`, then `shared.install()` per firing thread |
 
-`<name>` is the hook name declared in `define_sp!`. There is no generic
-`guard.hook(f)` method, no `exact`, no chained `.every()`, and no
-guard-level `_when`. **`expect` counts fires, not closure runs**: a one-shot
-closure runs once even when its hook fires several times (a retry loop can
-do that), so a correct test may need `.expect(2)`.
+`<name>` is the hook name declared in `define_sp!`; `define_sp!` generates
+one registration method per hook, so the table is the whole surface.
+**`expect` counts fires, not closure runs**: a one-shot closure runs once
+even when its hook fires several times (a retry loop can do that), so a
+correct test may need `.expect(2)`.
 
 `optional()` marks the most recently pushed sequence entry as allowed to
 remain unconsumed at drop — the trailing-sentinel pattern. It is a weak
