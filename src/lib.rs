@@ -72,6 +72,9 @@ pub trait SyncPoint: Send + Sync {}
 /// (usually none). Keep the instrumented section await-free, or run it under
 /// `spawn_blocking` and install inside that closure. `TokioAsyncGate` waits
 /// on fire milestones without parking a `current_thread` executor.
+/// `TokioAsyncGate::wait_at_least` has no timeout by design: await only a
+/// count the scenario is guaranteed to reach; a missed threshold hangs until
+/// the CI job timeout, unlike `Gate::must_wait` and sequence parking.
 #[macro_export]
 macro_rules! invoke {
     ($sp:path, $func:ident ( $($args:expr),* $(,)? )) => {
@@ -454,7 +457,7 @@ impl Drop for ExecSink {
 /// alone, so two sites sharing a name are indistinguishable to `sequence`,
 /// `expect_calls`, and ordering diagnostics. Repeated fires of the *same*
 /// site are expected (loops, retries); distinguish them by arguments with
-/// `hook_when(pred, …)`, not by extra hook names.
+/// `s.<hook>_when(pred, …)` on the sequence builder, not by extra hook names.
 ///
 /// Hooks return nothing: the generated trait methods have no return type and
 /// `invoke!` expands to a statement. A closure can observe and mutate
@@ -586,9 +589,10 @@ macro_rules! define_sp {
                 ///
                 /// # Registration
                 ///
-                /// - one-shot: `guard.hook(f)` — the closure runs on the
-                ///   first fire; no count is checked.
-                /// - counted one-shot: `guard.hook(f).expect(n)` — the hook
+                /// - one-shot: `guard.<hook>(f)` — the closure runs on the
+                ///   first fire; no count is checked. The real method is the
+                ///   declared hook, e.g. `guard.before_insert(f)`.
+                /// - counted one-shot: `guard.<hook>(f).expect(n)` — the hook
                 ///   must fire `n` times; the closure still runs only once.
                 /// - ordered: `guard.sequence(|s| { s.a(f).b(g); })` — entries
                 ///   are consumed in order; unmatched fires panic if a later
@@ -656,16 +660,19 @@ macro_rules! define_sp {
                 /// guard) before the expected panic if its assertions must
                 /// still raise.
                 ///
-                /// The diagnostics are one line each: a count mismatch is
-                /// `sync point hook "a" fired N time(s), expected M
-                /// (installed at ...)`; an unconsumed sequence is
-                /// `sync point sequence not fully consumed: N entries
-                /// remaining [...]`; a private ordering violation is
-                /// `sync point ordering violation: expected "a" next but
-                /// "b" fired`. Shared parking uses
-                /// `shadow-point: sequence park timeout (10s): ...` and
-                /// names the waiting hook, the head hook, and the install
-                /// site.
+                /// The diagnostics are one line each:
+                ///
+                /// ```text
+                /// sync point hook `before_insert` fired 1 time(s), expected 2 (installed at ...)
+                /// sync point sequence not fully consumed: 2 entries remaining [before_insert, after_commit] (installed at ...)
+                /// sync point ordering violation: expected `before_insert` next but `after_commit` fired
+                /// shadow-point: sequence park timeout (10s): thread waiting for `after_commit`, head is `before_insert` (installed at ...)
+                /// ```
+                ///
+                /// The remaining-entry list is comma-separated. In shared
+                /// mode the location reads `(shared, installed at ...)`;
+                /// while unwinding the whole line is printed with
+                /// `(while unwinding)` instead of raised.
                 ///
                 /// # The leak
                 ///
@@ -725,6 +732,14 @@ macro_rules! define_sp {
                 /// 5. **Join every worker.**
                 /// 6. **Drop the last `Arc`**: shared assertions run there,
                 ///    after the joins, so they cannot race an in-flight fire.
+                ///
+                /// Step 6 uses the same raise-or-print rule as
+                /// `install_guard`: on a clean thread the assertion raises;
+                /// while unwinding it prints with `(while unwinding)`. The
+                /// state is `Box::leak`ed like the private guard, so the
+                /// destructor-ownership rules and the "do not install per
+                /// iteration" warning in `install_guard` apply here
+                /// unchanged.
                 ///
                 /// A worker that never calls `install()` dispatches to the
                 /// default no-op and its fires vanish silently.
@@ -880,9 +895,10 @@ macro_rules! define_sp {
             ///
             /// `every` runs **before** the sequence head is consulted, on
             /// every non-suppressed fire of the hook — consumed or not, and
-            /// even on a fire that goes on to panic or park. That ordering
-            /// lets an `every` closure prove "inside dispatch, about to
-            /// park".
+            /// even on a fire that goes on to panic or park. In shared mode
+            /// a fire the head cannot consume goes on to park; this ordering
+            /// lets an `every` closure record "inside dispatch, just before a
+            /// possible park".
             #[allow(dead_code)]
             $vis struct EveryClosures<T: Send + Sync + 'static> {
                 $( $method: Option<
@@ -1323,7 +1339,8 @@ macro_rules! define_sp {
             /// entry expects the fired hook: private mode panics immediately;
             /// shared mode parks at the head (see `install_shared`). With no
             /// later match, the fire falls through to fire-once. Extra fires
-            /// after the deque is consumed are ignored.
+            /// after the deque is consumed are not an ordering error: they
+            /// still count, and a fire-once that has not fired yet still runs.
             ///
             /// A gated entry whose predicate fails stays at the head; that
             /// fire does not arm fire-once. The predicate runs under the
