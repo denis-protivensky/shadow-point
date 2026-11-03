@@ -132,7 +132,8 @@ most common wrong-mode mistake — those fires disappear.
 
 | Need | Current API |
 |---|---|
-| one-shot | `guard.<name>(f).expect(n)` — the closure runs on the first fire |
+| one-shot | `guard.<name>(f)` — the closure runs on the first fire, no count checked |
+| one-shot, counted | `guard.<name>(f).expect(n)` — the closure runs on the first fire; `n` is the hook's fire count |
 | every fire | `guard.every(\|e\| e.<name>(f))` |
 | ordered | `guard.sequence(\|s\| { s.a(f).b(g); })` |
 | conditional step | `s.a_when(pred, f)` — only inside `sequence` |
