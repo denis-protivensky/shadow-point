@@ -65,3 +65,19 @@ jobs:
           targets: armv5te-unknown-linux-gnueabi
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --locked --all-targets --all-features --target armv5te-unknown-linux-gnueabi
+
+  test32:
+    # Executes the suite at 32-bit pointer width: the park-timeout cache's
+    # boundary (`usize::MAX` ms) differs from `u64::MAX` there, and the
+    # resolver's "at or above the sentinel" arm is reachable only on 32-bit
+    # — a `--lib` check type-proves it, this job runs it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          targets: i686-unknown-linux-gnu
+      - run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --locked --all-features --target i686-unknown-linux-gnu
