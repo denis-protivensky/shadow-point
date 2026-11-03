@@ -51,9 +51,11 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   check32:
-    # The floor without 64-bit atomics (ahm's `make check32` compiles this
-    # crate as a dependency). `park_timeout()`'s cache must stay on
-    # pointer-width atomics; `AtomicU64` does not exist on this target.
+    # The floor without 64-bit atomics (a downstream consumer's `make
+    # check32` compiles this crate as a dependency). `park_timeout()`'s
+    # cache must stay on pointer-width atomics; `AtomicU64` does not exist
+    # on this target. `--all-targets --all-features`: a stray 64-bit atomic
+    # in test code must not slip past a `--lib` check.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -62,4 +64,4 @@ jobs:
           toolchain: stable
           targets: armv5te-unknown-linux-gnueabi
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo check --locked --lib --target armv5te-unknown-linux-gnueabi
+      - run: cargo check --locked --all-targets --all-features --target armv5te-unknown-linux-gnueabi
