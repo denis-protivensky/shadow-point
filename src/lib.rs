@@ -119,8 +119,10 @@ pub fn trace_enabled() -> bool {
 /// Inside a hook or step closure use [`must_wait`](Self::must_wait), never
 /// [`wait`](Self::wait): a missed [`set`](Self::set) must fail with a
 /// diagnostic rather than hang the suite. [`wait`](Self::wait) belongs in
-/// the test body. `wait_timeout`/`must_wait` accept any duration;
-/// shared-mode parking uses the fixed [`PARK_TIMEOUT`].
+/// the test body. `wait_timeout`/`must_wait` accept any duration, zero
+/// included: zero inspects the flag without waiting, and
+/// `must_wait(Duration::ZERO)` fails the test at once when the gate is
+/// unset. Shared-mode parking uses the fixed [`PARK_TIMEOUT`].
 ///
 /// The gate is panic-safe: a poisoned lock (a panicking waiter) is
 /// transparently recovered via [`into_inner`](std::sync::PoisonError::into_inner).

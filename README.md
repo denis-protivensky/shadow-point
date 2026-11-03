@@ -58,6 +58,7 @@ in its own file, or in its own `mod { … }`.
 ```rust,ignore
 impl Register {
     fn store(&self, value: u32) {
+        #[cfg(test)]
         shadow_point::invoke!(RegisterSp, before_store(value));
         self.0.store(value, Ordering::SeqCst);
     }
@@ -69,6 +70,13 @@ the arguments declared in `define_sp!` — without the guarded `&T`, which
 dispatch prepends. It expands to a statement (an `#[cfg(test)]`-attributed
 block), so write `invoke!(…);` on its own line: not as a closure's body, not
 as a block's trailing value. Outside test builds it compiles to nothing.
+
+Under `[dev-dependencies]` the call site carries its own `#[cfg(test)]`: in
+a production build the crate name does not resolve at all (`E0433`), before
+the macro ever strips its body. Repeat the attribute per call, or wrap it
+once in a local `macro_rules!` seam — see the `invoke!` documentation,
+"Dev-dependency seam". With a regular `[dependencies]` no gating is needed;
+the crate is linked in production but every `invoke!` compiles away.
 
 ### 3. A guard test
 
