@@ -95,7 +95,7 @@ mod tests {
 ```
 
 These snippets are excerpts: they assume `struct Register(AtomicU32);` and
-`use std::sync::atomic::{AtomicU32, Ordering};`; the complete file is
+`use std::sync::atomic::{AtomicU32, Ordering};`. The complete file is
 `examples/register_private.rs`.
 
 The guard derefs to `&T`, so `guard.store(…)` and `guard.0` are the guarded
