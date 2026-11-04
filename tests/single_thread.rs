@@ -118,6 +118,33 @@ fn when_predicate_gates_until_match_and_blocks_fire_once() {
 }
 
 #[test]
+fn sequence_head_consumes_the_first_fire_and_blocks_fire_once() {
+    let g = single::SingleSp::install_guard(());
+    let fire_once = C::new();
+    let step = C::new();
+    g.a({
+        let fire_once = fire_once.clone();
+        move |(), _| fire_once.inc()
+    })
+    .fires(2);
+    g.sequence(|s| {
+        s.a({
+            let step = step.clone();
+            move |(), _| step.inc()
+        });
+    });
+    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::SingleSp, a(1));
+    assert_eq!(step.get(), 1, "the sequence consumes the first fire");
+    assert_eq!(
+        fire_once.get(),
+        0,
+        "a first fire consumed by the sequence never arms fire-once"
+    );
+    drop(g);
+}
+
+#[test]
 #[allow(deprecated)]
 fn optional_head_not_skipped_in_private_mode() {
     let g = single::SingleSp::install_guard(());
@@ -254,7 +281,7 @@ fn guard_drop_assertion_does_not_abort_while_unwinding() {
 }
 
 #[test]
-fn expect_mismatch_assertion_does_not_abort_while_unwinding() {
+fn fires_mismatch_assertion_does_not_abort_while_unwinding() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let g = single::SingleSp::install_guard(());
         g.fires(single::SingleSp::a, 3);
@@ -876,6 +903,18 @@ fn verify_fails_before_drop_and_skips_the_value_destructor() {
     // The failed verify left the state inconsistent; forget it rather than
     // let Drop assert a second time on a non-unwinding path.
     std::mem::forget(g);
+}
+
+#[test]
+fn a_failed_verify_is_not_reported_again_by_drop() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let g = single::SingleSp::install_guard(());
+    g.fires(single::SingleSp::a, 7);
+    let r = catch_unwind(AssertUnwindSafe(|| g.verify()));
+    assert!(r.is_err(), "verify must fail");
+    // A caught verify failure still leaves the guard alive; dropping it must
+    // neither raise nor print the same mismatch a second time.
+    drop(g);
 }
 
 #[test]

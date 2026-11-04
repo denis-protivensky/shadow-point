@@ -23,7 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `verify()` on both guard types: runs the same assertions as drop
   immediately, at the caller's location (`#[track_caller]`). Drop remains
   the fallback. A failed `verify()` unwinds before the guarded value's
-  destructor, so that destructor deliberately does not run on that path.
+  destructor, so that destructor deliberately does not run on that path, and
+  `Drop` does not repeat the diagnostic.
 - `define_sp!` rejects hook names that collide with the generated surface
   (`sequence`, `every`, `expect_calls`, `fires`, `verify`, `install_guard`,
   `install_shared`, `install`, `with_dyn`, and `optional`) with a
@@ -90,17 +91,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-install state" entry, the `'static` bound's rationale and the generated
   `SpGuard`/`SharedSp`/`install` doc comments (which stated the value is
   never dropped) are updated to match.
-- `docs/guide.md`: "The leak and what it owns" → **"Reclamation and what it
-  owns"**, because the leak it described is gone. The section now states who
-  holds a strong reference (the guard, the TLS entry, one per worker, and the
-  dispatch for the length of one fire), the release order (TLS restore →
-  assertions → release), the new ownership table, the measured cost, and a
-  migration note. `with_dyn` documents the clone-before-call rule and why a
-  hook may install or drop a guard without breaking the TLS borrow.
-- `docs/shared-mode.md`: the parking section names `park_timeout()` instead
-  of asserting that `PARK_TIMEOUT` is "not per-install configurable", and
-  adds how to lower the budget — with the warning that it is a deadlock
-  guard, so a short budget on a busy machine can fail a correct test.
+- Rustdoc on `install_guard` and the README FAQ: the ownership section now
+  describes reclamation instead of a leak — who holds a strong reference,
+  the release order, the ownership table in rustdoc, and the `T::drop`
+  migration note. `with_dyn` records why the handle is cloned before the
+  call.
+- Rustdoc on `install_shared` and the README: the parking section names
+  `park_timeout()` instead of asserting that `PARK_TIMEOUT` is "not
+  per-install configurable", and explains how to lower the budget — with the
+  warning that it is a deadlock guard, so a short budget on a busy machine
+  can fail a correct test.
 
 ### Deprecated
 - `.expect(n)` → `.fires(n)`, `expect_calls(hook, n)` → `fires(hook, n)`,

@@ -93,9 +93,9 @@ mod tests {
     fn the_hook_runs_before_the_store() {
         let guard = RegisterSp::install_guard(Register(AtomicU32::new(0)));
 
-        // The closure runs on the first fire, with the call's arguments.
-        // Registration asserts exactly one HOOK fire; `.fires(n)` pins a
-        // different count.
+        // The closure runs at most once, on the first fire that reaches
+        // fire-once, with the call's arguments. Registration asserts exactly
+        // one HOOK fire; `.fires(n)` pins a different count.
         guard.before_store(|_register, value| {
             assert_eq!(value, 7);
         });
@@ -128,8 +128,9 @@ suppressed: calling instrumented code inside a hook does not recurse.
   so its TLS dispatch points at the shared state. Cross-thread order comes
   from `sequence`, which parks an out-of-order arrival at the sequence head
   for up to `park_timeout()` (10 s by default; `SP_PARK_TIMEOUT_MS`
-  overrides it), then panics instead of hanging. `sequence` orders
-  consumption, not completion: use `Gate` — a
+  overrides it), then panics instead of hanging. Lower the budget only as a
+  deadlock guard: a short value on a busy machine can fail a correct test.
+  `sequence` orders consumption, not completion: use `Gate` — a
   reusable boolean rendezvous (`Gate::new()`, shared with the workers) — to
   prove that one thread is inside dispatch before another proceeds.
   Assertions run at the last `Arc` drop, after the workers are joined.
@@ -145,8 +146,8 @@ most common wrong-mode mistake — those fires disappear.
 
 | Need | Current API |
 |---|---|
-| one-shot (exactly one) | `guard.<name>(f)` — the closure runs on the first fire; the hook must fire exactly once |
-| one-shot, other count | `guard.<name>(f).fires(n)` — the closure runs on the first fire; `n` is the hook's fire count |
+| one-shot (exactly one) | `guard.<name>(f)` — the hook must fire exactly once; the closure runs at most once, on the first fire that falls through to fire-once |
+| one-shot, other count | `guard.<name>(f).fires(n)` — `n` is the hook's fire count; the closure still runs at most once, on that first fall-through |
 | count only | `guard.fires(MySp::a, n)` |
 | assert now | `guard.verify()` — same checks as drop, at the call site |
 | every fire | `guard.every(\|e\| e.<name>(f))` |
@@ -157,7 +158,9 @@ most common wrong-mode mistake — those fires disappear.
 `<name>` is the hook name declared in `define_sp!`; `define_sp!` generates
 one registration method per hook, and the table covers the registration
 surface. **`.fires(n)` asserts how many times the hook fires, not how many
-times the closure runs.** A one-shot closure runs on the first fire only; an
+times the closure runs.** A one-shot closure runs at most once, on the
+first fire of its hook that falls through to fire-once; a sequence entry or
+a failing predicate can consume that fire, so the closure may never run. An
 operation that retries (the CAS loop in the private example below) fires the
 hook again, so a correct trace can be two fires with one closure run — that
 is what `.fires(2)` pins. Without a chain, registration asserts exactly one

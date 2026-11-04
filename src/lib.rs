@@ -845,12 +845,15 @@ macro_rules! define_sp {
                 ///
                 /// # Registration
                 ///
-                /// - one-shot: `guard.<hook>(f)` — the closure runs on the
-                ///   first fire, and the hook must fire exactly once. Use
-                ///   `.fires(n)` when the scenario fires it a different
-                ///   number of times.
+                /// - one-shot: `guard.<hook>(f)` — the hook must fire exactly
+                ///   once; the closure runs at most once, on the first fire
+                ///   that falls through to fire-once. A sequence entry or a
+                ///   failing predicate can consume that fire, in which case
+                ///   the closure never runs. Use `.fires(n)` when the
+                ///   scenario fires the hook a different number of times.
                 /// - counted one-shot: `guard.<hook>(f).fires(n)` — the hook
-                ///   must fire `n` times; the closure still runs only once.
+                ///   must fire `n` times; the closure still runs at most
+                ///   once, on that first fall-through.
                 /// - ordered: `guard.sequence(|s| { s.a(f).b(g); })` — entries
                 ///   are consumed in order; unmatched fires panic if a later
                 ///   entry expects their hook.
@@ -1006,10 +1009,9 @@ macro_rules! define_sp {
                 ///
                 /// A fire-once registration's count is the total across the
                 /// whole shared state, not the winner's: a hook that fires
-                /// once per worker needs `.fires(workers)`. `install_shared`
-                /// derefs to its own guard state; `verify()` can assert the
-                /// counts after joining the workers instead of at the last
-                /// `Arc` drop.
+                /// once per worker needs `.fires(workers)`. `SharedSp` derefs
+                /// to the shared value; `verify()` can assert the counts after
+                /// joining the workers instead of at the last `Arc` drop.
                 ///
                 /// # Lifecycle — six steps
                 ///
@@ -1055,7 +1057,8 @@ macro_rules! define_sp {
                 /// being woken may park longer in total. Fires
                 /// matching no entry fall through instead of parking.
                 /// Parking is a mutual-deadlock guard, not a synchronization
-                /// mechanism.
+                /// mechanism. A short budget on a busy machine can fail a
+                /// correct test; use it only as a deadlock guard.
                 ///
                 /// # Completion
                 ///
@@ -1256,6 +1259,9 @@ macro_rules! define_sp {
                 // back to a map.
                 calls: [::std::sync::atomic::AtomicUsize; [<$prefix Hook>]::__SP_COUNT],
                 expected: ::std::sync::Mutex<[Option<usize>; [<$prefix Hook>]::__SP_COUNT]>,
+                // Set before a failed `verify()` reports; `Drop` must not
+                // repeat the same diagnostic while the guard unwinds.
+                reported: ::std::sync::atomic::AtomicBool,
             }
 
             #[allow(dead_code)]
@@ -1285,6 +1291,7 @@ macro_rules! define_sp {
                         expected: ::std::sync::Mutex::new(
                             [None; [<$prefix Hook>]::__SP_COUNT]
                         ),
+                        reported: ::std::sync::atomic::AtomicBool::new(false),
                     }
                 }
 
@@ -1371,12 +1378,20 @@ macro_rules! define_sp {
                 /// Drop-time assertions: unconsumed mandatory sequence
                 /// entries and mismatched count expectations. `shared`
                 /// only marks the install mode in the panic location.
-                /// Entries marked optional via the deprecated
-                /// `SeqBuilder::optional` (e.g. a trailing sentinel) may
-                /// remain unconsumed; every other entry — gated or not —
-                /// must have fired.
+                /// `from_drop` lets a failed `verify()` own the diagnostic:
+                /// `Drop` does not repeat it. Entries marked optional via
+                /// the deprecated `SeqBuilder::optional` (e.g. a trailing
+                /// sentinel) may remain unconsumed; every other entry — gated
+                /// or not — must have fired.
                 #[track_caller]
-                fn assert_fires(&self, shared: bool) {
+                fn assert_fires(&self, shared: bool, from_drop: bool) {
+                    if from_drop
+                        && self
+                            .reported
+                            .load(::std::sync::atomic::Ordering::Relaxed)
+                    {
+                        return;
+                    }
                     // Assertions of a test harness, not of production code:
                     // they must report, never take the run down with them.
                     //
@@ -1422,6 +1437,8 @@ macro_rules! define_sp {
                             self.installed_at,
                         );
                         drop(seq);
+                        self.reported
+                            .store(true, ::std::sync::atomic::Ordering::Relaxed);
                         if unwinding {
                             Self::report_while_unwinding(&message);
                         } else {
@@ -1452,6 +1469,10 @@ macro_rules! define_sp {
                             self.installed_at,
                         );
                         if unwinding {
+                            self.reported.store(
+                                true,
+                                ::std::sync::atomic::Ordering::Relaxed,
+                            );
                             Self::report_while_unwinding(&message);
                         } else {
                             // v0.3.1 raised this through `assert_eq!`, whose
@@ -1459,6 +1480,10 @@ macro_rules! define_sp {
                             // payload consumers match — the custom message is
                             // identical, so the whole payload is byte-for-byte
                             // what it was.
+                            self.reported.store(
+                                true,
+                                ::std::sync::atomic::Ordering::Relaxed,
+                            );
                             assert_eq!(actual, *expected, "{message}");
                         }
                     }
@@ -1657,7 +1682,10 @@ macro_rules! define_sp {
             /// shared mode parks at the head (see `install_shared`). With no
             /// later match, the fire falls through to fire-once. Extra fires
             /// after the deque is consumed are not an ordering error: they
-            /// still count, and a fire-once that has not fired yet still runs.
+            /// still count, but fire-once is armed only on the first fire of
+            /// its hook that reaches it. If the first fire was consumed by a
+            /// sequence entry or stopped by a failing predicate, the closure
+            /// never runs.
             ///
             /// A gated entry whose predicate fails stays at the head; that
             /// fire does not arm fire-once. The predicate runs under the
@@ -1754,12 +1782,12 @@ macro_rules! define_sp {
             /// chain `.fires(n)` to pin how many times that hook must fire
             /// before the guard (or the last `Arc` of a shared sync point) is
             /// dropped. The count is for **all** hook fires, not closure
-            /// runs: a one-shot closure still runs only on the first fire.
-            /// For the same hook, `.fires(n)` and `fires(hook, n)` write the
-            /// same expectation; the last call wins. Dropping the handle
-            /// without `.fires(n)` leaves the default exactly-one
-            /// expectation in place — registration fills the count only when
-            /// it is unset.
+            /// runs: a one-shot closure runs at most once, on the first fire
+            /// that falls through to fire-once. For the same hook, `.fires(n)`
+            /// and `fires(hook, n)` write the same expectation; the last call
+            /// wins. Dropping the handle without `.fires(n)` leaves the
+            /// default exactly-one expectation in place — registration fills
+            /// the count only when it is unset.
             #[allow(dead_code)]
             $vis struct SpExpect<'a, T: Send + Sync + 'static> {
                 sp: &'a __Sp<T>,
@@ -1848,10 +1876,13 @@ macro_rules! define_sp {
                 $(
                     /// Register a fire-once closure for this hook.
                     ///
-                    /// The closure runs on the first invocation, and the hook
-                    /// must fire exactly once. Chain `.fires(n)` to assert a
-                    /// different count; the count is the total number of hook
-                    /// fires, not closure runs.
+                    /// The closure runs at most once, on the first fire of
+                    /// this hook that falls through to fire-once; a sequence
+                    /// entry or a failing predicate can consume that fire, in
+                    /// which case the closure never runs. The hook must fire
+                    /// exactly once. Chain `.fires(n)` to assert a different
+                    /// count; the count is the total number of hook fires,
+                    /// not closure runs.
                     $vis fn $method(
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
@@ -1889,10 +1920,11 @@ macro_rules! define_sp {
                 /// Same checks as `Drop`; `Drop` remains the fallback. Call
                 /// it after the scenario (shared mode: after joining the
                 /// workers). A failure unwinds here, so the guarded value's
-                /// `Drop` does not run on that path.
+                /// `Drop` does not run on that path, and `Drop` does not
+                /// repeat the diagnostic.
                 #[track_caller]
                 $vis fn verify(&self) {
-                    self.__sp_state().assert_fires(false);
+                    self.__sp_state().assert_fires(false, false);
                 }
             }
 
@@ -1946,7 +1978,7 @@ macro_rules! define_sp {
                     __SP_TL.with(|__c| {
                         *(__c.borrow_mut()) = self.old.take()
                     });
-                    sp.assert_fires(false);
+                    sp.assert_fires(false, true);
                     if std::thread::panicking() {
                         return;
                     }
@@ -1997,11 +2029,13 @@ macro_rules! define_sp {
                 $(
                     /// Register a fire-once closure for this hook.
                     ///
-                    /// In shared mode the closure is nondeterministic: the
-                    /// winner is whichever thread's call counter lands
-                    /// first, and the closure receives that thread's
-                    /// arguments. Use `sequence` for deterministic
-                    /// ordering.
+                    /// When the first fire of this hook falls through to
+                    /// fire-once, the closure is nondeterministic: the winner
+                    /// is whichever thread's call counter lands first, and the
+                    /// closure receives that thread's arguments. A sequence
+                    /// entry or a failing predicate can consume that fire, in
+                    /// which case the closure never runs. Use `sequence` for
+                    /// deterministic ordering.
                     $vis fn $method(
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
@@ -2039,10 +2073,10 @@ macro_rules! define_sp {
                 /// Same checks as the last-`Arc` drop; `Drop` remains the
                 /// fallback. Call it after joining the workers. A failure
                 /// unwinds here, so the guarded value's `Drop` does not run
-                /// on that path.
+                /// on that path, and `Drop` does not repeat the diagnostic.
                 #[track_caller]
                 $vis fn verify(&self) {
-                    self.__sp_state().assert_fires(true);
+                    self.__sp_state().assert_fires(true, false);
                 }
 
                 /// Install this sync point on the calling thread (TLS), so
@@ -2107,7 +2141,7 @@ macro_rules! define_sp {
                             .take()
                             .expect("shadow-point: shared state dropped twice"),
                     );
-                    sp.assert_fires(true);
+                    sp.assert_fires(true, true);
                     if std::thread::panicking() {
                         return;
                     }
