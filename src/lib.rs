@@ -138,7 +138,8 @@ pub fn trace_enabled() -> bool {
 /// the test body. `wait_timeout`/`must_wait` accept any duration, zero
 /// included: zero inspects the flag without waiting, and
 /// `must_wait(Duration::ZERO)` fails the test at once when the gate is
-/// unset. Shared-mode parking uses the fixed [`PARK_TIMEOUT`].
+/// unset. Shared-mode parking uses [`park_timeout()`], which is
+/// [`PARK_TIMEOUT`] unless `SP_PARK_TIMEOUT_MS` overrides it.
 ///
 /// The gate is panic-safe: a poisoned lock (a panicking waiter) is
 /// transparently recovered via [`into_inner`](std::sync::PoisonError::into_inner).
@@ -831,19 +832,47 @@ macro_rules! define_sp {
                 /// while unwinding the whole line is printed with
                 /// `(while unwinding)` instead of raised.
                 ///
-                /// # The leak
+                /// # Reclamation and ownership
                 ///
-                /// The state is `Box::leak`ed on purpose: TLS holds a
-                /// `&'static` dispatch, and `T` may cross threads. The
-                /// guarded value's destructor never runs, and a registered
-                /// closure that is never consumed (an `every`, or a
-                /// fire-once that never fired) lives for the process.
-                /// A fire-once closure that did fire is dropped when its
-                /// slot is taken. Do not assert on a destructor owned by the
-                /// leaked state: guard a `Weak` and keep the strong `Arc` in
-                /// the test, or report through a flag the production value
-                /// drops. Do not call `install` per iteration in a
-                /// long-lived loop.
+                /// The state is owned through an `Arc`: the guard and this
+                /// thread's TLS entry each hold a strong reference, and in
+                /// shared mode every worker's `install()` does too; a
+                /// dispatch clones the handle for the duration of one fire.
+                /// The guard's drop restores TLS, runs the drop assertions,
+                /// and releases its reference. If that was the last one, the
+                /// state is freed and the guarded value's own `Drop` runs —
+                /// the destructor is observable at guard drop (shared mode:
+                /// at the last `Arc`), after the sync-point assertions.
+                ///
+                /// On a thread that is already unwinding, that last release
+                /// deliberately **leaks** the state instead: a destructor
+                /// that panics there would double-panic and abort the test
+                /// binary. A leak on a path that is already failing is the
+                /// cheaper half of that trade.
+                ///
+                /// | What holds what | Since 0.4.0 | Consequence |
+                /// |---|---|---|
+                /// | `T` is the value the test passes in | dropped at guard drop | the destructor is observable |
+                /// | `T` is an `Arc<_>` the test cloned | dropped when the *last* clone goes | the test controls the clones |
+                /// | `T` is a `Weak<_>` | never by us | the test keeps timing control |
+                /// | an `every` closure, or a fire-once that never fired | freed with the state | captured `TempDir`/`Child`/channel handles go back |
+                /// | any of the above, on an unwinding thread | leaked, on purpose | no abort, no destructor running mid-unwind |
+                ///
+                /// A registered closure that is never consumed (an `every`,
+                /// or a fire-once that never fired) is freed with the state;
+                /// a fire-once that did fire is dropped when its slot is
+                /// taken. A destructor assertion a test makes inside
+                /// `T::drop` used to be skipped; it now runs at guard drop,
+                /// after the sync-point assertions, so a scenario that
+                /// abandoned entries can fail there for the first time.
+                /// Treat that as a finding, not a regression.
+                ///
+                /// `Weak` and flag shapes still matter for destructor
+                /// *timing*: a `Weak` lets the test decide the moment, and a
+                /// flag records a drop the production value performs. They
+                /// are choices about the moment, no longer workarounds for a
+                /// leak. Installing per iteration is no longer a leak; it is
+                /// a performance choice, not an ownership rule.
                 ///
                 /// # Per-worker guards
                 ///
@@ -893,10 +922,11 @@ macro_rules! define_sp {
                 /// Step 6 uses the same raise-or-print rule as
                 /// `install_guard`: on a clean thread the assertion raises;
                 /// while unwinding it prints with `(while unwinding)`. The
-                /// state is `Box::leak`ed like the private guard, so the
-                /// destructor-ownership rules and the "do not install per
-                /// iteration" warning in `install_guard` apply here
-                /// unchanged.
+                /// last `Arc` drop reclaims the state, so the guarded
+                /// value's own `Drop` runs there, after the assertions; on
+                /// an unwinding thread the state is deliberately leaked
+                /// instead. The ownership rules and the migration note in
+                /// `install_guard` apply here unchanged.
                 ///
                 /// A worker that never calls `install()` dispatches to the
                 /// default no-op and its fires vanish silently.
@@ -906,8 +936,11 @@ macro_rules! define_sp {
                 /// A fire of a hook that the sequence expects only at a later
                 /// position parks at the head and re-checks after every
                 /// wake. It panics with a `sequence park timeout` diagnostic
-                /// after a full [`PARK_TIMEOUT`](shadow_point::PARK_TIMEOUT) with no progress; a thread
-                /// that keeps being woken may park longer in total. Fires
+                /// after a full [`park_timeout()`](shadow_point::park_timeout)
+                /// with no progress; that value is
+                /// [`PARK_TIMEOUT`](shadow_point::PARK_TIMEOUT) unless
+                /// `SP_PARK_TIMEOUT_MS` overrides it. A thread that keeps
+                /// being woken may park longer in total. Fires
                 /// matching no entry fall through instead of parking.
                 /// Parking is a mutual-deadlock guard, not a synchronization
                 /// mechanism.
@@ -1608,8 +1641,8 @@ macro_rules! define_sp {
             /// thread is already unwinding. After the assertions, the guard
             /// releases the state: if it held the last reference, the
             /// guarded value's own `Drop` runs here (on an unwinding thread
-            /// it is deliberately not run — see `docs/guide.md`,
-            /// "Reclamation and what it owns").
+            /// the state is deliberately leaked instead — see the
+            /// `install_guard` documentation, "Reclamation and ownership").
             ///
             /// Drop the guard on the thread that installed it: the guard
             /// restores the previously installed sync point of ITS OWN thread

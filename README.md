@@ -27,7 +27,7 @@ In production, hooks compile to nothing.
 ```toml
 # Cargo.toml
 [dev-dependencies]
-shadow-point = "0.3"
+shadow-point = "0.4"
 ```
 
 ### 1. Declare the hooks
@@ -126,8 +126,9 @@ suppressed: calling instrumented code inside a hook does not recurse.
   `Arc<…SharedSp<T>>`; every firing thread calls `shared.install()` first,
   so its TLS dispatch points at the shared state. Cross-thread order comes
   from `sequence`, which parks an out-of-order arrival at the sequence head
-  for up to `PARK_TIMEOUT` (a fixed 10 s constant), then panics instead of
-  hanging. `sequence` orders consumption, not completion: use `Gate` — a
+  for up to `park_timeout()` (`PARK_TIMEOUT` unless `SP_PARK_TIMEOUT_MS`
+  overrides it), then panics instead of hanging. `sequence` orders
+  consumption, not completion: use `Gate` — a
   reusable boolean rendezvous (`Gate::new()`, shared with the workers) — to
   prove that one thread is inside dispatch before another proceeds.
   Assertions run at the last `Arc` drop, after the workers are joined.
@@ -238,8 +239,18 @@ library itself, so the path resolves there — the ungated form does not
 transfer to a consumer's `src/` under `[dev-dependencies]`, where the call
 site needs the gate or the seam.
 
-**Limitations (0.3.x).** The hook state is `Box::leak`ed: the guarded
-value's `Drop` does not run, and captured values live until the process ends.
+**Reclamation and ownership (0.4.0).** `install_guard`/`install_shared`
+own the state in an `Arc`; the last handle releases it, and the guarded
+value's `Drop` runs at guard drop (shared mode: at the last `Arc`), after
+the sync-point assertions. On a thread that is already unwinding the state
+is deliberately leaked instead, so a panicking destructor cannot abort the
+test binary. Captures of an `every` closure or an unfired fire-once are
+freed with the state; a fire-once that did fire is dropped when its slot is
+taken. A destructor assertion inside `T::drop` that used to be skipped now
+runs at guard drop, so a scenario that abandoned entries can fail there for
+the first time — treat that as a finding, not a regression. `Weak` and flag
+shapes still control the destructor's moment; they are no longer workarounds
+for a leak.
 The guarded type must be `Send + Sync + 'static` and mutate through `&self`.
 Hooks are side-effect only — they cannot change what the instrumented
 function returns. One hook per `invoke!` site: a fire is identified by hook
