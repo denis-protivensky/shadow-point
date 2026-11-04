@@ -1388,7 +1388,7 @@ macro_rules! define_sp {
                     if from_drop
                         && self
                             .reported
-                            .load(::std::sync::atomic::Ordering::Relaxed)
+                            .load(::std::sync::atomic::Ordering::SeqCst)
                     {
                         return;
                     }
@@ -1438,7 +1438,7 @@ macro_rules! define_sp {
                         );
                         drop(seq);
                         self.reported
-                            .store(true, ::std::sync::atomic::Ordering::Relaxed);
+                            .store(true, ::std::sync::atomic::Ordering::SeqCst);
                         if unwinding {
                             Self::report_while_unwinding(&message);
                         } else {
@@ -1468,11 +1468,11 @@ macro_rules! define_sp {
                             if shared { "shared, " } else { "" },
                             self.installed_at,
                         );
+                        self.reported.store(
+                            true,
+                            ::std::sync::atomic::Ordering::SeqCst,
+                        );
                         if unwinding {
-                            self.reported.store(
-                                true,
-                                ::std::sync::atomic::Ordering::Relaxed,
-                            );
                             Self::report_while_unwinding(&message);
                         } else {
                             // v0.3.1 raised this through `assert_eq!`, whose
@@ -1480,10 +1480,6 @@ macro_rules! define_sp {
                             // payload consumers match — the custom message is
                             // identical, so the whole payload is byte-for-byte
                             // what it was.
-                            self.reported.store(
-                                true,
-                                ::std::sync::atomic::Ordering::Relaxed,
-                            );
                             assert_eq!(actual, *expected, "{message}");
                         }
                     }
