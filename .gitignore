@@ -1,1 +1,3 @@
 /target
+/ci/consumer-docs/target
+/ci/consumer-docs/Cargo.lock

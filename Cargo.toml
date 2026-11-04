@@ -8,6 +8,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/denis-protivensky/shadow-point"
 keywords = ["testing", "concurrency", "sync-point", "hooks"]
 categories = ["development-tools::testing"]
+# CI-only consumer fixture for the generated-rustdoc gate.
+exclude = ["ci"]
 
 [dependencies]
 paste = "1.0"

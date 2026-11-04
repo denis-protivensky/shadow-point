@@ -50,6 +50,28 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  consumer-docs:
+    # `define_sp!` is not invoked in this crate's own `src/`, so `cargo doc`
+    # here never resolves a link inside the generated items. Rustdoc does not
+    # warn about such a link even with `-D warnings`; it renders a literal
+    # dead href. Document a consumer fixture and grep the rendered HTML.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - run: cargo doc --no-deps
+        working-directory: ci/consumer-docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: "Reject literal crate::/Self:: links in generated docs"
+        run: |
+          if grep -R -n -E 'href="(crate|Self)::' ci/consumer-docs/target/doc; then
+            echo "::error::generated rustdoc contains a literal crate::/Self:: href" >&2
+            exit 1
+          fi
+
   check32:
     # The floor without 64-bit atomics (a downstream consumer's `make
     # check32` compiles this crate as a dependency). `park_timeout()`'s
