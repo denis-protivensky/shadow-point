@@ -912,8 +912,8 @@ fn a_failed_verify_is_not_reported_again_by_drop() {
     g.fires(single::SingleSp::a, 7);
     let r = catch_unwind(AssertUnwindSafe(|| g.verify()));
     assert!(r.is_err(), "verify must fail");
-    // A caught verify failure still leaves the guard alive; dropping it must
-    // neither raise nor print the same mismatch a second time.
+    // A caught verify failure still leaves the guard alive; Drop must skip
+    // its remaining assertions rather than report the mismatch again.
     drop(g);
 }
 

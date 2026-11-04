@@ -846,14 +846,16 @@ macro_rules! define_sp {
                 /// # Registration
                 ///
                 /// - one-shot: `guard.<hook>(f)` — the hook must fire exactly
-                ///   once; the closure runs at most once, on the first fire
-                ///   that falls through to fire-once. A sequence entry or a
-                ///   failing predicate can consume that fire, in which case
-                ///   the closure never runs. Use `.fires(n)` when the
-                ///   scenario fires the hook a different number of times.
+                ///   once; the closure runs at most once, on the fire whose
+                ///   per-hook counter was 0 and whose sequence fell through
+                ///   to fire-once. A first fire consumed by a sequence entry
+                ///   or stopped by a failing predicate never runs the
+                ///   closure. Use `.fires(n)` when the scenario fires the
+                ///   hook a different number of times.
                 /// - counted one-shot: `guard.<hook>(f).fires(n)` — the hook
                 ///   must fire `n` times; the closure still runs at most
-                ///   once, on that first fall-through.
+                ///   once, on that same fire (counter 0, sequence fell
+                ///   through).
                 /// - ordered: `guard.sequence(|s| { s.a(f).b(g); })` — entries
                 ///   are consumed in order; unmatched fires panic if a later
                 ///   entry expects their hook.
@@ -1379,10 +1381,11 @@ macro_rules! define_sp {
                 /// entries and mismatched count expectations. `shared`
                 /// only marks the install mode in the panic location.
                 /// `from_drop` lets a failed `verify()` own the diagnostic:
-                /// `Drop` does not repeat it. Entries marked optional via
-                /// the deprecated `SeqBuilder::optional` (e.g. a trailing
-                /// sentinel) may remain unconsumed; every other entry — gated
-                /// or not — must have fired.
+                /// `Drop` skips the remaining assertions, including
+                /// mismatches `verify()` did not reach. Entries marked
+                /// optional via the deprecated `SeqBuilder::optional` (e.g. a
+                /// trailing sentinel) may remain unconsumed; every other
+                /// entry — gated or not — must have fired.
                 #[track_caller]
                 fn assert_fires(&self, shared: bool, from_drop: bool) {
                     if from_drop
@@ -1778,8 +1781,9 @@ macro_rules! define_sp {
             /// chain `.fires(n)` to pin how many times that hook must fire
             /// before the guard (or the last `Arc` of a shared sync point) is
             /// dropped. The count is for **all** hook fires, not closure
-            /// runs: a one-shot closure runs at most once, on the first fire
-            /// that falls through to fire-once. For the same hook, `.fires(n)`
+            /// runs: a one-shot closure runs at most once, on the fire whose
+            /// per-hook counter was 0 and whose sequence fell through to
+            /// fire-once. For the same hook, `.fires(n)`
             /// and `fires(hook, n)` write the same expectation; the last call
             /// wins. Dropping the handle without `.fires(n)` leaves the
             /// default exactly-one expectation in place — registration fills
@@ -1872,13 +1876,13 @@ macro_rules! define_sp {
                 $(
                     /// Register a fire-once closure for this hook.
                     ///
-                    /// The closure runs at most once, on the first fire of
-                    /// this hook that falls through to fire-once; a sequence
-                    /// entry or a failing predicate can consume that fire, in
-                    /// which case the closure never runs. The hook must fire
-                    /// exactly once. Chain `.fires(n)` to assert a different
-                    /// count; the count is the total number of hook fires,
-                    /// not closure runs.
+                    /// The closure runs at most once, on the fire whose
+                    /// per-hook counter was 0 and whose sequence fell through
+                    /// to fire-once. A first fire consumed by a sequence entry
+                    /// or stopped by a failing predicate never runs the
+                    /// closure. The hook must fire exactly once. Chain
+                    /// `.fires(n)` to assert a different count; the count is
+                    /// the total number of hook fires, not closure runs.
                     $vis fn $method(
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
@@ -1916,8 +1920,9 @@ macro_rules! define_sp {
                 /// Same checks as `Drop`; `Drop` remains the fallback. Call
                 /// it after the scenario (shared mode: after joining the
                 /// workers). A failure unwinds here, so the guarded value's
-                /// `Drop` does not run on that path, and `Drop` does not
-                /// repeat the diagnostic.
+                /// `Drop` does not run on that path. After a failure, `Drop`
+                /// skips the remaining assertions: `verify()` owns the
+                /// diagnostic, including mismatches it did not reach.
                 #[track_caller]
                 $vis fn verify(&self) {
                     self.__sp_state().assert_fires(false, false);
@@ -2025,13 +2030,13 @@ macro_rules! define_sp {
                 $(
                     /// Register a fire-once closure for this hook.
                     ///
-                    /// When the first fire of this hook falls through to
-                    /// fire-once, the closure is nondeterministic: the winner
-                    /// is whichever thread's call counter lands first, and the
-                    /// closure receives that thread's arguments. A sequence
-                    /// entry or a failing predicate can consume that fire, in
-                    /// which case the closure never runs. Use `sequence` for
-                    /// deterministic ordering.
+                    /// The closure runs at most once, on the fire whose
+                    /// per-hook counter was 0 and whose sequence fell through
+                    /// to fire-once. A first fire consumed by a sequence entry
+                    /// or stopped by a failing predicate never runs it. When
+                    /// it does run, the winner is nondeterministic: whichever
+                    /// thread's call lands first supplies the arguments. Use
+                    /// `sequence` for deterministic ordering.
                     $vis fn $method(
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
@@ -2069,7 +2074,9 @@ macro_rules! define_sp {
                 /// Same checks as the last-`Arc` drop; `Drop` remains the
                 /// fallback. Call it after joining the workers. A failure
                 /// unwinds here, so the guarded value's `Drop` does not run
-                /// on that path, and `Drop` does not repeat the diagnostic.
+                /// on that path. After a failure, `Drop` skips the remaining
+                /// assertions: `verify()` owns the diagnostic, including
+                /// mismatches it did not reach.
                 #[track_caller]
                 $vis fn verify(&self) {
                     self.__sp_state().assert_fires(true, false);

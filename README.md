@@ -93,9 +93,9 @@ mod tests {
     fn the_hook_runs_before_the_store() {
         let guard = RegisterSp::install_guard(Register(AtomicU32::new(0)));
 
-        // The closure runs at most once, on the first fire that reaches
-        // fire-once, with the call's arguments. Registration asserts exactly
-        // one HOOK fire; `.fires(n)` pins a different count.
+        // In this example the closure runs on the first fire, with the call's
+        // arguments. Registration asserts exactly one HOOK fire; `.fires(n)`
+        // pins a different count.
         guard.before_store(|_register, value| {
             assert_eq!(value, 7);
         });
@@ -146,8 +146,8 @@ most common wrong-mode mistake — those fires disappear.
 
 | Need | Current API |
 |---|---|
-| one-shot (exactly one) | `guard.<name>(f)` — the hook must fire exactly once; the closure runs at most once, on the first fire that falls through to fire-once |
-| one-shot, other count | `guard.<name>(f).fires(n)` — `n` is the hook's fire count; the closure still runs at most once, on that first fall-through |
+| one-shot (exactly one) | `guard.<name>(f)` — the hook must fire exactly once; the closure runs at most once, on the fire whose per-hook counter was 0 and whose sequence fell through to fire-once |
+| one-shot, other count | `guard.<name>(f).fires(n)` — `n` is the hook's fire count; the closure still runs at most once, on that same fire |
 | count only | `guard.fires(MySp::a, n)` |
 | assert now | `guard.verify()` — same checks as drop, at the call site |
 | every fire | `guard.every(\|e\| e.<name>(f))` |
@@ -158,13 +158,14 @@ most common wrong-mode mistake — those fires disappear.
 `<name>` is the hook name declared in `define_sp!`; `define_sp!` generates
 one registration method per hook, and the table covers the registration
 surface. **`.fires(n)` asserts how many times the hook fires, not how many
-times the closure runs.** A one-shot closure runs at most once, on the
-first fire of its hook that falls through to fire-once; a sequence entry or
-a failing predicate can consume that fire, so the closure may never run. An
-operation that retries (the CAS loop in the private example below) fires the
-hook again, so a correct trace can be two fires with one closure run — that
-is what `.fires(2)` pins. Without a chain, registration asserts exactly one
-fire; that default catches a missing fire *and* an extra one.
+times the closure runs.** A one-shot closure runs at most once, on the fire
+whose per-hook counter was 0 and whose sequence fell through to fire-once. A
+first fire consumed by a sequence entry or stopped by a failing predicate
+never runs the closure. An operation that retries (the CAS loop in the
+private example below) fires the hook again, so a correct trace can be two
+fires with one closure run — that is what `.fires(2)` pins. Without a chain,
+registration asserts exactly one fire; that default catches a missing fire
+*and* an extra one.
 
 In shared mode the count is the total across the whole shared state, not
 the winner's or one worker's: a hook that fires once per worker needs

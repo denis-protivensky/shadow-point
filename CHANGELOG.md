@@ -23,8 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `verify()` on both guard types: runs the same assertions as drop
   immediately, at the caller's location (`#[track_caller]`). Drop remains
   the fallback. A failed `verify()` unwinds before the guarded value's
-  destructor, so that destructor deliberately does not run on that path, and
-  `Drop` does not repeat the diagnostic.
+  destructor, so that destructor deliberately does not run on that path.
+  After a failure, Drop skips the remaining assertions: `verify()` owns the
+  diagnostic, including mismatches it did not reach.
 - `define_sp!` rejects hook names that collide with the generated surface
   (`sequence`, `every`, `expect_calls`, `fires`, `verify`, `install_guard`,
   `install_shared`, `install`, `with_dyn`, and `optional`) with a
