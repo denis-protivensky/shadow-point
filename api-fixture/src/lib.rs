@@ -22,6 +22,7 @@ shadow_point::define_sp! {
 /// Name the generated types, associated constants, trait, and builders.
 pub fn generated_surface_names() {
     let _hook: ApiHook = ApiSp::before_store;
+    let _flush_hook: ApiHook = ApiSp::flush;
     let _entry = ApiSp;
     let _guard: Option<ApiSpGuard<u32>> = None;
     let _shared: Option<ApiSharedSp<u32>> = None;
@@ -31,6 +32,14 @@ pub fn generated_surface_names() {
     let _expect: Option<SpExpect<'_, u32>> = None;
     let _trait_object: Option<&dyn ApiSyncPoint> = None;
     let _default_budget: Duration = shadow_point::PARK_TIMEOUT;
+    let _shared_entry = ApiSp::install_shared(0);
+    let _with_dyn: () = ApiSp::with_dyn(|_| ());
+}
+
+/// Name the generated trait methods.
+pub fn trait_methods(sp: &dyn ApiSyncPoint) {
+    sp.before_store(0);
+    sp.flush();
 }
 
 /// Name the 0.3.x registration, count, and optional sequence methods.
@@ -39,9 +48,16 @@ pub fn old_registration_surface(g: &ApiSpGuard<u32>, shared: &ApiSharedSp<u32>) 
     shared.expect_calls(ApiSp::before_store, 1);
 
     let _ = g.before_store(|_, _| ()).expect(1);
+    let _ = g.flush(|_| ()).expect(1);
+    let _ = shared.before_store(|_, _| ()).expect(1);
+    let _ = shared.flush(|_| ()).expect(1);
 
     g.sequence(|s| {
-        s.before_store(|_, _| ()).flush(|_| ()).optional();
+        s.before_store(|_, _| ())
+            .flush(|_| ())
+            .before_store_when(|_| true, |_, _| ())
+            .flush_when(|| true, |_| ())
+            .optional();
     });
     shared.sequence(|s| {
         s.before_store(|_, _| ()).flush(|_| ()).optional();
@@ -60,5 +76,6 @@ pub fn old_registration_surface(g: &ApiSpGuard<u32>, shared: &ApiSharedSp<u32>) 
 /// Name both constructors and a worker install.
 pub fn constructors(shared: &std::sync::Arc<ApiSharedSp<u32>>) {
     let _private = ApiSp::install_guard(0);
+    let _shared_entry = ApiSp::install_shared(0);
     let _worker = shared.install();
 }

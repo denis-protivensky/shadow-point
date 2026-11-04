@@ -133,6 +133,24 @@ macro_rules! __sp_reject_reserved {
              entry-point method `install_shared`"
         );
     };
+    (install) => {
+        ::core::compile_error!(
+            "`install` is a reserved hook name: it collides with the private guard \
+             constructor `install` and the shared per-worker `install`"
+        );
+    };
+    (with_dyn) => {
+        ::core::compile_error!(
+            "`with_dyn` is a reserved hook name: it collides with the generated \
+             entry-point method `with_dyn`"
+        );
+    };
+    (optional) => {
+        ::core::compile_error!(
+            "`optional` is a reserved hook name: it collides with the \
+             `SeqBuilder::optional` method (deprecated; removed in 0.5.0)"
+        );
+    };
     (fires) => {
         ::core::compile_error!(
             "`fires` is a reserved hook name: it collides with the generated \
@@ -651,10 +669,10 @@ impl Drop for ExecSink {
 /// # Reserved hook names
 ///
 /// The macro generates methods and associated constants named `sequence`,
-/// `every`, `expect_calls`, `fires`, `verify`, `install_guard`, and
-/// `install_shared`. A hook with one of those names would collide with the
-/// generated surface, so `define_sp!` rejects it with a `compile_error!`
-/// that names the hook:
+/// `every`, `expect_calls`, `fires`, `verify`, `install_guard`,
+/// `install_shared`, `install`, `with_dyn`, and `optional`. A hook with one
+/// of those names would collide with the generated surface, so `define_sp!`
+/// rejects it with a `compile_error!` that names the hook:
 ///
 /// ```compile_fail
 /// shadow_point::define_sp! { prefix Bad { sequence(), } }
@@ -1114,13 +1132,13 @@ macro_rules! define_sp {
 
             impl [<$prefix Hook>] {
                 /// Hook names indexed by discriminant.
-                const NAMES: &'static [&'static str] =
+                const __SP_NAMES: &'static [&'static str] =
                     &[$(stringify!($method)),+];
                 /// Number of hooks: the length of the counter arrays.
-                const COUNT: usize = Self::NAMES.len();
+                const __SP_COUNT: usize = Self::__SP_NAMES.len();
                 /// Shown in drop-time assertion failures.
                 fn name(&self) -> &'static str {
-                    Self::NAMES[*self as usize]
+                    Self::__SP_NAMES[*self as usize]
                 }
             }
 
@@ -1236,8 +1254,8 @@ macro_rules! define_sp {
                 // own slot, never a shared map. One slot per hook costs
                 // 24 bytes — a sync point with hundreds of hooks should go
                 // back to a map.
-                calls: [::std::sync::atomic::AtomicUsize; [<$prefix Hook>]::COUNT],
-                expected: ::std::sync::Mutex<[Option<usize>; [<$prefix Hook>]::COUNT]>,
+                calls: [::std::sync::atomic::AtomicUsize; [<$prefix Hook>]::__SP_COUNT],
+                expected: ::std::sync::Mutex<[Option<usize>; [<$prefix Hook>]::__SP_COUNT]>,
             }
 
             #[allow(dead_code)]
@@ -1265,7 +1283,7 @@ macro_rules! define_sp {
                             ::std::sync::atomic::AtomicUsize::new(0)
                         }),
                         expected: ::std::sync::Mutex::new(
-                            [None; [<$prefix Hook>]::COUNT]
+                            [None; [<$prefix Hook>]::__SP_COUNT]
                         ),
                     }
                 }
@@ -1429,7 +1447,7 @@ macro_rules! define_sp {
                         let message = format!(
                             "sync point hook `{}` fired {actual} \
                              time(s), expected {expected} ({}installed at {})",
-                            [<$prefix Hook>]::NAMES[i],
+                            [<$prefix Hook>]::__SP_NAMES[i],
                             if shared { "shared, " } else { "" },
                             self.installed_at,
                         );
@@ -1820,7 +1838,7 @@ macro_rules! define_sp {
                 /// The state behind the `Option`: every registration and
                 /// every deref reaches it here, so a guard that was moved
                 /// out of by `Drop` fails loudly instead of silently.
-                fn state(&self) -> &__Sp<T> {
+                fn __sp_state(&self) -> &__Sp<T> {
                     &self
                         .sp
                         .as_ref()
@@ -1838,7 +1856,7 @@ macro_rules! define_sp {
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
                     ) -> SpExpect<'_, T> {
-                        self.state().[< $method _once >](f)
+                        self.__sp_state().[< $method _once >](f)
                     }
                 )+
 
@@ -1847,23 +1865,23 @@ macro_rules! define_sp {
                 /// Each builder method pushes a closure that must fire in
                 /// registration order. Out-of-order fires panic.
                 $vis fn sequence(&self, f: impl FnOnce(&mut [<$prefix SeqBuilder>]<T>)) {
-                    self.state().build_sequence(f);
+                    self.__sp_state().build_sequence(f);
                 }
 
                 /// Register closures that fire on every invocation.
                 $vis fn every(&self, f: impl FnOnce(&mut EveryClosures<T>)) {
-                    self.state().set_every(f);
+                    self.__sp_state().set_every(f);
                 }
 
                 /// Assert that `hook` fires exactly `n` times before drop.
                 $vis fn fires(&self, hook: [<$prefix Hook>], n: usize) {
-                    self.state().set_expected(hook, n);
+                    self.__sp_state().set_expected(hook, n);
                 }
 
                 /// Deprecated alias for [`fires`](Self::fires).
                 #[deprecated(since = "0.4.0", note = "use `fires(hook, n)`; removed in 0.5.0")]
                 $vis fn expect_calls(&self, hook: [<$prefix Hook>], n: usize) {
-                    self.state().set_expected(hook, n);
+                    self.__sp_state().set_expected(hook, n);
                 }
 
                 /// Run the drop assertions now, at the caller's location.
@@ -1874,14 +1892,14 @@ macro_rules! define_sp {
                 /// `Drop` does not run on that path.
                 #[track_caller]
                 $vis fn verify(&self) {
-                    self.state().assert_fires(false);
+                    self.__sp_state().assert_fires(false);
                 }
             }
 
             impl<T: Send + Sync + 'static> std::ops::Deref for [<$prefix SpGuard>]<T> {
                 type Target = T;
                 fn deref(&self) -> &T {
-                    &self.state().value
+                    &self.__sp_state().value
                 }
             }
 
@@ -1965,15 +1983,15 @@ macro_rules! define_sp {
             impl<T: Send + Sync + 'static> [<$prefix SharedSp>]<T> {
                 /// The `Arc` the state is reached through: cloning it is
                 /// what a worker's TLS entry installs.
-                fn held(&self) -> &::std::sync::Arc<__Sp<T>> {
+                fn __sp_held(&self) -> &::std::sync::Arc<__Sp<T>> {
                     self.sp
                         .as_ref()
                         .expect("shadow-point: shared state used after drop")
                 }
 
                 /// The state behind the `Option`.
-                fn state(&self) -> &__Sp<T> {
-                    self.held()
+                fn __sp_state(&self) -> &__Sp<T> {
+                    self.__sp_held()
                 }
 
                 $(
@@ -1988,32 +2006,32 @@ macro_rules! define_sp {
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
                     ) -> SpExpect<'_, T> {
-                        self.state().[< $method _once >](f)
+                        self.__sp_state().[< $method _once >](f)
                     }
                 )+
 
                 /// Register an ordered sequence of hook fires across
                 /// threads. See `{$prefix}SpGuard::sequence`.
                 $vis fn sequence(&self, f: impl FnOnce(&mut [<$prefix SeqBuilder>]<T>)) {
-                    self.state().build_sequence(f);
+                    self.__sp_state().build_sequence(f);
                 }
 
                 /// Register closures that fire on every invocation (on the
                 /// firing thread, after the state locks are released).
                 $vis fn every(&self, f: impl FnOnce(&mut EveryClosures<T>)) {
-                    self.state().set_every(f);
+                    self.__sp_state().set_every(f);
                 }
 
                 /// Assert that `hook` fires exactly `n` times in total
                 /// before the last `Arc` clone is dropped.
                 $vis fn fires(&self, hook: [<$prefix Hook>], n: usize) {
-                    self.state().set_expected(hook, n);
+                    self.__sp_state().set_expected(hook, n);
                 }
 
                 /// Deprecated alias for [`fires`](Self::fires).
                 #[deprecated(since = "0.4.0", note = "use `fires(hook, n)`; removed in 0.5.0")]
                 $vis fn expect_calls(&self, hook: [<$prefix Hook>], n: usize) {
-                    self.state().set_expected(hook, n);
+                    self.__sp_state().set_expected(hook, n);
                 }
 
                 /// Run the drop assertions now, at the caller's location.
@@ -2024,7 +2042,7 @@ macro_rules! define_sp {
                 /// on that path.
                 #[track_caller]
                 $vis fn verify(&self) {
-                    self.state().assert_fires(true);
+                    self.__sp_state().assert_fires(true);
                 }
 
                 /// Install this sync point on the calling thread (TLS), so
@@ -2050,7 +2068,7 @@ macro_rules! define_sp {
                     // a dispatch; `_shared` is what holds the shared state
                     // until every worker has left.
                     let handle: ::std::sync::Arc<dyn [<$prefix SyncPoint>]> =
-                        self.held().clone();
+                        self.__sp_held().clone();
                     let old = __SP_TL.with(|__c| {
                         let mut slot = __c.borrow_mut();
                         slot.replace(handle)
@@ -2065,7 +2083,7 @@ macro_rules! define_sp {
             impl<T: Send + Sync + 'static> std::ops::Deref for [<$prefix SharedSp>]<T> {
                 type Target = T;
                 fn deref(&self) -> &T {
-                    &self.state().value
+                    &self.__sp_state().value
                 }
             }
 

@@ -1,0 +1,15 @@
+[package]
+name = "api-fixture-032"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Reuse the current fixture source, but compile it against the last released
+# 0.3.x surface. This keeps the fixture honest about what it claims to pin.
+[lib]
+path = "../../api-fixture/src/lib.rs"
+
+[dependencies]
+shadow-point = "=0.3.2"
+
+[workspace]

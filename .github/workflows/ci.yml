@@ -42,6 +42,8 @@ jobs:
     # `cargo public-api` on the crate cannot see what `define_sp!` expands.
     # This compile-only crate names every 0.3.x generated item and the
     # deprecated count/optional methods, so a removal or rename fails here.
+    # The second manifest compiles the same source against the last released
+    # 0.3.x so the fixture itself cannot drift onto 0.4-only names.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,6 +52,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --manifest-path api-fixture/Cargo.toml
+      - run: cargo check --manifest-path ci/api-fixture-032/Cargo.toml
 
   docs:
     runs-on: ubuntu-latest
