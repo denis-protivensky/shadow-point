@@ -192,7 +192,7 @@ fn a_typo_in_the_env_falls_back_and_says_so() {
     );
     assert_eq!(
         marker(&out, "SP_BAD_RESOLVED="),
-        shadow_point::PARK_TIMEOUT.as_millis(),
+        Duration::from_secs(10).as_millis(),
         "an unparsable value must not silently shorten what the suite proves"
     );
     assert!(
@@ -284,7 +284,7 @@ fn the_cache_honors_what_the_process_started_with() {
         {
             std::time::Duration::from_millis(raw.trim().parse().unwrap())
         }
-        _ => shadow_point::PARK_TIMEOUT,
+        _ => Duration::from_secs(10),
     };
     assert_eq!(shadow_point::park_timeout(), expected);
 }

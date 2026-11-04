@@ -10,7 +10,6 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-
 mod single {
     shadow_point::define_sp! {
         pub prefix Single
@@ -68,6 +67,7 @@ fn fire_b(v: u32) {
 }
 
 #[test]
+#[allow(deprecated)]
 fn sequence_out_of_order_panics() {
     let g = single::SingleSp::install_guard(());
     g.sequence(|s| {
@@ -101,7 +101,10 @@ fn when_predicate_gates_until_match_and_blocks_fire_once() {
     g.a({
         let fire_once = fire_once.clone();
         move |(), _| fire_once.inc()
-    });
+    })
+    // The hook fires twice (a(0), a(1)); the one-shot closure runs on
+    // neither, because the pending sequence entry suppresses it.
+    .fires(2);
     // a(0): predicate fails -> entry stays at the head; fire-once is NOT
     // triggered (the pending entry still expects this hook).
     shadow_point::invoke!(single::SingleSp, a(0));
@@ -115,6 +118,7 @@ fn when_predicate_gates_until_match_and_blocks_fire_once() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn optional_head_not_skipped_in_private_mode() {
     let g = single::SingleSp::install_guard(());
     g.sequence(|s| {
@@ -159,6 +163,7 @@ fn assert_ordering_panic(r: &std::thread::Result<()>, what: &str, tail: &str) {
 }
 
 #[test]
+#[allow(deprecated)]
 fn trailing_optional_entry_forgiven_at_drop() {
     let g = single::SingleSp::install_guard(());
     g.sequence(|s| {
@@ -171,7 +176,7 @@ fn trailing_optional_entry_forgiven_at_drop() {
 }
 
 #[test]
-fn fire_once_runs_once_and_expect_calls_pass() {
+fn fire_once_runs_once_and_fires_pass() {
     let g = single::SingleSp::install_guard(());
     let runs = C::new();
     let every = C::new();
@@ -179,7 +184,7 @@ fn fire_once_runs_once_and_expect_calls_pass() {
         let runs = runs.clone();
         move |(), _| runs.inc()
     })
-    .expect(3);
+    .fires(3);
     g.every(|e| {
         e.a({
             let every = every.clone();
@@ -196,9 +201,9 @@ fn fire_once_runs_once_and_expect_calls_pass() {
 
 #[test]
 #[should_panic(expected = "fired 2 time(s), expected 3")]
-fn expect_calls_mismatch_panics_at_drop() {
+fn fires_mismatch_panics_at_drop() {
     let g = single::SingleSp::install_guard(());
-    g.expect_calls(single::SingleSp::a, 3);
+    g.fires(single::SingleSp::a, 3);
     shadow_point::invoke!(single::SingleSp, a(0));
     shadow_point::invoke!(single::SingleSp, a(1));
     // Explicit drop: the assertion panic originates here, inside the scope.
@@ -252,7 +257,7 @@ fn guard_drop_assertion_does_not_abort_while_unwinding() {
 fn expect_mismatch_assertion_does_not_abort_while_unwinding() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let g = single::SingleSp::install_guard(());
-        g.expect_calls(single::SingleSp::a, 3);
+        g.fires(single::SingleSp::a, 3);
         shadow_point::invoke!(single::SingleSp, a(0));
         panic!("the test's own failure");
     }));
@@ -336,7 +341,7 @@ fn nested_invoke_of_same_sp_is_suppressed() {
             shadow_point::invoke!(single::SingleSp, a(9));
         }
     });
-    g.expect_calls(single::SingleSp::a, 1);
+    g.fires(single::SingleSp::a, 1);
     shadow_point::invoke!(single::SingleSp, a(0));
     assert_eq!(outer.get(), 1, "nested invoke must not re-run the closure");
     drop(g);
@@ -368,8 +373,8 @@ fn transitive_reentry_across_prefixes_a_b_a() {
             push(&log, "-b");
         }
     });
-    first.expect_calls(first::FirstSp::ping, 1);
-    second.expect_calls(second::SecondSp::ping, 1);
+    first.fires(first::FirstSp::ping, 1);
+    second.fires(second::SecondSp::ping, 1);
     shadow_point::invoke!(first::FirstSp, ping(0));
     assert_eq!(*log.lock().unwrap(), "A-B--b-a");
     drop(first);
@@ -459,7 +464,7 @@ fn guard_dropped_before_the_expected_panic_still_asserts() {
 fn raised_assertions_keep_their_payload_shape() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let g = single::SingleSp::install_guard(());
-        g.expect_calls(single::SingleSp::a, 3);
+        g.fires(single::SingleSp::a, 3);
         shadow_point::invoke!(single::SingleSp, a(0));
         drop(g);
     }));
@@ -572,7 +577,7 @@ fn a_fire_once_that_never_fired_is_freed_with_the_state() {
     let held = Arc::new(Mutex::new(0u32));
     let g = single::SingleSp::install_guard(());
     let h = held.clone();
-    g.a(move |(), _| drop(h)); // registered, never fired
+    g.a(move |(), _| drop(h)).fires(0); // registered, never fired
     drop(g);
     assert_eq!(
         Arc::strong_count(&held),
@@ -735,4 +740,176 @@ fn an_assertion_panic_does_not_run_the_value_destructor_mid_unwind() {
         before,
         "the state must leak when its own assertion unwinds, not free `T`"
     );
+}
+
+#[test]
+fn fire_once_without_a_count_expects_exactly_one() {
+    let g = single::SingleSp::install_guard(());
+    g.a(|(), _| ());
+    shadow_point::invoke!(single::SingleSp, a(0));
+    drop(g);
+}
+
+#[test]
+#[should_panic(expected = "fired 0 time(s), expected 1")]
+fn fire_once_default_rejects_no_fire() {
+    let g = single::SingleSp::install_guard(());
+    g.a(|(), _| ());
+    drop(g);
+}
+
+#[test]
+#[should_panic(expected = "fired 2 time(s), expected 1")]
+fn fire_once_default_rejects_a_second_fire() {
+    let g = single::SingleSp::install_guard(());
+    g.a(|(), _| ());
+    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::SingleSp, a(1));
+    drop(g);
+}
+
+#[test]
+fn explicit_count_before_registration_wins() {
+    let g = single::SingleSp::install_guard(());
+    g.fires(single::SingleSp::a, 2);
+    g.a(|(), _| ());
+    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::SingleSp, a(1));
+    drop(g);
+}
+
+#[test]
+fn explicit_count_after_registration_wins() {
+    let g = single::SingleSp::install_guard(());
+    g.a(|(), _| ()).fires(2);
+    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::SingleSp, a(1));
+    drop(g);
+}
+
+#[test]
+fn a_second_registration_keeps_the_explicit_count() {
+    let g = single::SingleSp::install_guard(());
+    let calls = C::new();
+    g.a(|(), _| ()).fires(2);
+    // The last registration replaces the closure; it must not reset the
+    // count slot back to the default one.
+    g.a({
+        let calls = calls.clone();
+        move |(), _| calls.inc()
+    });
+    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::SingleSp, a(1));
+    assert_eq!(
+        calls.get(),
+        1,
+        "the replacement closure runs on the first fire"
+    );
+    drop(g);
+}
+
+#[test]
+fn standalone_fires_zero_accepts_no_fire() {
+    let g = single::SingleSp::install_guard(());
+    g.fires(single::SingleSp::a, 0);
+    drop(g);
+}
+
+#[test]
+#[allow(deprecated)]
+fn explicit_zero_with_optional_in_either_order() {
+    // Count first, optional entry second.
+    let g = single::SingleSp::install_guard(());
+    g.fires(single::SingleSp::a, 0);
+    g.sequence(|s| {
+        s.a(|(), _| {}).optional();
+    });
+    drop(g);
+
+    // Optional entry first, count second.
+    let g = single::SingleSp::install_guard(());
+    g.sequence(|s| {
+        s.a(|(), _| {}).optional();
+    });
+    g.fires(single::SingleSp::a, 0);
+    drop(g);
+}
+
+#[test]
+#[should_panic(expected = "fired 2 time(s), expected 1")]
+fn every_does_not_set_a_count() {
+    let g = single::SingleSp::install_guard(());
+    let hits = C::new();
+    let hits2 = hits.clone();
+    g.every(|e| {
+        e.a(move |(), _| hits2.inc());
+    });
+    g.a(|(), _| ());
+    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::SingleSp, a(1));
+    assert_eq!(hits.get(), 2, "every runs on both fires");
+    drop(g);
+}
+
+#[test]
+fn verify_fails_before_drop_and_skips_the_value_destructor() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let g = single::SingleSp::install_guard(DropFlag(dropped.clone()));
+    g.fires(single::SingleSp::a, 7);
+    let r = catch_unwind(AssertUnwindSafe(|| g.verify()));
+    let err = r.expect_err("verify must fail before drop");
+    let msg = err
+        .downcast_ref::<String>()
+        .expect("a formatted panic message");
+    assert!(msg.contains("fired 0 time(s), expected 7"), "{msg}");
+    assert!(
+        !dropped.load(Ordering::SeqCst),
+        "a failed verify unwinds before the value's Drop"
+    );
+    // The failed verify left the state inconsistent; forget it rather than
+    // let Drop assert a second time on a non-unwinding path.
+    std::mem::forget(g);
+}
+
+#[test]
+fn verify_panic_points_at_the_caller() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let g = single::SingleSp::install_guard(());
+    g.fires(single::SingleSp::a, 7);
+    let slot = Arc::new(Mutex::new(None::<String>));
+    let prev = std::panic::take_hook();
+    {
+        let slot = slot.clone();
+        std::panic::set_hook(Box::new(move |info| {
+            let ours = info
+                .payload()
+                .downcast_ref::<String>()
+                .map_or(false, |m| m.contains("expected 7"));
+            if ours {
+                if let Some(loc) = info.location() {
+                    *slot.lock().unwrap() = Some(loc.file().to_string());
+                }
+            }
+        }));
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| g.verify()));
+    std::panic::set_hook(prev);
+    assert!(r.is_err(), "verify must fail");
+    let file = slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the hook saw the panic location");
+    assert!(
+        file.ends_with("tests/single_thread.rs"),
+        "verify must report the caller, not src/lib.rs: {file}"
+    );
+    std::mem::forget(g);
 }

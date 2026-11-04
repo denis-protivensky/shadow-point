@@ -16,10 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `fires` in both forms: `.fires(n)` on a fire-once registration and
+  `fires(hook, n)` without a closure. Both pin the number of **hook fires**
+  (not closure runs); they write the same expectation and the last call
+  wins.
+- `verify()` on both guard types: runs the same assertions as drop
+  immediately, at the caller's location (`#[track_caller]`). Drop remains
+  the fallback. A failed `verify()` unwinds before the guarded value's
+  destructor, so that destructor deliberately does not run on that path.
+- `define_sp!` rejects hook names that collide with the generated surface
+  (`sequence`, `every`, `expect_calls`, `fires`, `verify`, `install_guard`,
+  `install_shared`) with a `compile_error!` naming the hook.
 - `park_timeout()`, the value the shared-mode sequence actually parks for:
-  `PARK_TIMEOUT` unless `SP_PARK_TIMEOUT_MS` names milliseconds. The public
-  constant keeps its meaning and stays the default, so a consumer importing
-  it is untouched; the env is read once per process and cached in one atomic
+  ten seconds unless `SP_PARK_TIMEOUT_MS` names milliseconds. The
+  deprecated `PARK_TIMEOUT` keeps its meaning as the default value, so a
+  consumer importing it is untouched until 0.5.0; the env is read once per
+  process and cached in one atomic
   (no `unsafe`, no `OnceLock`, so MSRV 1.65 holds). The cache is `AtomicUsize`,
   not `AtomicU64`, so the function compiles on targets without 64-bit atomics
   (e.g. `armv5te`, the 32-bit floor consumers gate on). A value that does
@@ -36,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scheduler for a stuck head and fail a correct test.
 
 ### Changed
+- **Breaking (semantics): a fire-once registration without a count now
+  asserts exactly one hook fire.** A scenario that fired the hook zero times
+  or more than once used to pass silently; it now fails at drop (or at
+  `verify()`). `.fires(n)`/`fires(hook, n)` state a different count. An
+  explicit count wins in either order: registration fills the default only
+  when no count was set, under the same lock, so a concurrent explicit
+  `fires` cannot be overwritten. Shared-mode counts are totals across the
+  shared state, not one worker's. A second fire-once registration replaces
+  the closure but does not reset the count.
+  **Migration:** add `.fires(n)` where the hook fires more or fewer than
+  once. The `.expect(n)` form still compiles and behaves the same.
 - **Breaking (semantics): the sync-point state is reclaimed, not leaked.**
   `install_guard`/`install_shared` held it through `Box::leak`, so the
   guarded value's `Drop` never ran and everything a registration captured
@@ -75,6 +98,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of asserting that `PARK_TIMEOUT` is "not per-install configurable", and
   adds how to lower the budget — with the warning that it is a deadlock
   guard, so a short budget on a busy machine can fail a correct test.
+
+### Deprecated
+- `.expect(n)` → `.fires(n)`, `expect_calls(hook, n)` → `fires(hook, n)`,
+  `SeqBuilder::optional()` (use `fires(hook, 0)` or split the test; it can
+  skip an entry in shared mode depending on which thread fires first), and
+  `PARK_TIMEOUT` (use `park_timeout()`, which honors `SP_PARK_TIMEOUT_MS`).
+  All four still compile and keep their 0.3.x behavior; removal is 0.5.0.
+  `optional` was already weak in private mode and non-deterministic in shared
+  mode; deprecating it in a patch would break `-D warnings` consumers, so it
+  waits for the 0.4.0 minor.
 
 ## [0.3.3] - 2026-11-03
 

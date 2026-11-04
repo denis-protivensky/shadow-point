@@ -101,8 +101,60 @@ macro_rules! invoke {
     };
 }
 
-// --- trace_enabled ---
+// Reject hook names that collide with the method surface `define_sp!`
+// generates: registration methods, the sequence/every entry points, the
+// fire-once assertion, count helpers, and the entry-point constructors. The
+// rejected list is closed by design; checking a name is cheap and the message
+// names the offending hook.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __sp_reject_reserved {
+    (sequence) => {
+        ::core::compile_error!(
+            "`sequence` is a reserved hook name: it collides with the generated \
+             registration method `sequence`"
+        );
+    };
+    (every) => {
+        ::core::compile_error!(
+            "`every` is a reserved hook name: it collides with the generated \
+             registration method `every`"
+        );
+    };
+    (install_guard) => {
+        ::core::compile_error!(
+            "`install_guard` is a reserved hook name: it collides with the generated \
+             entry-point method `install_guard`"
+        );
+    };
+    (install_shared) => {
+        ::core::compile_error!(
+            "`install_shared` is a reserved hook name: it collides with the generated \
+             entry-point method `install_shared`"
+        );
+    };
+    (fires) => {
+        ::core::compile_error!(
+            "`fires` is a reserved hook name: it collides with the generated \
+             `fires` method and hook constant"
+        );
+    };
+    (expect_calls) => {
+        ::core::compile_error!(
+            "`expect_calls` is a reserved hook name: it collides with the \
+             generated `expect_calls` method (deprecated; removed in 0.5.0)"
+        );
+    };
+    (verify) => {
+        ::core::compile_error!(
+            "`verify` is a reserved hook name: it collides with the generated \
+             `verify` method"
+        );
+    };
+    ($other:ident) => {};
+}
 
+// --- trace_enabled ---
 /// Check whether sync-point tracing is enabled via the `SP_TRACE` environment
 /// variable. When set, every hook fire prints its name and call index to
 /// stderr — useful for discovering expected sequences and call counts.
@@ -358,6 +410,10 @@ impl Drop for CurrentFire {
 
 // --- Timeouts ---
 
+/// The default park budget behind [`PARK_TIMEOUT`] and [`park_timeout()`].
+/// Private so the crate's own code does not trip the deprecation.
+const DEFAULT_PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The default park budget: how long a thread parks in shared mode while the
 /// sequence head is a different hook. Parking is a mutual-deadlock guard,
 /// not a synchronization mechanism: threads re-check the sequence after
@@ -368,7 +424,11 @@ impl Drop for CurrentFire {
 /// This is also the value [`park_timeout()`] resolves to when
 /// `SP_PARK_TIMEOUT_MS` is unset — that function, not this constant, is what
 /// a shared-mode park actually waits on.
-pub const PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+///
+/// Deprecated since 0.4.0 and removed in 0.5.0: call [`park_timeout()`]
+/// instead, which honors the environment override.
+#[deprecated(since = "0.4.0", note = "use `park_timeout()`; removed in 0.5.0")]
+pub const PARK_TIMEOUT: std::time::Duration = DEFAULT_PARK_TIMEOUT;
 
 /// The "not resolved yet" marker in [`park_timeout`]'s cache. A millisecond
 /// count equal to or above it can never be published, so the resolver rejects
@@ -377,15 +437,15 @@ pub const PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10)
 /// and on 32-bit the ceiling is ~49 days.
 const UNRESOLVED_PARK_TIMEOUT: usize = usize::MAX;
 
-/// The park timeout the shared-mode sequence actually uses: [`PARK_TIMEOUT`]
-/// unless `SP_PARK_TIMEOUT_MS` names a number of milliseconds.
+/// The park timeout the shared-mode sequence actually uses: ten seconds by
+/// default unless `SP_PARK_TIMEOUT_MS` names a number of milliseconds.
 ///
-/// The constant stays the default and stays public: a consumer that imports
-/// it keeps compiling, and a library that silently failed to match the
-/// environment would be a worse neighbor than one that reads it once. The
-/// env is read on the first call and cached in an atomic, so the park path
-/// pays a relaxed load per wake, not a `getenv` — and `unsafe` is not needed
-/// (the crate forbids it, and MSRV 1.65 has no `OnceLock`).
+/// A consumer that imports the deprecated `PARK_TIMEOUT` keeps compiling
+/// until 0.5.0. A library that silently failed to match the environment
+/// would be a worse neighbor than one that reads it once. The env is read on
+/// the first call and cached in an atomic, so the park path pays a relaxed
+/// load per wake, not a `getenv` — and `unsafe` is not needed (the crate
+/// forbids it, and MSRV 1.65 has no `OnceLock`).
 ///
 /// A value that does not parse, is empty, or does not fit the internal
 /// cache (`usize::MAX` milliseconds or more — ~49 days on a 32-bit target)
@@ -443,7 +503,7 @@ fn resolve_park_timeout(raw: Result<String, std::env::VarError>) -> u64 {
         Err(std::env::VarError::NotPresent) => default_park_timeout_ms(),
         Err(_) => {
             note(format_args!(
-                "SP_PARK_TIMEOUT_MS is not valid UTF-8, using the default {PARK_TIMEOUT:?}"
+                "SP_PARK_TIMEOUT_MS is not valid UTF-8, using the default {DEFAULT_PARK_TIMEOUT:?}"
             ));
             default_park_timeout_ms()
         }
@@ -456,7 +516,7 @@ fn resolve_park_timeout(raw: Result<String, std::env::VarError>) -> u64 {
             Ok(ms) if ms >= UNRESOLVED_PARK_TIMEOUT as u64 => {
                 note(format_args!(
                     "SP_PARK_TIMEOUT_MS={ms} is too large to be a \
-timeout, using the default {PARK_TIMEOUT:?}"
+timeout, using the default {DEFAULT_PARK_TIMEOUT:?}"
                 ));
                 default_park_timeout_ms()
             }
@@ -464,7 +524,7 @@ timeout, using the default {PARK_TIMEOUT:?}"
             Err(_) => {
                 note(format_args!(
                     "SP_PARK_TIMEOUT_MS={raw:?} is not a number of milliseconds, \
-using the default {PARK_TIMEOUT:?}"
+using the default {DEFAULT_PARK_TIMEOUT:?}"
                 ));
                 default_park_timeout_ms()
             }
@@ -476,7 +536,7 @@ using the default {PARK_TIMEOUT:?}"
 /// ten seconds, so the conversion cannot fail; `try_from` keeps the cast out
 /// of the code (and off clippy's truncation lint).
 fn default_park_timeout_ms() -> u64 {
-    u64::try_from(PARK_TIMEOUT.as_millis())
+    u64::try_from(DEFAULT_PARK_TIMEOUT.as_millis())
         .expect("the default park budget, ten seconds in ms, fits in u64")
 }
 
@@ -549,12 +609,12 @@ impl Drop for ExecSink {
 /// | `trait {$prefix}SyncPoint` | extension trait with default (no-op) bodies |
 /// | `enum {$prefix}Hook` | hook identifiers; `Debug` prints the hook name |
 /// | `struct {$prefix}Sp` | entry point: `install_guard()`, `install_shared()`, `with_dyn()`, associated hook constants |
-/// | `struct {$prefix}SpGuard<T>` | private guard: `Deref`, fire-once/sequence/every registration, `expect_calls`, drop assertions |
+/// | `struct {$prefix}SpGuard<T>` | private guard: `Deref`, fire-once/sequence/every registration, `fires`, `verify`, drop assertions |
 /// | `struct {$prefix}SharedSp<T>` | shared state: same registration API plus `install()` per worker |
 /// | `struct {$prefix}SharedGuard<T>` | per-thread TLS install of a shared sync point |
 /// | `struct {$prefix}SeqBuilder<T>` | builder for `sequence(...)` |
 /// | `EveryClosures<T>` | builder for `every(...)` |
-/// | `SpExpect<'_, T>` | fire-once handle; chain `.expect(n)` |
+/// | `SpExpect<'_, T>` | fire-once handle; chain `.fires(n)` |
 ///
 /// The visibility token before `prefix` applies to every generated public
 /// item in the table; the internal machinery (`__Sp`, `__SpDefault`,
@@ -588,11 +648,23 @@ impl Drop for ExecSink {
 /// inside the module the bare name resolves. Production builds strip the
 /// `#[cfg(test)]` module before the path is resolved.
 ///
+/// # Reserved hook names
+///
+/// The macro generates methods and associated constants named `sequence`,
+/// `every`, `expect_calls`, `fires`, `verify`, `install_guard`, and
+/// `install_shared`. A hook with one of those names would collide with the
+/// generated surface, so `define_sp!` rejects it with a `compile_error!`
+/// that names the hook:
+///
+/// ```compile_fail
+/// shadow_point::define_sp! { prefix Bad { sequence(), } }
+/// ```
+///
 /// # Hook placement
 ///
 /// Give each `invoke!` site its own hook. A fire is identified by hook name
 /// alone, so two sites sharing a name are indistinguishable to `sequence`,
-/// `expect_calls`, and ordering diagnostics. Repeated fires of the *same*
+/// `fires`, and ordering diagnostics. Repeated fires of the *same*
 /// site are expected (loops, retries); distinguish them by arguments with
 /// `s.<hook>_when(pred, …)` on the sequence builder, not by extra hook names.
 ///
@@ -644,6 +716,14 @@ macro_rules! define_sp {
         }
     ) => {
         $crate::paste! {
+            // ── Reserved hook names ──────────────────────────────────
+            // Generated methods share the hook namespace: a hook named
+            // `sequence` would generate a second method of that name on
+            // every registration type. Reject the closed list up front.
+            const _: () = {
+                $( $crate::__sp_reject_reserved!($method); )+
+            };
+
             // ── Extension trait ───────────────────────────────────────
 
             /// The hook interface this sync point dispatches through.
@@ -703,7 +783,7 @@ macro_rules! define_sp {
                 $(
                     #[doc = concat!(
                         "The `", stringify!($method), "` hook's identifier: names \
-                        it for `expect_calls` without spelling the enum."
+                        it for `fires` without spelling the enum."
                     )]
                     $vis const $method: [<$prefix Hook>] = [<$prefix Hook>]::$method;
                 )+
@@ -748,24 +828,31 @@ macro_rules! define_sp {
                 /// # Registration
                 ///
                 /// - one-shot: `guard.<hook>(f)` — the closure runs on the
-                ///   first fire; no count is checked. The real method is the
-                ///   declared hook, e.g. `guard.before_insert(f)`.
-                /// - counted one-shot: `guard.<hook>(f).expect(n)` — the hook
+                ///   first fire, and the hook must fire exactly once. Use
+                ///   `.fires(n)` when the scenario fires it a different
+                ///   number of times.
+                /// - counted one-shot: `guard.<hook>(f).fires(n)` — the hook
                 ///   must fire `n` times; the closure still runs only once.
                 /// - ordered: `guard.sequence(|s| { s.a(f).b(g); })` — entries
                 ///   are consumed in order; unmatched fires panic if a later
                 ///   entry expects their hook.
                 /// - every fire: `guard.every(|e| e.a(f))` — runs on every
                 ///   non-suppressed fire of that hook.
-                /// - count only: `guard.expect_calls(hook, n)` — no closure.
+                /// - count only: `guard.fires(hook, n)` — no closure.
                 ///
                 /// A second fire-once registration for the same hook replaces
-                /// the first, and a second `every` closure for the same hook
-                /// replaces the first (last wins). A second
-                /// `sequence`/`every` call replaces the whole builder,
-                /// including hooks it does not mention. `.expect(n)` and
-                /// `expect_calls` write the same expectation; for the same
-                /// hook the last call wins.
+                /// the first closure; it does not reset the count slot. A
+                /// second `every` closure for the same hook replaces the
+                /// first (last wins). A second `sequence`/`every` call
+                /// replaces the whole builder, including hooks it does not
+                /// mention. `.fires(n)` and `fires(hook, n)` write the same
+                /// expectation; for the same hook the last call wins. An
+                /// explicit count wins in either order: registration fills
+                /// the default exactly-one only when no `fires` has set the
+                /// slot.
+                ///
+                /// `verify()` runs these assertions immediately at the call
+                /// site instead of at drop; drop remains the fallback.
                 ///
                 /// # Dispatch order
                 ///
@@ -808,15 +895,15 @@ macro_rules! define_sp {
                 /// threads can still report.
                 ///
                 /// Drop asserts that every mandatory sequence entry was
-                /// consumed and every count expectation matches. `.optional()`
-                /// entries are exempt. On a clean thread the assertion
-                /// panics; while the thread is already unwinding the same
-                /// diagnostic is printed to stderr with `(while unwinding)`
-                /// instead, so a failing test does not abort the whole
-                /// binary with a double panic. A `#[should_panic]` test
-                /// unwinds by design, so finish the scenario (or drop the
-                /// guard) before the expected panic if its assertions must
-                /// still raise.
+                /// consumed and every count expectation matches. Deprecated
+                /// `.optional()` entries are exempt. On a clean thread the
+                /// assertion panics; while the thread is already unwinding
+                /// the same diagnostic is printed to stderr with
+                /// `(while unwinding)` instead, so a failing test does not
+                /// abort the whole binary with a double panic. A
+                /// `#[should_panic]` test unwinds by design, so finish the
+                /// scenario (or drop the guard) before the expected panic if
+                /// its assertions must still raise.
                 ///
                 /// The diagnostics are one line each:
                 ///
@@ -892,19 +979,26 @@ macro_rules! define_sp {
                 /// Share a sync point across threads, returning an `Arc`
                 /// that drives hooks from any thread.
                 ///
-                /// Register `sequence`/`every`/`expect_calls`/fire-once on
-                /// the returned value from the test thread, then have every
+                /// Register `sequence`/`every`/`fires`/fire-once on the
+                /// returned value from the test thread, then have every
                 /// worker install it on its own thread via
                 /// `{$prefix}SharedSp::install()` before calling
                 /// instrumented code. `invoke!` then dispatches into the
                 /// shared state on the firing thread. Derefs to `&T`.
+                ///
+                /// A fire-once registration's count is the total across the
+                /// whole shared state, not the winner's: a hook that fires
+                /// once per worker needs `.fires(workers)`. `install_shared`
+                /// derefs to its own guard state; `verify()` can assert the
+                /// counts after joining the workers instead of at the last
+                /// `Arc` drop.
                 ///
                 /// # Lifecycle — six steps
                 ///
                 /// 1. **Install** on the test thread: `install_shared(value)`
                 ///    returns an `Arc<{$prefix}SharedSp<T>>`.
                 /// 2. **Register** `sequence`/`every`/fire-once/
-                ///    `expect_calls` before spawning workers. Registration is
+                ///    `fires` before spawning workers. Registration is
                 ///    lock-guarded and safe from any thread, but a fire that
                 ///    beats it falls through silently.
                 /// 3. **Bind each firing thread**: clone the `Arc` into the
@@ -1005,7 +1099,7 @@ macro_rules! define_sp {
             /// Identifiers for this sync point's hooks, one variant per
             /// declared hook. The discriminant indexes the per-hook counters
             /// and expectations, and [`Debug`] prints the hook's own name —
-            /// the spelling `expect_calls` takes.
+            /// the spelling `fires` takes.
             ///
             /// [`Debug`]: std::fmt::Debug
             #[repr(usize)]
@@ -1189,6 +1283,21 @@ macro_rules! define_sp {
                         [hook as usize] = Some(n);
                 }
 
+                /// Fill the count slot only when the test has not pinned a
+                /// count already. Registration must not clobber an explicit
+                /// `fires`; both paths take the same `expected` lock, so the
+                /// check-and-fill is one critical section.
+                fn set_expected_if_unset(&self, hook: [<$prefix Hook>], n: usize) {
+                    let mut expected = self
+                        .expected
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let slot = &mut expected[hook as usize];
+                    if slot.is_none() {
+                        *slot = Some(n);
+                    }
+                }
+
                 // ── Registration/assertion helpers ────────────────────
                 // The guard and the shared sync point expose the same
                 // registration API; the bodies live here so both wrappers
@@ -1219,6 +1328,7 @@ macro_rules! define_sp {
                     ) -> SpExpect<'_, T> {
                         *self.$method.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
                             Some(Box::new(f));
+                        self.set_expected_if_unset([<$prefix Hook>]::$method, 1);
                         SpExpect { sp: self, hook: [<$prefix Hook>]::$method }
                     }
                 )+
@@ -1241,11 +1351,13 @@ macro_rules! define_sp {
                 }
 
                 /// Drop-time assertions: unconsumed mandatory sequence
-                /// entries and mismatched `expect_calls` counts. `shared`
+                /// entries and mismatched count expectations. `shared`
                 /// only marks the install mode in the panic location.
-                /// Entries marked optional via `SeqBuilder::optional`
-                /// (e.g. a trailing sentinel) may remain unconsumed;
-                /// every other entry — gated or not — must have fired.
+                /// Entries marked optional via the deprecated
+                /// `SeqBuilder::optional` (e.g. a trailing sentinel) may
+                /// remain unconsumed; every other entry — gated or not —
+                /// must have fired.
+                #[track_caller]
                 fn assert_fires(&self, shared: bool) {
                     // Assertions of a test harness, not of production code:
                     // they must report, never take the run down with them.
@@ -1515,9 +1627,9 @@ macro_rules! define_sp {
             /// The `sequence` registration builder: one method per hook pushes
             /// a step that must fire in registration order; `*_when` variants
             /// additionally gate the step on a predicate over the fire's
-            /// arguments; `optional` marks the last step as allowed to stay
-            /// unconsumed. A step's closure runs on the firing thread at the
-            /// moment the sequence consumes it.
+            /// arguments; the deprecated `optional` marks the last step as
+            /// allowed to stay unconsumed. A step's closure runs on the
+            /// firing thread at the moment the sequence consumes it.
             ///
             /// # Dispatch
             ///
@@ -1533,10 +1645,10 @@ macro_rules! define_sp {
             /// fire does not arm fire-once. The predicate runs under the
             /// sequence lock in both modes and must be pure — no hook calls
             /// and no blocking. A mandatory entry left at drop fails the drop
-            /// assertion; [`optional`](Self::optional) exempts the most
-            /// recently pushed entry (typically a trailing sentinel). A
-            /// second `sequence(...)` call replaces the whole deque; it does
-            /// not append.
+            /// assertion; the deprecated [`optional`](Self::optional)
+            /// exempts the most recently pushed entry (typically a trailing
+            /// sentinel). A second `sequence(...)` call replaces the whole
+            /// deque; it does not append.
             #[allow(dead_code)]
             $vis struct [<$prefix SeqBuilder>]<T: Send + Sync + 'static> {
                 seq: ::std::collections::VecDeque<SeqEntry<T>>,
@@ -1571,9 +1683,11 @@ macro_rules! define_sp {
                     /// only some should advance the step.
                     ///
                     /// A gated entry must still be consumed: if it is left at
-                    /// the front at guard drop, the drop assertion fails. Chain
-                    /// [`optional`](Self::optional) if the entry may
-                    /// legitimately never fire (e.g. a trailing sentinel).
+                    /// the front at guard drop, the drop assertion fails. The
+                    /// deprecated [`optional`](Self::optional) may exempt an
+                    /// entry that legitimately never fires; prefer expressing
+                    /// "may not fire" with `fires(hook, 0)` or splitting the
+                    /// test.
                     ///
                     /// `pred` runs while the sequence lock is held: it must
                     /// be pure — no hook invocations and no blocking.
@@ -1596,7 +1710,17 @@ macro_rules! define_sp {
                 /// is a trailing sentinel that must panic only on an
                 /// unexpected extra fire.
                 ///
+                /// Deprecated since 0.4.0 and removed in 0.5.0: it hides an
+                /// unasserted branch and, in shared mode, can skip an entry
+                /// depending on which thread fires first. Express "may not
+                /// fire" with `fires(hook, 0)`, or split the test.
+                ///
                 /// Panics if no entries have been pushed yet.
+                #[deprecated(
+                    since = "0.4.0",
+                    note = "`optional` hides an unasserted branch and can skip an entry in shared mode; \
+                            use `fires(hook, 0)` or make the entry mandatory. Removed in 0.5.0."
+                )]
                 $vis fn optional(&mut self) -> &mut Self {
                     self.seq
                         .back_mut()
@@ -1609,14 +1733,15 @@ macro_rules! define_sp {
             // ── Fire-once fluent helper ───────────────────────────────
 
             /// The fluent handle returned by registering a fire-once closure:
-            /// chain `.expect(n)` to pin how many times that hook must fire
+            /// chain `.fires(n)` to pin how many times that hook must fire
             /// before the guard (or the last `Arc` of a shared sync point) is
             /// dropped. The count is for **all** hook fires, not closure
             /// runs: a one-shot closure still runs only on the first fire.
-            /// For the same hook, `.expect(n)` and `expect_calls(hook, n)`
-            /// write the same expectation; the last call wins. Dropping the
-            /// handle without `.expect(n)` leaves the one-shot registered —
-            /// it still runs on the first fire — and checks no count.
+            /// For the same hook, `.fires(n)` and `fires(hook, n)` write the
+            /// same expectation; the last call wins. Dropping the handle
+            /// without `.fires(n)` leaves the default exactly-one
+            /// expectation in place — registration fills the count only when
+            /// it is unset.
             #[allow(dead_code)]
             $vis struct SpExpect<'a, T: Send + Sync + 'static> {
                 sp: &'a __Sp<T>,
@@ -1626,6 +1751,12 @@ macro_rules! define_sp {
             #[allow(dead_code)]
             impl<T: Send + Sync + 'static> SpExpect<'_, T> {
                 /// Assert that the hook fires exactly `n` times.
+                $vis fn fires(self, n: usize) {
+                    self.sp.set_expected(self.hook, n);
+                }
+
+                /// Deprecated alias for [`fires`](Self::fires).
+                #[deprecated(since = "0.4.0", note = "use `.fires(n)`; removed in 0.5.0")]
                 $vis fn expect(self, n: usize) {
                     self.sp.set_expected(self.hook, n);
                 }
@@ -1636,7 +1767,7 @@ macro_rules! define_sp {
             /// Guard returned by `{$prefix}Sp::install_guard()`.
             ///
             /// Derefs to the guarded value. Drop asserts that all registered
-            /// sequences were consumed and all `expect_calls` counts match —
+            /// sequences were consumed and all `fires` counts match —
             /// raised on a clean thread, printed rather than raised while the
             /// thread is already unwinding. After the assertions, the guard
             /// releases the state: if it held the last reference, the
@@ -1699,9 +1830,10 @@ macro_rules! define_sp {
                 $(
                     /// Register a fire-once closure for this hook.
                     ///
-                    /// The closure runs on the first invocation. Chain
-                    /// `.expect(n)` to assert a specific call count, or drop
-                    /// the return for an unconditional one-shot.
+                    /// The closure runs on the first invocation, and the hook
+                    /// must fire exactly once. Chain `.fires(n)` to assert a
+                    /// different count; the count is the total number of hook
+                    /// fires, not closure runs.
                     $vis fn $method(
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
@@ -1724,8 +1856,25 @@ macro_rules! define_sp {
                 }
 
                 /// Assert that `hook` fires exactly `n` times before drop.
+                $vis fn fires(&self, hook: [<$prefix Hook>], n: usize) {
+                    self.state().set_expected(hook, n);
+                }
+
+                /// Deprecated alias for [`fires`](Self::fires).
+                #[deprecated(since = "0.4.0", note = "use `fires(hook, n)`; removed in 0.5.0")]
                 $vis fn expect_calls(&self, hook: [<$prefix Hook>], n: usize) {
                     self.state().set_expected(hook, n);
+                }
+
+                /// Run the drop assertions now, at the caller's location.
+                ///
+                /// Same checks as `Drop`; `Drop` remains the fallback. Call
+                /// it after the scenario (shared mode: after joining the
+                /// workers). A failure unwinds here, so the guarded value's
+                /// `Drop` does not run on that path.
+                #[track_caller]
+                $vis fn verify(&self) {
+                    self.state().assert_fires(false);
                 }
             }
 
@@ -1792,12 +1941,12 @@ macro_rules! define_sp {
             /// Sync point shared across threads, returned by
             /// `{$prefix}Sp::install_shared()`.
             ///
-            /// Register `sequence`/`every`/fire-once/`expect_calls` from the
+            /// Register `sequence`/`every`/fire-once/`fires` from the
             /// test thread before spawning workers, then call
             /// [`install`](Self::install) in every worker that must drive
             /// the hooks. Derefs to the shared value. Drop (of the last
             /// `Arc` clone) asserts that all registered sequences were
-            /// consumed and all `expect_calls` counts match — same
+            /// consumed and all `fires` counts match — same
             /// assertions, in the same order and on the same
             /// raise-or-print rule, as `{$prefix}SpGuard` — and then
             /// releases the shared value, whose own `Drop` runs at that
@@ -1857,8 +2006,25 @@ macro_rules! define_sp {
 
                 /// Assert that `hook` fires exactly `n` times in total
                 /// before the last `Arc` clone is dropped.
+                $vis fn fires(&self, hook: [<$prefix Hook>], n: usize) {
+                    self.state().set_expected(hook, n);
+                }
+
+                /// Deprecated alias for [`fires`](Self::fires).
+                #[deprecated(since = "0.4.0", note = "use `fires(hook, n)`; removed in 0.5.0")]
                 $vis fn expect_calls(&self, hook: [<$prefix Hook>], n: usize) {
                     self.state().set_expected(hook, n);
+                }
+
+                /// Run the drop assertions now, at the caller's location.
+                ///
+                /// Same checks as the last-`Arc` drop; `Drop` remains the
+                /// fallback. Call it after joining the workers. A failure
+                /// unwinds here, so the guarded value's `Drop` does not run
+                /// on that path.
+                #[track_caller]
+                $vis fn verify(&self) {
+                    self.state().assert_fires(true);
                 }
 
                 /// Install this sync point on the calling thread (TLS), so
@@ -1983,7 +2149,7 @@ mod tests {
     fn park_timeout_defaults_to_the_constant() {
         assert_eq!(
             Duration::from_millis(resolve_park_timeout(Err(std::env::VarError::NotPresent))),
-            PARK_TIMEOUT
+            DEFAULT_PARK_TIMEOUT
         );
     }
 
@@ -2012,9 +2178,9 @@ mod tests {
             Ok(raw) => match raw.trim().parse::<u64>() {
                 Ok(ms) if ms < UNRESOLVED_PARK_TIMEOUT as u64 => Duration::from_millis(ms),
                 // The sentinel is refused, so the cache must hold the default.
-                _ => PARK_TIMEOUT,
+                _ => DEFAULT_PARK_TIMEOUT,
             },
-            Err(_) => PARK_TIMEOUT,
+            Err(_) => DEFAULT_PARK_TIMEOUT,
         };
         let t = park_timeout();
         assert_eq!(
@@ -2033,7 +2199,7 @@ mod tests {
             Duration::from_millis(resolve_park_timeout(
                 Ok(UNRESOLVED_PARK_TIMEOUT.to_string())
             )),
-            PARK_TIMEOUT,
+            DEFAULT_PARK_TIMEOUT,
             "the cache's marker is never a timeout"
         );
     }
@@ -2055,7 +2221,7 @@ mod tests {
         if let Some(above) = (UNRESOLVED_PARK_TIMEOUT as u64).checked_add(1) {
             assert_eq!(
                 Duration::from_millis(resolve_park_timeout(Ok(above.to_string()))),
-                PARK_TIMEOUT,
+                DEFAULT_PARK_TIMEOUT,
                 "a value above the cache's capacity must not be published"
             );
         }
@@ -2067,7 +2233,7 @@ mod tests {
         for bad in ["", "abc", "-5", "10.5", "1_000"] {
             assert_eq!(
                 Duration::from_millis(resolve_park_timeout(Ok(bad.into()))),
-                PARK_TIMEOUT,
+                DEFAULT_PARK_TIMEOUT,
                 "{bad:?} is not a number of milliseconds"
             );
         }
@@ -2075,7 +2241,7 @@ mod tests {
             Duration::from_millis(resolve_park_timeout(Err(std::env::VarError::NotUnicode(
                 "not utf8".into()
             )))),
-            PARK_TIMEOUT
+            DEFAULT_PARK_TIMEOUT
         );
     }
 }
