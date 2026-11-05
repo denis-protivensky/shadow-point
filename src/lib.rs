@@ -101,11 +101,10 @@ macro_rules! invoke {
     };
 }
 
-// Reject hook names that collide with the method surface `define_sp!`
-// generates: registration methods, the sequence/every entry points, the
-// fire-once assertion, count helpers, and the entry-point constructors. The
-// rejected list is closed by design; checking a name is cheap and the message
-// names the offending hook.
+// Reject hook names that collide with the generated surface: registration
+// methods, entry points, fire-once/count helpers, and the fixed private
+// state fields. The list is closed for those names; the pairwise
+// `<other>_when` collision is documented, not checked here.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __sp_reject_reserved {
@@ -149,6 +148,54 @@ macro_rules! __sp_reject_reserved {
         ::core::compile_error!(
             "`optional` is a reserved hook name: it collides with the \
              `SeqBuilder::optional` method (deprecated; removed in 0.5.0)"
+        );
+    };
+    (value) => {
+        ::core::compile_error!(
+            "`value` is a reserved hook name: it collides with the private \
+             guarded-value field"
+        );
+    };
+    (calls) => {
+        ::core::compile_error!(
+            "`calls` is a reserved hook name: it collides with the private \
+             per-hook counter array"
+        );
+    };
+    (expected) => {
+        ::core::compile_error!(
+            "`expected` is a reserved hook name: it collides with the private \
+             per-hook expectation array"
+        );
+    };
+    (shared) => {
+        ::core::compile_error!(
+            "`shared` is a reserved hook name: it collides with the private \
+             install-mode field"
+        );
+    };
+    (installed_at) => {
+        ::core::compile_error!(
+            "`installed_at` is a reserved hook name: it collides with the \
+             private install-site field"
+        );
+    };
+    (sequence_cv) => {
+        ::core::compile_error!(
+            "`sequence_cv` is a reserved hook name: it collides with the \
+             private sequence condvar"
+        );
+    };
+    (__SP_NAMES) => {
+        ::core::compile_error!(
+            "`__SP_NAMES` is a reserved hook name: it collides with the \
+             generated hook-name table"
+        );
+    };
+    (__SP_COUNT) => {
+        ::core::compile_error!(
+            "`__SP_COUNT` is a reserved hook name: it collides with the \
+             generated hook-count constant"
         );
     };
     (fires) => {
@@ -208,8 +255,8 @@ pub fn trace_enabled() -> bool {
 /// the test body. `wait_timeout`/`must_wait` accept any duration, zero
 /// included: zero inspects the flag without waiting, and
 /// `must_wait(Duration::ZERO)` fails the test at once when the gate is
-/// unset. Shared-mode parking uses [`park_timeout()`], which is
-/// [`PARK_TIMEOUT`] unless `SP_PARK_TIMEOUT_MS` overrides it.
+/// unset. Shared-mode parking uses [`park_timeout()`], which honors
+/// `SP_PARK_TIMEOUT_MS` and otherwise defaults to ten seconds.
 ///
 /// The gate is panic-safe: a poisoned lock (a panicking waiter) is
 /// transparently recovered via [`into_inner`](std::sync::PoisonError::into_inner).
@@ -670,9 +717,15 @@ impl Drop for ExecSink {
 ///
 /// The macro generates methods and associated constants named `sequence`,
 /// `every`, `expect_calls`, `fires`, `verify`, `install_guard`,
-/// `install_shared`, `install`, `with_dyn`, and `optional`. A hook with one
-/// of those names would collide with the generated surface, so `define_sp!`
-/// rejects it with a `compile_error!` that names the hook:
+/// `install_shared`, `install`, `with_dyn`, and `optional`, plus the private
+/// state fields `value`, `calls`, `expected`, `shared`, `installed_at`, and
+/// `sequence_cv`, and the internal `__SP_NAMES`/`__SP_COUNT` constants. A
+/// hook with one of those names would collide with the generated surface, so
+/// `define_sp!` rejects it with a `compile_error!` that names the hook.
+///
+/// A hook named `<other>_when` also collides with the gated sequence step
+/// generated for `<other>`; that pairwise restriction is not checked by this
+/// list. Avoid declaring both hooks in one sync point.
 ///
 /// ```compile_fail
 /// shadow_point::define_sp! { prefix Bad { sequence(), } }
@@ -1263,7 +1316,7 @@ macro_rules! define_sp {
                 expected: ::std::sync::Mutex<[Option<usize>; [<$prefix Hook>]::__SP_COUNT]>,
                 // Set before a failed `verify()` reports; `Drop` must not
                 // repeat the same diagnostic while the guard unwinds.
-                reported: ::std::sync::atomic::AtomicBool,
+                __sp_reported: ::std::sync::atomic::AtomicBool,
             }
 
             #[allow(dead_code)]
@@ -1293,7 +1346,7 @@ macro_rules! define_sp {
                         expected: ::std::sync::Mutex::new(
                             [None; [<$prefix Hook>]::__SP_COUNT]
                         ),
-                        reported: ::std::sync::atomic::AtomicBool::new(false),
+                        __sp_reported: ::std::sync::atomic::AtomicBool::new(false),
                     }
                 }
 
@@ -1390,7 +1443,7 @@ macro_rules! define_sp {
                 fn assert_fires(&self, shared: bool, from_drop: bool) {
                     if from_drop
                         && self
-                            .reported
+                            .__sp_reported
                             .load(::std::sync::atomic::Ordering::SeqCst)
                     {
                         return;
@@ -1440,7 +1493,7 @@ macro_rules! define_sp {
                             self.installed_at,
                         );
                         drop(seq);
-                        self.reported
+                        self.__sp_reported
                             .store(true, ::std::sync::atomic::Ordering::SeqCst);
                         if unwinding {
                             Self::report_while_unwinding(&message);
@@ -1471,7 +1524,7 @@ macro_rules! define_sp {
                             if shared { "shared, " } else { "" },
                             self.installed_at,
                         );
-                        self.reported.store(
+                        self.__sp_reported.store(
                             true,
                             ::std::sync::atomic::Ordering::SeqCst,
                         );

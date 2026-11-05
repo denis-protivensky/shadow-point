@@ -28,10 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diagnostic, including mismatches it did not reach.
 - `define_sp!` rejects hook names that collide with the generated surface
   (`sequence`, `every`, `expect_calls`, `fires`, `verify`, `install_guard`,
-  `install_shared`, `install`, `with_dyn`, and `optional`) with a
-  `compile_error!` naming the hook. Hooks named `fires` or `verify`
-  compiled on 0.3.x; rename them. The other reserved names already
-  collided with 0.3.x's generated surface.
+  `install_shared`, `install`, `with_dyn`, `optional`, the private state
+  fields `value`, `calls`, `expected`, `shared`, `installed_at`,
+  `sequence_cv`, and the internal `__SP_NAMES`/`__SP_COUNT` constants) with
+  a `compile_error!` naming the hook. A pair of hooks where one is
+  `<other>_when` still collides pairwise; that restriction is documented but
+  not checked by the list. Hooks named `fires`, `verify`, `__SP_NAMES`, or
+  `__SP_COUNT` are new rejections; rename them. The other reserved names
+  already collided with 0.3.x's generated surface.
 - `park_timeout()`, the value the shared-mode sequence actually parks for:
   ten seconds unless `SP_PARK_TIMEOUT_MS` names milliseconds. The
   deprecated `PARK_TIMEOUT` keeps its meaning as the default value, so a
@@ -84,9 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2.5 ns (test-only path).
   **Migration:** a test whose guarded value asserts inside its own `Drop`
   used to have that assertion silently skipped and now runs it, after the
-  sync-point assertions. Verified against a real consumer's whole
-  shadow-point suite: **0 tests changed verdict** (54 passed), so this is a
-  risk to check, not a cost measured in the wild.
+  sync-point assertions. Treat a new failure there as a finding, not a
+  regression in the harness.
   The `Weak` and flag shapes are reframed as choices about the destructor's
   *moment* rather than workarounds for a leak; the API list's "Leaks
   per-install state" entry, the `'static` bound's rationale and the generated

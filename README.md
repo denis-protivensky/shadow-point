@@ -183,8 +183,8 @@ entry depending on which thread fires first — so assert "may not fire" with
 ## Migrating from 0.3.x
 
 0.4.0 is source-compatible with 0.3.x for code that does not declare a
-hook named `fires` or `verify`, but it changes one default, reclaims the
-sync-point state, and deprecates four names:
+hook named `fires`, `verify`, `__SP_NAMES`, or `__SP_COUNT`, but it changes
+one default, reclaims the sync-point state, and deprecates four names:
 
 - A fire-once registration without a count now asserts **exactly one** hook
   fire. Add `.fires(n)` to a trace that fires the hook a different number of
@@ -195,9 +195,11 @@ sync-point state, and deprecates four names:
   assertion silently skipped; it now runs there. On a thread that is already
   unwinding the state is deliberately leaked. See "Reclamation and ownership
   (0.4.0)" below.
-- A hook named `fires` or `verify` is now rejected by `define_sp!` with a
-  `compile_error!`; rename the hook. The other reserved names already
-  collided with 0.3.x's generated surface.
+- A hook named `fires`, `verify`, `__SP_NAMES`, or `__SP_COUNT` is now
+  rejected by `define_sp!` with a `compile_error!`; rename the hook. The
+  other reserved names already collided with 0.3.x's generated surface.
+  A hook named `<other>_when` collides with the gated step for `<other>`;
+  avoid declaring that pair.
 - `.expect(n)` → `.fires(n)`; `.expect_calls(hook, n)` → `fires(hook, n)`.
   The old names still compile and behave identically, with a deprecation
   warning; they are removed in 0.5.0.
