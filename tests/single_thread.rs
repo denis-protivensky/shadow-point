@@ -945,7 +945,7 @@ fn explicit_zero_with_optional_in_either_order() {
 
 #[test]
 #[should_panic(expected = "fired 2 time(s), expected 1")]
-fn every_does_not_set_a_count() {
+fn every_and_fire_once_default_counts() {
     let g = single::SingleSp::install_guard(());
     let hits = C::new();
     let hits2 = hits.clone();

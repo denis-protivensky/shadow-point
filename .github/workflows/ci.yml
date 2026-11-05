@@ -75,7 +75,7 @@ jobs:
             echo "::error::reserved-name fixture compiled"
             exit 1
           fi
-          for name in sequence value install; do
+          for name in sequence value install __sp_state __sp_reported; do
             grep -F "\`$name\` is a reserved hook name" reserved-name.err
           done
 

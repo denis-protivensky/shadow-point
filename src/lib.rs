@@ -198,6 +198,24 @@ macro_rules! __sp_reject_reserved {
              generated hook-count constant"
         );
     };
+    (__sp_state) => {
+        ::core::compile_error!(
+            "`__sp_state` is a reserved hook name: it collides with the \
+             private state accessor on the guard and the shared sync point"
+        );
+    };
+    (__sp_held) => {
+        ::core::compile_error!(
+            "`__sp_held` is a reserved hook name: it collides with the \
+             private shared-state accessor"
+        );
+    };
+    (__sp_reported) => {
+        ::core::compile_error!(
+            "`__sp_reported` is a reserved hook name: it collides with the \
+             private verify-report flag"
+        );
+    };
     (fires) => {
         ::core::compile_error!(
             "`fires` is a reserved hook name: it collides with the generated \
@@ -718,9 +736,10 @@ impl Drop for ExecSink {
 /// The macro generates methods and associated constants named `sequence`,
 /// `every`, `expect_calls`, `fires`, `verify`, `install_guard`,
 /// `install_shared`, `install`, `with_dyn`, and `optional`, plus the private
-/// state fields `value`, `calls`, `expected`, `shared`, `installed_at`, and
-/// `sequence_cv`, and the internal `__SP_NAMES`/`__SP_COUNT` constants. A
-/// hook with one of those names would collide with the generated surface, so
+/// state fields `value`, `calls`, `expected`, `shared`, `installed_at`,
+/// `sequence_cv`, and `__sp_reported`, the private `__sp_state`/`__sp_held`
+/// accessors, and the internal `__SP_NAMES`/`__SP_COUNT` constants. A hook
+/// with one of those names would collide with the generated surface, so
 /// `define_sp!` rejects it with a `compile_error!` that names the hook.
 ///
 /// A hook named `<other>_when` also collides with the gated sequence step

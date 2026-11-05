@@ -9,5 +9,7 @@ shadow_point::define_sp! {
         sequence(),
         value(),
         install(),
+        __sp_state(),
+        __sp_reported(),
     }
 }

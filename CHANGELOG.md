@@ -30,12 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`sequence`, `every`, `expect_calls`, `fires`, `verify`, `install_guard`,
   `install_shared`, `install`, `with_dyn`, `optional`, the private state
   fields `value`, `calls`, `expected`, `shared`, `installed_at`,
-  `sequence_cv`, and the internal `__SP_NAMES`/`__SP_COUNT` constants) with
-  a `compile_error!` naming the hook. A pair of hooks where one is
+  `sequence_cv`, and `__sp_reported`, the private `__sp_state`/`__sp_held`
+  accessors, and the internal `__SP_NAMES`/`__SP_COUNT` constants) with a
+  `compile_error!` naming the hook. A pair of hooks where one is
   `<other>_when` still collides pairwise; that restriction is documented but
-  not checked by the list. Hooks named `fires`, `verify`, `__SP_NAMES`, or
-  `__SP_COUNT` are new rejections; rename them. The other reserved names
-  already collided with 0.3.x's generated surface.
+  not checked by the list. Hooks named `fires`, `verify`, `__SP_NAMES`,
+  `__SP_COUNT`, `__sp_state`, `__sp_held`, or `__sp_reported` are new
+  rejections; rename them. The other reserved names already collided with
+  0.3.x's generated surface.
 - `park_timeout()`, the value the shared-mode sequence actually parks for:
   ten seconds unless `SP_PARK_TIMEOUT_MS` names milliseconds. The
   deprecated `PARK_TIMEOUT` keeps its meaning as the default value, so a
@@ -88,8 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2.5 ns (test-only path).
   **Migration:** a test whose guarded value asserts inside its own `Drop`
   used to have that assertion silently skipped and now runs it, after the
-  sync-point assertions. Treat a new failure there as a finding, not a
-  regression in the harness.
+  sync-point assertions. A downstream migration check found 0 of 54 tests
+  changed verdict; that is the author's measurement, not reproducible from
+  this repository. Treat a new failure there as a finding, not a regression
+  in the harness.
   The `Weak` and flag shapes are reframed as choices about the destructor's
   *moment* rather than workarounds for a leak; the API list's "Leaks
   per-install state" entry, the `'static` bound's rationale and the generated
