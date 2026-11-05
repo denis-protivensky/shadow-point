@@ -55,6 +55,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --check --manifest-path api-fixture/Cargo.toml
       - run: cargo fmt --check --manifest-path ci/api-fixture-032/Cargo.toml
+      - run: cargo clippy --manifest-path api-fixture/Cargo.toml -- -D warnings
+      - run: cargo clippy --manifest-path ci/api-fixture-032/Cargo.toml -- -D warnings
       - run: cargo check --manifest-path api-fixture/Cargo.toml
       - run: cargo check --manifest-path ci/api-fixture-032/Cargo.toml
 
@@ -106,6 +108,7 @@ jobs:
         with:
           workspaces: ci/consumer-docs
       - run: cargo fmt --check --manifest-path ci/consumer-docs/Cargo.toml
+      - run: cargo clippy --manifest-path ci/consumer-docs/Cargo.toml -- -D warnings
       - run: cargo doc --no-deps
         working-directory: ci/consumer-docs
         env:

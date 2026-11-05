@@ -47,10 +47,10 @@ pub fn old_registration_surface(g: &ApiSpGuard<u32>, shared: &ApiSharedSp<u32>) 
     g.expect_calls(ApiSp::before_store, 1);
     shared.expect_calls(ApiSp::before_store, 1);
 
-    let _ = g.before_store(|_, _| ()).expect(1);
-    let _ = g.flush(|_| ()).expect(1);
-    let _ = shared.before_store(|_, _| ()).expect(1);
-    let _ = shared.flush(|_| ()).expect(1);
+    g.before_store(|_, _| ()).expect(1);
+    g.flush(|_| ()).expect(1);
+    shared.before_store(|_, _| ()).expect(1);
+    shared.flush(|_| ()).expect(1);
 
     g.sequence(|s| {
         s.before_store(|_, _| ())
