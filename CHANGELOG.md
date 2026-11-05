@@ -16,10 +16,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `fires` in both forms: `.fires(n)` on a fire-once registration and
+  `fires(hook, n)` without a closure. Both pin the number of **hook fires**
+  (not closure runs); they write the same expectation and the last call
+  wins.
+- `verify()` on both guard types: runs the same assertions as drop
+  immediately, at the caller's location (`#[track_caller]`). Drop remains
+  the fallback. A failed `verify()` unwinds before the guarded value's
+  destructor, so that destructor deliberately does not run on that path.
+  After a failure, Drop skips the remaining assertions: `verify()` owns the
+  diagnostic, including mismatches it did not reach.
+- `define_sp!` rejects hook names that collide with the generated surface
+  (`sequence`, `every`, `expect_calls`, `fires`, `verify`, `install_guard`,
+  `install_shared`, `install`, `with_dyn`, `optional`, the private state
+  fields `value`, `calls`, `expected`, `shared`, `installed_at`,
+  `sequence_cv`, and `__sp_reported`, the private `__sp_state`/`__sp_held`
+  accessors, and the internal `__SP_NAMES`/`__SP_COUNT` constants) with a
+  `compile_error!` naming the hook. A pair of hooks where one is
+  `<other>_when` still collides pairwise; that restriction is documented but
+  not checked by the list. Hooks named `fires`, `verify`, `__SP_NAMES`,
+  `__SP_COUNT`, `__sp_state`, `__sp_held`, or `__sp_reported` are new
+  rejections; rename them. The other reserved names already collided with
+  0.3.x's generated surface.
 - `park_timeout()`, the value the shared-mode sequence actually parks for:
-  `PARK_TIMEOUT` unless `SP_PARK_TIMEOUT_MS` names milliseconds. The public
-  constant keeps its meaning and stays the default, so a consumer importing
-  it is untouched; the env is read once per process and cached in one atomic
+  ten seconds unless `SP_PARK_TIMEOUT_MS` names milliseconds. The
+  deprecated `PARK_TIMEOUT` keeps its meaning as the default value, so a
+  consumer importing it is untouched until 0.5.0; the env is read once per
+  process and cached in one atomic
   (no `unsafe`, no `OnceLock`, so MSRV 1.65 holds). The cache is `AtomicUsize`,
   not `AtomicU64`, so the function compiles on targets without 64-bit atomics
   (e.g. `armv5te`, the 32-bit floor consumers gate on). A value that does
@@ -36,6 +59,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scheduler for a stuck head and fail a correct test.
 
 ### Changed
+- **Breaking (semantics): a fire-once registration without a count now
+  asserts exactly one hook fire.** A scenario that fired the hook zero times
+  or more than once used to pass silently; it now fails at drop (or at
+  `verify()`). `.fires(n)`/`fires(hook, n)` state a different count. An
+  explicit count wins in either order: registration fills the default only
+  when no count was set, under the same lock, so a concurrent explicit
+  `fires` cannot be overwritten. Shared-mode counts are totals across the
+  shared state, not one worker's. A second fire-once registration replaces
+  the closure but does not reset the count.
+  **Migration:** add `.fires(n)` where the hook fires more or fewer than
+  once. The `.expect(n)` form still compiles and behaves the same.
 - **Breaking (semantics): the sync-point state is reclaimed, not leaked.**
   `install_guard`/`install_shared` held it through `Box::leak`, so the
   guarded value's `Drop` never ran and everything a registration captured
@@ -56,25 +90,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2.5 ns (test-only path).
   **Migration:** a test whose guarded value asserts inside its own `Drop`
   used to have that assertion silently skipped and now runs it, after the
-  sync-point assertions. Verified against a real consumer's whole
-  shadow-point suite: **0 tests changed verdict** (54 passed), so this is a
-  risk to check, not a cost measured in the wild.
+  sync-point assertions. A downstream migration check found 0 of 54 tests
+  changed verdict; that is the author's measurement, not reproducible from
+  this repository. Treat a new failure there as a finding, not a regression
+  in the harness.
   The `Weak` and flag shapes are reframed as choices about the destructor's
   *moment* rather than workarounds for a leak; the API list's "Leaks
   per-install state" entry, the `'static` bound's rationale and the generated
   `SpGuard`/`SharedSp`/`install` doc comments (which stated the value is
   never dropped) are updated to match.
-- `docs/guide.md`: "The leak and what it owns" → **"Reclamation and what it
-  owns"**, because the leak it described is gone. The section now states who
-  holds a strong reference (the guard, the TLS entry, one per worker, and the
-  dispatch for the length of one fire), the release order (TLS restore →
-  assertions → release), the new ownership table, the measured cost, and a
-  migration note. `with_dyn` documents the clone-before-call rule and why a
-  hook may install or drop a guard without breaking the TLS borrow.
-- `docs/shared-mode.md`: the parking section names `park_timeout()` instead
-  of asserting that `PARK_TIMEOUT` is "not per-install configurable", and
-  adds how to lower the budget — with the warning that it is a deadlock
-  guard, so a short budget on a busy machine can fail a correct test.
+- Rustdoc on `install_guard` and the README FAQ: the ownership section now
+  describes reclamation instead of a leak — who holds a strong reference,
+  the release order, the ownership table in rustdoc, and the `T::drop`
+  migration note. `with_dyn` records why the handle is cloned before the
+  call.
+- Rustdoc on `install_shared` and the README: the parking section names
+  `park_timeout()` instead of asserting that `PARK_TIMEOUT` is "not
+  per-install configurable", and explains how to lower the budget — with the
+  warning that it is a deadlock guard, so a short budget on a busy machine
+  can fail a correct test.
+
+### Deprecated
+- `.expect(n)` → `.fires(n)`, `expect_calls(hook, n)` → `fires(hook, n)`,
+  `SeqBuilder::optional()` (use `fires(hook, 0)` or split the test; it can
+  skip an entry in shared mode depending on which thread fires first), and
+  `PARK_TIMEOUT` (use `park_timeout()`, which honors `SP_PARK_TIMEOUT_MS`).
+  All four still compile and keep their 0.3.x behavior; removal is 0.5.0.
+  `optional` was already weak in private mode and non-deterministic in shared
+  mode; deprecating it in a patch would break `-D warnings` consumers, so it
+  waits for the 0.4.0 minor.
 
 ## [0.3.3] - 2026-11-03
 

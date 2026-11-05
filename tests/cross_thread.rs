@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use shadow_point::{Gate, PARK_TIMEOUT};
+use shadow_point::{park_timeout, Gate};
 
 mod ct {
     shadow_point::define_sp! {
@@ -50,7 +50,7 @@ fn sequence_order_across_threads() {
             move |(), _| {
                 // Completion is coordinated with gates: consumption order
                 // (a -> b -> c) does not order step *completion*.
-                gate_a.must_wait(PARK_TIMEOUT);
+                gate_a.must_wait(park_timeout());
                 log.lock().unwrap().push("b");
                 gate_b.set();
             }
@@ -73,7 +73,7 @@ fn sequence_order_across_threads() {
         // `gate_b` is set inside step `b` only after `b` is consumed, so `c`
         // always finds itself at the head and never parks (the park arm is
         // exercised by park_until_turn instead).
-        gate_b2.must_wait(PARK_TIMEOUT);
+        gate_b2.must_wait(park_timeout());
         shadow_point::invoke!(ct::CtSp, c(0));
     });
     let t2 = std::thread::spawn(move || {
@@ -156,7 +156,7 @@ fn park_until_turn() {
                 // `b`'s step may start as soon as `a` is consumed (the park
                 // wake precedes step `a`), so completion must wait for
                 // step `a` to finish.
-                gate_a.must_wait(PARK_TIMEOUT);
+                gate_a.must_wait(park_timeout());
                 log.lock().unwrap().push("b");
             }
         });
@@ -178,7 +178,7 @@ fn park_until_turn() {
         let _g = s1.install();
         // Block BEFORE firing: `a` must still be at the head when T2
         // dispatches, so the rendezvous is deterministic.
-        go_t1.must_wait(PARK_TIMEOUT);
+        go_t1.must_wait(park_timeout());
         shadow_point::invoke!(ct::CtSp, a(0));
     });
     let t2 = std::thread::spawn(move || {
@@ -187,7 +187,7 @@ fn park_until_turn() {
     });
     // T2 is provably inside its `b` dispatch, parked at the `a` head.
     // Release T1: `a` is popped, T2 wakes, re-checks, consumes `b`.
-    entered.must_wait(PARK_TIMEOUT);
+    entered.must_wait(park_timeout());
     go.set();
     t1.join().unwrap();
     t2.join().unwrap();
@@ -196,6 +196,7 @@ fn park_until_turn() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn optional_head_skipped_cross_thread() {
     let log = mk_log();
     let shared = ct::CtSp::install_shared(());
@@ -254,10 +255,10 @@ fn gate_level_triggered() {
 }
 
 #[test]
-fn expect_calls_aggregates_threads() {
+fn fires_aggregates_threads() {
     let count = Arc::new(AtomicU32::new(0));
     let shared = ct::CtSp::install_shared(());
-    shared.expect_calls(ct::CtSp::a, 4);
+    shared.fires(ct::CtSp::a, 4);
     shared.every(|e| {
         e.a({
             let count = count.clone();
@@ -284,6 +285,25 @@ fn expect_calls_aggregates_threads() {
     // final counters are race-free (Arc release/acquire happens-before).
     drop(shared);
     assert_eq!(count.load(Ordering::SeqCst), 4, "every saw all 4 fires");
+}
+
+#[test]
+fn chained_fires_counts_each_worker() {
+    let shared = ct::CtSp::install_shared(());
+    shared.a(|(), _| ()).fires(2);
+    let s1 = shared.clone();
+    let t1 = std::thread::spawn(move || {
+        let _g = s1.install();
+        shadow_point::invoke!(ct::CtSp, a(0));
+    });
+    let s2 = shared.clone();
+    let t2 = std::thread::spawn(move || {
+        let _g = s2.install();
+        shadow_point::invoke!(ct::CtSp, a(1));
+    });
+    t1.join().unwrap();
+    t2.join().unwrap();
+    drop(shared);
 }
 
 #[test]
@@ -474,4 +494,71 @@ fn an_assertion_panic_at_the_last_arc_does_not_run_the_shared_value_destructor()
         before,
         "the state must leak when its own assertion unwinds, not free `T`"
     );
+}
+
+#[test]
+fn an_explicit_count_races_registration_without_losing() {
+    // Whichever side wins the `expected` lock, the explicit 2 must be the
+    // final count: registration fills only an empty slot.
+    let shared = ct::CtSp::install_shared(());
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+
+    let s1 = shared.clone();
+    let b1 = barrier.clone();
+    let t1 = std::thread::spawn(move || {
+        b1.wait();
+        s1.fires(ct::CtSp::a, 2);
+    });
+
+    let s2 = shared.clone();
+    let b2 = barrier.clone();
+    let t2 = std::thread::spawn(move || {
+        b2.wait();
+        s2.a(|(), _| ());
+    });
+
+    t1.join().unwrap();
+    t2.join().unwrap();
+
+    let g = shared.install();
+    shadow_point::invoke!(ct::CtSp, a(0));
+    shadow_point::invoke!(ct::CtSp, a(1));
+    drop(g);
+    drop(shared); // last Arc: the shared assertion sees the explicit count
+}
+
+#[test]
+fn verify_on_the_shared_value_checks_the_total_after_joins() {
+    let shared = ct::CtSp::install_shared(());
+    shared.fires(ct::CtSp::a, 2);
+
+    let s1 = shared.clone();
+    let t1 = std::thread::spawn(move || {
+        let _g = s1.install();
+        shadow_point::invoke!(ct::CtSp, a(0));
+    });
+    let s2 = shared.clone();
+    let t2 = std::thread::spawn(move || {
+        let _g = s2.install();
+        shadow_point::invoke!(ct::CtSp, a(1));
+    });
+
+    t1.join().unwrap();
+    t2.join().unwrap();
+    shared.verify(); // the same 2 fires that the last-Arc drop will assert
+}
+
+#[test]
+#[should_panic(expected = "fired 1 time(s), expected 2")]
+fn verify_on_the_shared_value_reports_a_mismatch() {
+    let shared = ct::CtSp::install_shared(());
+    shared.fires(ct::CtSp::a, 2);
+
+    let s = shared.clone();
+    let t = std::thread::spawn(move || {
+        let _g = s.install();
+        shadow_point::invoke!(ct::CtSp, a(0));
+    });
+    t.join().unwrap();
+    shared.verify();
 }

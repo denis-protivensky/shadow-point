@@ -1,0 +1,10 @@
+[package]
+name = "consumer-docs"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+shadow-point = { path = "../.." }
+
+[workspace]

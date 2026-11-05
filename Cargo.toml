@@ -1,6 +1,6 @@
 [package]
 name = "shadow-point"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.65"
 description = "Deterministic testing of concurrent Rust code — hooks at linearization points, single-threaded via guards or shared sync points across threads"
@@ -8,6 +8,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/denis-protivensky/shadow-point"
 keywords = ["testing", "concurrency", "sync-point", "hooks"]
 categories = ["development-tools::testing"]
+# CI-only fixtures for the generated-rustdoc and generated-surface gates.
+exclude = ["ci", "api-fixture"]
 
 [dependencies]
 paste = "1.0"

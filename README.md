@@ -15,7 +15,7 @@ trace, the same result every run.
 The private mode gets that determinism by giving up parallelism, not
 concurrency: two logical actors — the operation under test and the
 interferer — alternate at the hook on one real thread. That is also why the
-instrumented type must use **interior mutability**: hooks receive `&T`, never
+instrumented type must use *interior mutability*: hooks receive `&T`, never
 `&mut T`, and both actors mutate through shared references. The shared mode
 adds real threads: workers race for real, and `sequence`/`Gate` pin the
 chosen interleaving down.
@@ -27,7 +27,7 @@ In production, hooks compile to nothing.
 ```toml
 # Cargo.toml
 [dev-dependencies]
-shadow-point = "0.3"
+shadow-point = "0.4"
 ```
 
 ### 1. Declare the hooks
@@ -93,11 +93,12 @@ mod tests {
     fn the_hook_runs_before_the_store() {
         let guard = RegisterSp::install_guard(Register(AtomicU32::new(0)));
 
-        // The closure runs on the first fire, with the call's arguments.
-        // `.expect(1)` pins how many times the HOOK must fire.
+        // In this example the closure runs on the first fire, with the call's
+        // arguments. Registration asserts exactly one HOOK fire; `.fires(n)`
+        // pins a different count.
         guard.before_store(|_register, value| {
             assert_eq!(value, 7);
-        }).expect(1);
+        });
 
         guard.store(7);
         assert_eq!(guard.0.load(Ordering::SeqCst), 7);
@@ -126,8 +127,10 @@ suppressed: calling instrumented code inside a hook does not recurse.
   `Arc<…SharedSp<T>>`; every firing thread calls `shared.install()` first,
   so its TLS dispatch points at the shared state. Cross-thread order comes
   from `sequence`, which parks an out-of-order arrival at the sequence head
-  for up to `PARK_TIMEOUT` (a fixed 10 s constant), then panics instead of
-  hanging. `sequence` orders consumption, not completion: use `Gate` — a
+  for up to `park_timeout()` (10 s by default; `SP_PARK_TIMEOUT_MS`
+  overrides it), then panics instead of hanging. Lower the budget only as a
+  deadlock guard: a short value on a busy machine can fail a correct test.
+  `sequence` orders consumption, not completion: use `Gate` — a
   reusable boolean rendezvous (`Gate::new()`, shared with the workers) — to
   prove that one thread is inside dispatch before another proceeds.
   Assertions run at the last `Arc` drop, after the workers are joined.
@@ -143,29 +146,74 @@ most common wrong-mode mistake — those fires disappear.
 
 | Need | Current API |
 |---|---|
-| one-shot | `guard.<name>(f)` — the closure runs on the first fire, no count checked |
-| one-shot, counted | `guard.<name>(f).expect(n)` — the closure runs on the first fire; `n` is the hook's fire count |
-| count only | `guard.expect_calls(MySp::a, n)` |
+| one-shot (exactly one) | `guard.<name>(f)` — the hook must fire exactly once; the closure runs at most once, on the fire whose per-hook counter was 0 and whose sequence fell through to fire-once |
+| one-shot, other count | `guard.<name>(f).fires(n)` — `n` is the hook's fire count; the closure still runs at most once, on that same fire |
+| count only | `guard.fires(MySp::a, n)` |
+| assert now | `guard.verify()` — same checks as drop, at the call site |
 | every fire | `guard.every(\|e\| e.<name>(f))` |
 | ordered | `guard.sequence(\|s\| { s.a(f).b(g); })` |
-| conditional step | `s.a_when(pred, f)` — only inside `sequence`; one-shot on the first fire that passes `pred` |
+| conditional step | `s.<name>_when(pred, f)` — only inside `sequence`; the step fires on the first fire that passes `pred` |
 | shared | `install_shared`, then `shared.install()` per firing thread |
 
 `<name>` is the hook name declared in `define_sp!`; `define_sp!` generates
 one registration method per hook, and the table covers the registration
-surface. **`.expect(n)` asserts how many times the hook fires, not how many
-times the closure runs.** A one-shot closure runs on the first fire only; an
-operation that retries (the CAS loop in the private example below) fires the
-hook again, so a correct trace can be two fires with one closure run — that
-is what `.expect(2)` pins. Without `.expect`, the closure is still
-registered, but no count is checked.
+surface. **`.fires(n)` asserts how many times the hook fires, not how many
+times the closure runs.** A one-shot closure runs at most once, on the fire
+whose per-hook counter was 0 and whose sequence fell through to fire-once. A
+first fire consumed by a sequence entry or stopped by a failing predicate
+never runs the closure. An operation that retries (the CAS loop in the
+private example below) fires the hook again, so a correct trace can be two
+fires with one closure run — that is what `.fires(2)` pins. Without a chain,
+registration asserts exactly one fire; that default catches a missing fire
+*and* an extra one.
 
-`optional()` marks the most recently pushed sequence entry as allowed to
-remain unconsumed at drop — the trailing-sentinel pattern. It is a weak
-tool: a non-matching predicate or a different hook firing first can leave
-the sentinel in place, and the sentinel closure may never run. Prefer a
-mandatory entry; use `optional` only when the branch genuinely may not
-happen.
+In shared mode the count is the total across the whole shared state, not
+the winner's or one worker's: a hook that fires once per worker needs
+`.fires(workers)`. A second fire-once registration replaces the closure but
+does not reset the count slot; an explicit `.fires(n)` or `fires(hook, n)`
+wins whether it is set before or after the registration.
+
+The deprecated (0.4.0; removed in 0.5.0) aliases are `expect(n)` for
+`.fires(n)`, `expect_calls(hook, n)` for `fires(hook, n)`, and `optional()`
+for a sequence entry. `PARK_TIMEOUT` is deprecated in favor of
+`park_timeout()`. `optional` misbehaves in shared mode — it can skip an
+entry depending on which thread fires first — so assert "may not fire" with
+`fires(hook, 0)`, or split the test.
+
+## Migrating from 0.3.x
+
+0.4.0 is source-compatible with 0.3.x for code that does not declare a
+hook named `fires`, `verify`, `__SP_NAMES`, `__SP_COUNT`, `__sp_state`,
+`__sp_held`, or `__sp_reported`, but it changes one default, reclaims the
+sync-point state, and deprecates four names:
+
+- A fire-once registration without a count now asserts **exactly one** hook
+  fire. Add `.fires(n)` to a trace that fires the hook a different number of
+  times. The count is hook fires, not closure runs.
+- The sync-point state is reclaimed: the guarded value's `Drop` now runs at
+  guard drop (shared mode: at the last `Arc`), after the sync-point
+  assertions. A test that asserted inside `T::drop` used to have that
+  assertion silently skipped; it now runs there. On a thread that is already
+  unwinding the state is deliberately leaked. See "Reclamation and ownership
+  (0.4.0)" below.
+- A hook named `fires`, `verify`, `__SP_NAMES`, `__SP_COUNT`, `__sp_state`,
+  `__sp_held`, or `__sp_reported` is now rejected by `define_sp!` with a
+  `compile_error!`; rename the hook. The other reserved names already
+  collided with 0.3.x's generated surface. A hook named `<other>_when`
+  collides with the gated step for `<other>`; avoid declaring that pair.
+- `.expect(n)` → `.fires(n)`; `.expect_calls(hook, n)` → `fires(hook, n)`.
+  The old names still compile and behave identically, with a deprecation
+  warning; they are removed in 0.5.0.
+- `SeqBuilder::optional()` is deprecated. In shared mode it can make the
+  trace depend on which thread fires first. Write `fires(hook, 0)` for "may
+  not fire", or split the test; the method is removed in 0.5.0.
+- `PARK_TIMEOUT` is deprecated in favor of `park_timeout()`, which honors
+  `SP_PARK_TIMEOUT_MS`. The constant keeps its 10 s value and is removed in
+  0.5.0.
+- `verify()` is new: it runs the drop assertions immediately at the call
+  site (useful before an expected panic). It does not replace drop. A failed
+  `verify()` unwinds before the guarded value's destructor, so that
+  destructor does not run on the failure path.
 
 ## Examples
 
@@ -174,7 +222,7 @@ Two runnable examples sit in `examples/`; both are test targets:
 - `examples/register_private.rs` — an `AtomicU32` register with a `store`
   and a CAS-loop `increment`. The hook shadows the rival store; the CAS
   retries once, so the hook fires twice while the one-shot closure runs once
-  (`.expect(2)`).
+  (`.fires(2)`).
 - `examples/register_shared.rs` — a register through
   `install_shared`; two writer threads, a `sequence` and a `Gate` prove that
   one writer is inside dispatch before the other proceeds.
@@ -238,13 +286,23 @@ library itself, so the path resolves there — the ungated form does not
 transfer to a consumer's `src/` under `[dev-dependencies]`, where the call
 site needs the gate or the seam.
 
-**Limitations (0.3.x).** The hook state is `Box::leak`ed: the guarded
-value's `Drop` does not run, and captured values live until the process ends.
+**Reclamation and ownership (0.4.0).** `install_guard`/`install_shared`
+own the state in an `Arc`; the last handle releases it, and the guarded
+value's `Drop` runs at guard drop (shared mode: at the last `Arc`), after
+the sync-point assertions. On a thread that is already unwinding the state
+is deliberately leaked instead, so a panicking destructor cannot abort the
+test binary. Captures of an `every` closure or an unfired fire-once are
+freed with the state; a fire-once that did fire is dropped when its slot is
+taken. A destructor assertion inside `T::drop` that used to be skipped now
+runs at guard drop, so a scenario that abandoned entries can fail there for
+the first time — treat that as a finding, not a regression. `Weak` and flag
+shapes still control the destructor's moment; they are no longer workarounds
+for a leak.
 The guarded type must be `Send + Sync + 'static` and mutate through `&self`.
 Hooks are side-effect only — they cannot change what the instrumented
 function returns. One hook per `invoke!` site: a fire is identified by hook
 name alone, so two sites sharing a name are indistinguishable to `sequence`
-and `expect_calls`.
+and `fires`.
 
 ## Compatibility
 

@@ -38,6 +38,47 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-features --all-targets -- -D warnings
 
+  api-fixture:
+    # `cargo public-api` on the crate cannot see what `define_sp!` expands.
+    # This compile-only crate names every 0.3.x generated item and the
+    # deprecated count/optional methods, so a removal or rename fails here.
+    # The second manifest compiles the same source against the 0.3.2
+    # baseline (0.3.3 is API-identical) so the fixture itself cannot drift
+    # onto 0.4-only names.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --check --manifest-path api-fixture/Cargo.toml
+      - run: cargo fmt --check --manifest-path ci/api-fixture-032/Cargo.toml
+      - run: cargo clippy --manifest-path api-fixture/Cargo.toml -- -D warnings
+      - run: cargo clippy --manifest-path ci/api-fixture-032/Cargo.toml -- -D warnings
+      - run: cargo check --manifest-path api-fixture/Cargo.toml
+      - run: cargo check --manifest-path ci/api-fixture-032/Cargo.toml
+
+  reserved-name:
+    # The doctest only proves "does not compile"; this fixture proves the
+    # intended `compile_error!` survives the rest of the expansion.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - name: "Reserved-name diagnostic"
+        run: |
+          if cargo check --manifest-path ci/reserved-name/Cargo.toml 2> reserved-name.err; then
+            echo "::error::reserved-name fixture compiled"
+            exit 1
+          fi
+          for name in sequence value install __sp_state __sp_reported; do
+            grep -F "\`$name\` is a reserved hook name" reserved-name.err
+          done
+
   docs:
     runs-on: ubuntu-latest
     steps:
@@ -49,6 +90,35 @@ jobs:
       - run: cargo doc --locked --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  consumer-docs:
+    # In this crate's own `src/`, `define_sp!` is only invoked under
+    # `cfg(test)`, so `cargo doc` never resolves a link inside the generated
+    # items. Rustdoc does not warn about an explicit link inside such an
+    # expansion; it renders a literal dead href. Document a consumer fixture
+    # and grep the rendered HTML.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ci/consumer-docs
+      - run: cargo fmt --check --manifest-path ci/consumer-docs/Cargo.toml
+      - run: cargo doc --no-deps
+        working-directory: ci/consumer-docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: "Reject literal crate::/Self:: links in generated docs"
+        run: |
+          test -d ci/consumer-docs/target/doc
+          if grep -R -n -E 'href="(crate|Self|self|super)::' ci/consumer-docs/target/doc; then
+            echo "::error::generated rustdoc contains a literal path href" >&2
+            exit 1
+          fi
 
   check32:
     # The floor without 64-bit atomics (a downstream consumer's `make

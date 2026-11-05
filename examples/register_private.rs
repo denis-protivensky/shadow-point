@@ -76,9 +76,7 @@ mod tests {
     #[test]
     fn the_hook_runs_before_the_store() {
         let guard = RegisterSp::install_guard(Register::new(0));
-        guard
-            .before_store(|_, value| assert_eq!(value, 7))
-            .expect(1);
+        guard.before_store(|_, value| assert_eq!(value, 7)).fires(1);
 
         guard.store(7);
         assert_eq!(guard.0.load(Ordering::SeqCst), 7);
@@ -93,7 +91,7 @@ mod tests {
             .before_cas(|reg, _expected| {
                 reg.0.store(100, Ordering::SeqCst);
             })
-            .expect(2);
+            .fires(2);
 
         assert_eq!(guard.increment(), 101);
         assert_eq!(guard.0.load(Ordering::SeqCst), 101);
@@ -106,7 +104,7 @@ mod tests {
             .before_cas(|reg, _expected| {
                 reg.0.store(100, Ordering::SeqCst);
             })
-            .expect(1);
+            .fires(1);
 
         // One fire: the shadow stores 100, then the naive store overwrites it
         // with 1. The increment is lost.

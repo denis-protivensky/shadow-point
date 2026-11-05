@@ -49,7 +49,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shadow_point::{Gate, PARK_TIMEOUT};
+    use shadow_point::{park_timeout, Gate};
     use std::sync::{Arc, Mutex};
 
     type Log = Arc<Mutex<Vec<&'static str>>>;
@@ -100,7 +100,7 @@ mod tests {
             let _g = s2.install();
             // Completion, not just consumption: T1 sets the gate from inside
             // its after_store closure, so its 1 is already in the register.
-            stored.must_wait(PARK_TIMEOUT);
+            stored.must_wait(park_timeout());
             s2.store(2);
         });
 
