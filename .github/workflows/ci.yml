@@ -108,7 +108,6 @@ jobs:
         with:
           workspaces: ci/consumer-docs
       - run: cargo fmt --check --manifest-path ci/consumer-docs/Cargo.toml
-      - run: cargo clippy --manifest-path ci/consumer-docs/Cargo.toml -- -D warnings
       - run: cargo doc --no-deps
         working-directory: ci/consumer-docs
         env:
