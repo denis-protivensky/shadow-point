@@ -288,6 +288,25 @@ fn fires_aggregates_threads() {
 }
 
 #[test]
+fn chained_fires_counts_each_worker() {
+    let shared = ct::CtSp::install_shared(());
+    shared.a(|(), _| ()).fires(2);
+    let s1 = shared.clone();
+    let t1 = std::thread::spawn(move || {
+        let _g = s1.install();
+        shadow_point::invoke!(ct::CtSp, a(0));
+    });
+    let s2 = shared.clone();
+    let t2 = std::thread::spawn(move || {
+        let _g = s2.install();
+        shadow_point::invoke!(ct::CtSp, a(1));
+    });
+    t1.join().unwrap();
+    t2.join().unwrap();
+    drop(shared);
+}
+
+#[test]
 #[should_panic(expected = "sequence not fully consumed")]
 fn shared_drop_asserts_unconsumed() {
     let shared = ct::CtSp::install_shared(());
@@ -527,4 +546,19 @@ fn verify_on_the_shared_value_checks_the_total_after_joins() {
     t1.join().unwrap();
     t2.join().unwrap();
     shared.verify(); // the same 2 fires that the last-Arc drop will assert
+}
+
+#[test]
+#[should_panic(expected = "fired 1 time(s), expected 2")]
+fn verify_on_the_shared_value_reports_a_mismatch() {
+    let shared = ct::CtSp::install_shared(());
+    shared.fires(ct::CtSp::a, 2);
+
+    let s = shared.clone();
+    let t = std::thread::spawn(move || {
+        let _g = s.install();
+        shadow_point::invoke!(ct::CtSp, a(0));
+    });
+    t.join().unwrap();
+    shared.verify();
 }

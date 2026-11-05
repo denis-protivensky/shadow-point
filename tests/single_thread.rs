@@ -295,6 +295,68 @@ fn fires_mismatch_assertion_does_not_abort_while_unwinding() {
 }
 
 #[test]
+fn unwinding_assertion_prints_the_diagnostic() {
+    if std::env::var("SP_UNWIND_CHILD").is_ok() {
+        let g = single::SingleSp::install_guard(());
+        g.fires(single::SingleSp::a, 3);
+        shadow_point::invoke!(single::SingleSp, a(0));
+        panic!("the test's own failure");
+    }
+    let exe = std::env::current_exe().expect("the test binary path");
+    let output = std::process::Command::new(exe)
+        .arg("--exact")
+        .arg("unwinding_assertion_prints_the_diagnostic")
+        .arg("--nocapture")
+        .env("SP_UNWIND_CHILD", "1")
+        .output()
+        .expect("the child test runs");
+    assert!(
+        !output.status.success(),
+        "the child test must fail on its own panic"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fired 1 time(s), expected 3"),
+        "the drop assertion is printed with its payload: {stderr}"
+    );
+    assert!(
+        stderr.contains("(while unwinding)"),
+        "the printed assertion says why it was not raised: {stderr}"
+    );
+}
+
+#[test]
+fn failed_verify_owns_the_unreached_mismatch() {
+    if std::env::var("SP_VERIFY_TWO_CHILD").is_ok() {
+        let g = single::SingleSp::install_guard(());
+        g.fires(single::SingleSp::a, 5);
+        g.fires(single::SingleSp::b, 6);
+        g.verify();
+    }
+    let exe = std::env::current_exe().expect("the test binary path");
+    let output = std::process::Command::new(exe)
+        .arg("--exact")
+        .arg("failed_verify_owns_the_unreached_mismatch")
+        .arg("--nocapture")
+        .env("SP_VERIFY_TWO_CHILD", "1")
+        .output()
+        .expect("the child test runs");
+    assert!(
+        !output.status.success(),
+        "the child test must fail on the verify panic"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("hook `a` fired 0 time(s), expected 5"),
+        "verify reports the first mismatch: {stderr}"
+    );
+    assert!(
+        !stderr.contains("hook `b`"),
+        "Drop must not report the mismatch verify did not reach: {stderr}"
+    );
+}
+
+#[test]
 fn shared_last_arc_assertion_does_not_abort_while_unwinding() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let shared = single::SingleSp::install_shared(());
@@ -532,8 +594,8 @@ fn raised_assertions_keep_their_payload_shape() {
 //
 // The state used to be `Box::leak`ed, so the guarded value's `Drop` never
 // ran: a test could not assert on a destructor, and a capture inside a
-// registration lived until the process did. Both are now observable, and
-// these tests are the contract — each one fails against the leaked build.
+// registration lived until the process did. Both are now observable; the
+// destructor and capture cases below fail against the leaked build.
 
 /// A guarded value whose `Drop` sets a flag, so a test can see the release
 /// without holding a strong handle to the value itself.
@@ -815,6 +877,16 @@ fn explicit_count_after_registration_wins() {
 }
 
 #[test]
+fn explicit_fires_last_call_wins() {
+    let g = single::SingleSp::install_guard(());
+    g.fires(single::SingleSp::a, 1);
+    g.fires(single::SingleSp::a, 2);
+    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::SingleSp, a(1));
+    drop(g);
+}
+
+#[test]
 fn a_second_registration_keeps_the_explicit_count() {
     let g = single::SingleSp::install_guard(());
     let calls = C::new();
@@ -839,6 +911,15 @@ fn a_second_registration_keeps_the_explicit_count() {
 fn standalone_fires_zero_accepts_no_fire() {
     let g = single::SingleSp::install_guard(());
     g.fires(single::SingleSp::a, 0);
+    drop(g);
+}
+
+#[test]
+#[should_panic(expected = "fired 1 time(s), expected 0")]
+fn standalone_fires_zero_rejects_a_fire() {
+    let g = single::SingleSp::install_guard(());
+    g.fires(single::SingleSp::a, 0);
+    shadow_point::invoke!(single::SingleSp, a(0));
     drop(g);
 }
 
@@ -900,8 +981,10 @@ fn verify_fails_before_drop_and_skips_the_value_destructor() {
         !dropped.load(Ordering::SeqCst),
         "a failed verify unwinds before the value's Drop"
     );
-    // The failed verify left the state inconsistent; forget it rather than
-    // let Drop assert a second time on a non-unwinding path.
+    // The failed verify left the state inconsistent; keep the guard alive
+    // rather than release the state and run the value's destructor,
+    // contradicting the assertion above. Drop's own assertions are skipped
+    // after the failed verify (pinned by the next test).
     std::mem::forget(g);
 }
 
@@ -918,10 +1001,28 @@ fn a_failed_verify_is_not_reported_again_by_drop() {
 }
 
 #[test]
+fn verify_rejects_an_extra_fire() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let g = single::SingleSp::install_guard(());
+    g.a(|(), _| ()); // default: exactly one hook fire
+    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::SingleSp, a(1));
+    let r = catch_unwind(AssertUnwindSafe(|| g.verify()));
+    let err = r.expect_err("verify must reject the second fire");
+    let msg = err
+        .downcast_ref::<String>()
+        .expect("a formatted panic message");
+    assert!(msg.contains("fired 2 time(s), expected 1"), "{msg}");
+    drop(g); // Drop skips its assertions after the failed verify
+}
+
+#[test]
 fn verify_panic_points_at_the_caller() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     let g = single::SingleSp::install_guard(());
-    g.fires(single::SingleSp::a, 7);
+    // A marker no neighboring test uses: the hook is process-global while
+    // this test has it installed, so another test's panic must not match.
+    g.fires(single::SingleSp::a, 7_777_777);
     let slot = Arc::new(Mutex::new(None::<String>));
     let prev = std::panic::take_hook();
     {
@@ -930,7 +1031,7 @@ fn verify_panic_points_at_the_caller() {
             let ours = info
                 .payload()
                 .downcast_ref::<String>()
-                .map_or(false, |m| m.contains("expected 7"));
+                .map_or(false, |m| m.contains("expected 7777777"));
             if ours {
                 if let Some(loc) = info.location() {
                     *slot.lock().unwrap() = Some(loc.file().to_string());

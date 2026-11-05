@@ -3,5 +3,7 @@
 /ci/consumer-docs/Cargo.lock
 /ci/api-fixture-032/target
 /ci/api-fixture-032/Cargo.lock
+/ci/reserved-name/target
+/ci/reserved-name/Cargo.lock
 /api-fixture/target
 /api-fixture/Cargo.lock
