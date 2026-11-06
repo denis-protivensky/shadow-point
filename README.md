@@ -280,9 +280,6 @@ run happens to produce; simulators replace the runtime. `shadow-point` leaves
 both the runtime and the production API alone and scripts one chosen
 interleaving inside them.
 
-The alternatives find, inject, detect, or replace; `shadow-point` scripts
-one chosen interleaving.
-
 **Tokio and thread-locals.** The dispatch is per-thread; every worker that
 fires a hook must install the sync point on its own thread. With the
 `tokio-async` feature, `TokioAsyncGate` lets an async test body wait on
