@@ -268,9 +268,11 @@ under `cfg(test)`. Give the hook a test-only flag and check it at the site:
 ```
 
 The flag is per call, so `Cell` is enough in private and shared mode; the
-hook writes it, the site decides what to return. Use `every` when the site
-fires more than once. Under `[dev-dependencies]`, wrap the block in a seam
-macro (see `invoke!`'s "Dev-dependency seam").
+hook writes it, the site decides what to return. Register with `every` when
+the site may fire more than once, or when the flag should depend on the
+call's arguments: the closure receives them, so no `sequence`/`_when` is
+involved. Under `[dev-dependencies]`, wrap the block in a seam macro (see
+`invoke!`'s "Dev-dependency seam").
 
 **Why not Miri/TSan or a simulator?** Miri and TSan *detect* whatever race a
 run happens to produce; simulators replace the runtime. `shadow-point` leaves
