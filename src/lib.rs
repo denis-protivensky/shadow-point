@@ -79,6 +79,31 @@ pub trait SyncPoint: Send + Sync {}
 /// while the dev-dependency is unresolvable) and `cargo test` (must
 /// dispatch to the real hooks).
 ///
+/// A seam can carry the whole fault-injection block, not just the crate
+/// path, keeping its `#[cfg(test)]` out of production call sites. The hook
+/// declares the flag as its last argument; the macro creates it, dispatches,
+/// and runs the block the call site supplies:
+///
+/// ```rust,ignore
+/// macro_rules! sp_inject {
+///     ($sp:path, $hook:ident($($arg:expr),* $(,)?), $body:block) => {
+///         #[cfg(test)]
+///         {
+///             let __sp_inject = ::core::cell::Cell::new(false);
+///             ::shadow_point::invoke!($sp, $hook($($arg,)* &__sp_inject));
+///             if __sp_inject.get() {
+///                 let _: () = $body; // rejects a value block; write `return`
+///             }
+///         }
+///     };
+/// }
+///
+/// sp_inject!(MapSp, before_alloc_node(capacity), { return Err(Full); });
+/// ```
+///
+/// A block that produces a value is rejected: the injection path must
+/// return, panic, abort, or fall through on purpose.
+///
 /// # Threads and async
 ///
 /// Dispatch is per-thread: every worker that fires a hook must install the
@@ -147,7 +172,7 @@ macro_rules! __sp_reject_reserved {
     (optional) => {
         ::core::compile_error!(
             "`optional` is a reserved hook name: it collides with the \
-             `SeqBuilder::optional` method (deprecated; removed in 0.5.0)"
+             `SeqBuilder::optional` method (deprecated; to be removed in 0.5.0)"
         );
     };
     (value) => {
@@ -225,7 +250,7 @@ macro_rules! __sp_reject_reserved {
     (expect_calls) => {
         ::core::compile_error!(
             "`expect_calls` is a reserved hook name: it collides with the \
-             generated `expect_calls` method (deprecated; removed in 0.5.0)"
+             generated `expect_calls` method (deprecated; to be removed in 0.5.0)"
         );
     };
     (verify) => {
@@ -508,9 +533,9 @@ const DEFAULT_PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// `SP_PARK_TIMEOUT_MS` is unset — that function, not this constant, is what
 /// a shared-mode park actually waits on.
 ///
-/// Deprecated since 0.4.0 and removed in 0.5.0: call [`park_timeout()`]
+/// Deprecated since 0.4.0 and to be removed in 0.5.0: call [`park_timeout()`]
 /// instead, which honors the environment override.
-#[deprecated(since = "0.4.0", note = "use `park_timeout()`; removed in 0.5.0")]
+#[deprecated(since = "0.4.0", note = "use `park_timeout()`; to be removed in 0.5.0")]
 pub const PARK_TIMEOUT: std::time::Duration = DEFAULT_PARK_TIMEOUT;
 
 /// The "not resolved yet" marker in [`park_timeout`]'s cache. A millisecond
@@ -764,6 +789,12 @@ impl Drop for ExecSink {
 /// Arguments are passed by value through dispatch; declare a reference
 /// (`key: &K`) or a raw pointer (`root: *const ()`) when the call site must
 /// keep the value. The closure signature is `|&T, args…|`.
+///
+/// For fault injection, declare a test-only `inject: &Cell<bool>` argument
+/// and decide at the call site: the hook sets it, the site checks it after
+/// `invoke!` and returns the error. The hook still returns nothing; the
+/// README's "Why not failpoints?" carries the pattern and its `cfg(test)`
+/// reach.
 ///
 /// # Extension trait and `with_dyn`
 ///
@@ -1827,7 +1858,7 @@ macro_rules! define_sp {
                 /// is a trailing sentinel that must panic only on an
                 /// unexpected extra fire.
                 ///
-                /// Deprecated since 0.4.0 and removed in 0.5.0: it hides an
+                /// Deprecated since 0.4.0 and to be removed in 0.5.0: it hides an
                 /// unasserted branch and, in shared mode, can skip an entry
                 /// depending on which thread fires first. Express "may not
                 /// fire" with `fires(hook, 0)`, or split the test.
@@ -1836,7 +1867,7 @@ macro_rules! define_sp {
                 #[deprecated(
                     since = "0.4.0",
                     note = "`optional` hides an unasserted branch and can skip an entry in shared mode; \
-                            use `fires(hook, 0)` or make the entry mandatory. Removed in 0.5.0."
+                            use `fires(hook, 0)` or make the entry mandatory. To be removed in 0.5.0."
                 )]
                 $vis fn optional(&mut self) -> &mut Self {
                     self.seq
@@ -1874,7 +1905,7 @@ macro_rules! define_sp {
                 }
 
                 /// Deprecated alias for [`fires`](Self::fires).
-                #[deprecated(since = "0.4.0", note = "use `.fires(n)`; removed in 0.5.0")]
+                #[deprecated(since = "0.4.0", note = "use `.fires(n)`; to be removed in 0.5.0")]
                 $vis fn expect(self, n: usize) {
                     self.sp.set_expected(self.hook, n);
                 }
@@ -1982,7 +2013,7 @@ macro_rules! define_sp {
                 }
 
                 /// Deprecated alias for [`fires`](Self::fires).
-                #[deprecated(since = "0.4.0", note = "use `fires(hook, n)`; removed in 0.5.0")]
+                #[deprecated(since = "0.4.0", note = "use `fires(hook, n)`; to be removed in 0.5.0")]
                 $vis fn expect_calls(&self, hook: [<$prefix Hook>], n: usize) {
                     self.__sp_state().set_expected(hook, n);
                 }
@@ -2136,7 +2167,7 @@ macro_rules! define_sp {
                 }
 
                 /// Deprecated alias for [`fires`](Self::fires).
-                #[deprecated(since = "0.4.0", note = "use `fires(hook, n)`; removed in 0.5.0")]
+                #[deprecated(since = "0.4.0", note = "use `fires(hook, n)`; to be removed in 0.5.0")]
                 $vis fn expect_calls(&self, hook: [<$prefix Hook>], n: usize) {
                     self.__sp_state().set_expected(hook, n);
                 }

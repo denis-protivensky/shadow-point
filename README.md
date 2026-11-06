@@ -173,7 +173,7 @@ the winner's or one worker's: a hook that fires once per worker needs
 does not reset the count slot; an explicit `.fires(n)` or `fires(hook, n)`
 wins whether it is set before or after the registration.
 
-The deprecated (0.4.0; removed in 0.5.0) aliases are `expect(n)` for
+The deprecated (0.4.0; to be removed in 0.5.0) aliases are `expect(n)` for
 `.fires(n)`, `expect_calls(hook, n)` for `fires(hook, n)`, and `optional()`
 for a sequence entry. `PARK_TIMEOUT` is deprecated in favor of
 `park_timeout()`. `optional` misbehaves in shared mode — it can skip an
@@ -203,13 +203,13 @@ sync-point state, and deprecates four names:
   collides with the gated step for `<other>`; avoid declaring that pair.
 - `.expect(n)` → `.fires(n)`; `.expect_calls(hook, n)` → `fires(hook, n)`.
   The old names still compile and behave identically, with a deprecation
-  warning; they are removed in 0.5.0.
+  warning; they are to be removed in 0.5.0.
 - `SeqBuilder::optional()` is deprecated. In shared mode it can make the
   trace depend on which thread fires first. Write `fires(hook, 0)` for "may
-  not fire", or split the test; the method is removed in 0.5.0.
+  not fire", or split the test; the method is to be removed in 0.5.0.
 - `PARK_TIMEOUT` is deprecated in favor of `park_timeout()`, which honors
-  `SP_PARK_TIMEOUT_MS`. The constant keeps its 10 s value and is removed in
-  0.5.0.
+  `SP_PARK_TIMEOUT_MS`. The constant keeps its 10 s value.
+  It is to be removed in 0.5.0.
 - `verify()` is new: it runs the drop assertions immediately at the call
   site (useful before an expected panic). It does not replace drop. A failed
   `verify()` unwinds before the guarded value's destructor, so that
@@ -248,17 +248,37 @@ production API or the runtime.
 together: find the bad schedule with a model checker, then write a
 deterministic regression test for it here.
 
-**Why not failpoints?** Failpoints inject a failure at a named point. A
-shadow hook runs the competing operation, with the call's typed arguments,
-at the linearization point. Different property, different tool.
+**Why not failpoints?** They overlap partly: inside a crate's own unit tests
+a shadow hook covers a failpoint's `return` action, and adds what a
+failpoint does not script — running the competing operation before
+injecting. Outside those tests (integration tests, staging, production,
+runtime arming with `FAILPOINTS`/`fail::cfg`) use `fail`; hook dispatch is
+compiled only under `cfg(test)`. Give the hook a test-only flag and check it
+at the site:
+
+```rust,ignore
+// hook: before_alloc_node(capacity: usize, inject: &Cell<bool>)
+#[cfg(test)]
+{
+    let inject = ::core::cell::Cell::new(false);
+    shadow_point::invoke!(MapSp, before_alloc_node(capacity, &inject));
+    if inject.get() {
+        return Err(Full);
+    }
+}
+```
+
+The flag is per call, so `Cell` is enough in private and shared mode; the
+hook writes it, the site decides what to return. Register with `every` when
+the site may fire more than once, or when the flag should depend on the
+call's arguments: the closure receives them, so no `sequence`/`_when` is
+involved. Under `[dev-dependencies]`, wrap the block in a seam macro (see
+`invoke!`'s "Dev-dependency seam").
 
 **Why not Miri/TSan or a simulator?** Miri and TSan *detect* whatever race a
 run happens to produce; simulators replace the runtime. `shadow-point` leaves
 both the runtime and the production API alone and scripts one chosen
 interleaving inside them.
-
-The alternatives find, inject, detect, or replace; `shadow-point` scripts
-one chosen interleaving.
 
 **Tokio and thread-locals.** The dispatch is per-thread; every worker that
 fires a hook must install the sync point on its own thread. With the
@@ -322,6 +342,13 @@ with the hook name, fire index, and firing thread. Inside a closure,
 on the firing thread, so take thread info from `std::thread::current()`.
 `trace_enabled()` answers the same question programmatically. Every drop
 assertion names the install site.
+
+## Disclaimer
+
+The initial idea and the first implementation were made by a human.
+Subsequent work has been produced by an AI assistant, with human review and
+edits. The README and most of the other documentation have been reviewed by
+a human. The project is in active internal use.
 
 ## License
 
