@@ -57,6 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to make that pass cheap; do **not** set it for a whole CI leg — parking is
   a mutual-deadlock guard, and a 200 ms budget can mistake a loaded
   scheduler for a stuck head and fail a correct test.
+- Fault-injection recipe in the README FAQ ("Why not failpoints?") and
+  rustdoc on `invoke!` and `define_sp!`: a test-only `inject: &Cell<bool>`
+  flag argument, checked at the call site, `every` to gate it on the call's
+  arguments, and a seam macro that carries the whole block. Names the
+  boundary where `fail` still belongs: integration tests, staging,
+  production, runtime arming — `invoke!` compiles only under `cfg(test)`.
 
 ### Changed
 - **Breaking (semantics): a fire-once registration without a count now
@@ -109,6 +115,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-install configurable", and explains how to lower the budget — with the
   warning that it is a deadlock guard, so a short budget on a busy machine
   can fail a correct test.
+- The README FAQ, the 0.4.0 notes, the reserved-name diagnostics, and the
+  `#[deprecated]` messages: removals scheduled for 0.5.0 are stated in the
+  future tense ("to be removed"), since they still compile and behave as in
+  0.3.x. The failpoints entry now states the partial overlap and the
+  `cfg(test)` boundary instead of claiming a different property, and the
+  closing "find, inject, detect, or replace" summary line is dropped.
+- The README gained a Disclaimer section before the license.
 
 ### Deprecated
 - `.expect(n)` → `.fires(n)`, `expect_calls(hook, n)` → `fires(hook, n)`,
