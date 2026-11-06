@@ -343,6 +343,13 @@ on the firing thread, so take thread info from `std::thread::current()`.
 `trace_enabled()` answers the same question programmatically. Every drop
 assertion names the install site.
 
+## Disclaimer
+
+The initial idea and the first implementation were made by a human.
+Subsequent work has been produced by an AI assistant, with human review and
+edits. The README and most of the other documentation have been reviewed by
+a human. The project is in active internal use.
+
 ## License
 
 Dual-licensed under your choice of either the MIT license or the Apache
