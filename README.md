@@ -250,10 +250,11 @@ deterministic regression test for it here.
 
 **Why not failpoints?** They overlap partly: inside a crate's own unit tests
 a shadow hook covers a failpoint's `return` action, and adds what a
-failpoint cannot — running the competing operation before injecting.
-Outside those tests (integration tests, staging, production, runtime arming
-with `FAILPOINTS`/`fail::cfg`) use `fail`; hook dispatch is compiled only
-under `cfg(test)`. Give the hook a test-only flag and check it at the site:
+failpoint does not script — running the competing operation before
+injecting. Outside those tests (integration tests, staging, production,
+runtime arming with `FAILPOINTS`/`fail::cfg`) use `fail`; hook dispatch is
+compiled only under `cfg(test)`. Give the hook a test-only flag and check it
+at the site:
 
 ```rust,ignore
 // hook: before_alloc_node(capacity: usize, inject: &Cell<bool>)
