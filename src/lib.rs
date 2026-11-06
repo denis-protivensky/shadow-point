@@ -79,6 +79,31 @@ pub trait SyncPoint: Send + Sync {}
 /// while the dev-dependency is unresolvable) and `cargo test` (must
 /// dispatch to the real hooks).
 ///
+/// A seam can carry the whole fault-injection block, not just the crate
+/// path, keeping its `#[cfg(test)]` out of production call sites. The hook
+/// declares the flag as its last argument; the macro creates it, dispatches,
+/// and runs the block the call site supplies:
+///
+/// ```rust,ignore
+/// macro_rules! sp_inject {
+///     ($sp:path, $hook:ident($($arg:expr),*), $body:block) => {
+///         #[cfg(test)]
+///         {
+///             let __sp_inject = ::core::cell::Cell::new(false);
+///             ::shadow_point::invoke!($sp, $hook($($arg,)* &__sp_inject));
+///             if __sp_inject.get() {
+///                 let _: () = $body; // rejects a value block; write `return`
+///             }
+///         }
+///     };
+/// }
+///
+/// sp_inject!(MapSp, before_alloc_node(capacity), { return Err(Full); });
+/// ```
+///
+/// A block that produces a value is rejected: the injection path must
+/// return, panic, abort, or fall through on purpose.
+///
 /// # Threads and async
 ///
 /// Dispatch is per-thread: every worker that fires a hook must install the
@@ -764,6 +789,12 @@ impl Drop for ExecSink {
 /// Arguments are passed by value through dispatch; declare a reference
 /// (`key: &K`) or a raw pointer (`root: *const ()`) when the call site must
 /// keep the value. The closure signature is `|&T, args…|`.
+///
+/// For fault injection, declare a test-only `inject: &Cell<bool>` argument
+/// and decide at the call site: the hook sets it, the site checks it after
+/// `invoke!` and returns the error. The hook still returns nothing; the
+/// README's "Why not failpoints?" carries the pattern and its `cfg(test)`
+/// reach.
 ///
 /// # Extension trait and `with_dyn`
 ///

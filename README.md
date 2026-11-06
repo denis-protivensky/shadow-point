@@ -248,9 +248,29 @@ production API or the runtime.
 together: find the bad schedule with a model checker, then write a
 deterministic regression test for it here.
 
-**Why not failpoints?** Failpoints inject a failure at a named point. A
-shadow hook runs the competing operation, with the call's typed arguments,
-at the linearization point. Different property, different tool.
+**Why not failpoints?** They overlap partly: inside a crate's own unit tests
+a shadow hook covers a failpoint's `return` action, and adds what a
+failpoint cannot — running the competing operation before injecting.
+Outside those tests (integration tests, staging, production, runtime arming
+with `FAILPOINTS`/`fail::cfg`) use `fail`; dispatch is compiled only under
+`cfg(test)`. Give the hook a test-only flag and check it at the site:
+
+```rust,ignore
+// hook: before_alloc_node(capacity: usize, inject: &Cell<bool>)
+#[cfg(test)]
+{
+    let inject = ::core::cell::Cell::new(false);
+    shadow_point::invoke!(MapSp, before_alloc_node(capacity, &inject));
+    if inject.get() {
+        return Err(Full);
+    }
+}
+```
+
+The flag is per call, so `Cell` is enough in private and shared mode; the
+hook writes it, the site decides what to return. Use `every` when the site
+fires more than once. Under `[dev-dependencies]`, wrap the block in a seam
+macro (see `invoke!`'s "Dev-dependency seam").
 
 **Why not Miri/TSan or a simulator?** Miri and TSan *detect* whatever race a
 run happens to produce; simulators replace the runtime. `shadow-point` leaves
