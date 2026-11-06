@@ -86,7 +86,7 @@ pub trait SyncPoint: Send + Sync {}
 ///
 /// ```rust,ignore
 /// macro_rules! sp_inject {
-///     ($sp:path, $hook:ident($($arg:expr),*), $body:block) => {
+///     ($sp:path, $hook:ident($($arg:expr),* $(,)?), $body:block) => {
 ///         #[cfg(test)]
 ///         {
 ///             let __sp_inject = ::core::cell::Cell::new(false);
