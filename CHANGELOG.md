@@ -115,7 +115,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SeqBuilder::optional()` (use `fires(hook, 0)` or split the test; it can
   skip an entry in shared mode depending on which thread fires first), and
   `PARK_TIMEOUT` (use `park_timeout()`, which honors `SP_PARK_TIMEOUT_MS`).
-  All four still compile and keep their 0.3.x behavior; removal is 0.5.0.
+  All four still compile and keep their 0.3.x behavior; they are to be
+  removed in 0.5.0.
   `optional` was already weak in private mode and non-deterministic in shared
   mode; deprecating it in a patch would break `-D warnings` consumers, so it
   waits for the 0.4.0 minor.
