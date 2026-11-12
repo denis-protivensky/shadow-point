@@ -12,7 +12,6 @@ categories = ["development-tools::testing"]
 exclude = ["ci", "api-fixture"]
 
 [dependencies]
-paste = "1.0"
 # The library uses `tokio::sync::Notify` and `tokio::pin!` only. `pin!` is
 # re-exported outside `cfg_macros!`, so `rt`/`macros` are not needed here —
 # and dropping `macros` also drops the `tokio-macros` -> `quote`/`syn` chain

@@ -1,81 +1,96 @@
-//! Compile-only fixture for the macro-expanded public surface.
+//! Compile-only fixture for the 0.5.0 macro-expanded public surface.
 //!
 //! `cargo public-api` on the crate cannot see items `define_sp!` generates,
-//! so this crate names every 0.3.x generated item and the deprecated
-//! count/optional methods. It must compile against `v0.3.2` and against the
-//! current tree: 0.4.0 adds names and deprecates, it removes nothing.
+//! so this crate names every generated item of the module form. It must
+//! compile against the current tree: a removal or rename fails here.
 //!
 //! The fixture is excluded from the published package. It is not a test
 //! target: compiling it is the assertion.
 
-#![allow(deprecated)]
-
 use std::time::Duration;
 
 shadow_point::define_sp! {
-    pub prefix Api {
+    pub mod api_sp {
         before_store(value: u32),
         flush(),
     }
 }
 
-/// Name the generated types, associated constants, trait, and builders.
+/// Name the generated types, hook constants, and hidden dispatch seam.
 pub fn generated_surface_names() {
-    let _hook: ApiHook = ApiSp::before_store;
-    let _flush_hook: ApiHook = ApiSp::flush;
-    let _entry = ApiSp;
-    let _guard: Option<ApiSpGuard<u32>> = None;
-    let _shared: Option<ApiSharedSp<u32>> = None;
-    let _shared_guard: Option<ApiSharedGuard<u32>> = None;
-    let _seq: Option<ApiSeqBuilder<u32>> = None;
-    let _every: Option<EveryClosures<u32>> = None;
-    let _expect: Option<SpExpect<'_, u32>> = None;
-    let _trait_object: Option<&dyn ApiSyncPoint> = None;
-    let _default_budget: Duration = shadow_point::PARK_TIMEOUT;
-    let _shared_entry = ApiSp::install_shared(0);
-    let _with_dyn: () = ApiSp::with_dyn(|_| ());
+    let _hook: api_sp::Hook = api_sp::before_store;
+    let _flush_hook: api_sp::Hook = api_sp::flush;
+    let _guard: Option<api_sp::Guard<u32>> = None;
+    let _shared: Option<api_sp::Shared<u32>> = None;
+    let _seq: Option<api_sp::Seq<u32>> = None;
+    let _when: Option<api_sp::When<'_, u32>> = None;
+    let _every: Option<api_sp::Every<u32>> = None;
+    let _expect: Option<api_sp::Expect<'_, u32>> = None;
+    let _shared_expect: Option<api_sp::SharedExpect<'_, u32>> = None;
+    let _trait_object: Option<&dyn api_sp::Hooks> = None;
+    let _budget: Duration = shadow_point::park_timeout();
+    let _with_dyn: () = api_sp::with_dyn(|_| ());
 }
 
 /// Name the generated trait methods.
-pub fn trait_methods(sp: &dyn ApiSyncPoint) {
+pub fn trait_methods(sp: &dyn api_sp::Hooks) {
     sp.before_store(0);
     sp.flush();
 }
 
-/// Name the 0.3.x registration, count, and optional sequence methods.
-pub fn old_registration_surface(g: &ApiSpGuard<u32>, shared: &ApiSharedSp<u32>) {
-    g.expect_calls(ApiSp::before_store, 1);
-    shared.expect_calls(ApiSp::before_store, 1);
-
-    g.before_store(|_, _| ()).expect(1);
-    g.flush(|_| ()).expect(1);
-    shared.before_store(|_, _| ()).expect(1);
-    shared.flush(|_| ()).expect(1);
+/// Name the registration, count, and gated-step methods on the guard.
+pub fn guard_surface(g: &api_sp::Guard<u32>) {
+    g.fires(api_sp::before_store, 1);
+    g.before_store(|_, _| ()).fires(1);
+    g.flush(|_| ()).fires(1);
+    // Chained fire-once registrations (D21): fires returns &Guard.
+    g.before_store(|_, _| ()).fires(2).flush(|_| ()).fires(1);
 
     g.sequence(|s| {
-        s.before_store(|_, _| ())
-            .flush(|_| ())
-            .before_store_when(|_| true, |_, _| ())
-            .flush_when(|| true, |_| ())
-            .optional();
-    });
-    shared.sequence(|s| {
-        s.before_store(|_, _| ()).flush(|_| ()).optional();
+        s.before_store(|_, _| ()).flush(|_| ());
+        s.when().before_store(|_| true, |_, _| ());
+        s.when().flush(|| true, |_| ());
     });
 
     g.every(|e| {
         e.before_store(|_, _| ());
         e.flush(|_| ());
     });
-    shared.every(|e| {
+
+    g.verify();
+}
+
+/// Name the same registration surface on the shared handle.
+pub fn shared_surface(s: &api_sp::Shared<u32>) {
+    s.fires(api_sp::before_store, 1);
+    s.before_store(|_, _| ()).fires(1);
+    s.flush(|_| ()).fires(1);
+    s.before_store(|_, _| ()).fires(2).flush(|_| ()).fires(1);
+
+    s.sequence(|q| {
+        q.before_store(|_, _| ()).flush(|_| ());
+        q.when().before_store(|_| true, |_, _| ());
+    });
+
+    s.every(|e| {
         e.before_store(|_, _| ());
         e.flush(|_| ());
     });
+
+    s.verify();
 }
 
-/// Name both constructors and a worker install.
-pub fn constructors(shared: &std::sync::Arc<ApiSharedSp<u32>>) {
-    let _private = ApiSp::install_guard(0);
-    let _shared_entry = ApiSp::install_shared(0);
-    let _worker = shared.install();
+/// Name both constructors, a worker attach, and Shared cloning.
+pub fn constructors() {
+    let _private = api_sp::guard(0);
+    let shared = api_sp::shared(0);
+    let _clone = shared.clone();
+    let _worker = shared.guard();
+}
+
+/// Deref on both handles reaches the guarded value.
+pub fn deref(g: &api_sp::Guard<u32>, s: &api_sp::Shared<u32>) {
+    fn takes_value(_: &u32) {}
+    takes_value(g);
+    takes_value(s);
 }

@@ -40,11 +40,9 @@ jobs:
 
   api-fixture:
     # `cargo public-api` on the crate cannot see what `define_sp!` expands.
-    # This compile-only crate names every 0.3.x generated item and the
-    # deprecated count/optional methods, so a removal or rename fails here.
-    # The second manifest compiles the same source against the 0.3.2
-    # baseline (0.3.3 is API-identical) so the fixture itself cannot drift
-    # onto 0.4-only names.
+    # This compile-only crate names every generated item of the 0.5.0 module
+    # form, so a removal or rename fails here. (The 0.3.2 parity gate retired
+    # with 0.5.0: the module form breaks that surface by design.)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,11 +52,8 @@ jobs:
           components: rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --check --manifest-path api-fixture/Cargo.toml
-      - run: cargo fmt --check --manifest-path ci/api-fixture-032/Cargo.toml
       - run: cargo clippy --manifest-path api-fixture/Cargo.toml -- -D warnings
-      - run: cargo clippy --manifest-path ci/api-fixture-032/Cargo.toml -- -D warnings
       - run: cargo check --manifest-path api-fixture/Cargo.toml
-      - run: cargo check --manifest-path ci/api-fixture-032/Cargo.toml
 
   reserved-name:
     # The doctest only proves "does not compile"; this fixture proves the
@@ -75,7 +70,7 @@ jobs:
             echo "::error::reserved-name fixture compiled"
             exit 1
           fi
-          for name in sequence value install __sp_state __sp_reported; do
+          for name in sequence every fires verify guard shared with_dyn when value calls expected installed_at sequence_cv __sp_reported; do
             grep -F "\`$name\` is a reserved hook name" reserved-name.err
           done
 

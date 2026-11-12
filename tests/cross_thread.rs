@@ -1,8 +1,8 @@
 //! Cross-thread (shared-mode) sync point tests.
 //!
-//! Each test installs a shared sync point (`install_shared`), drives the
+//! Each test creates a shared sync point (`shared`), drives the
 //! instrumented hooks from real `std::thread` workers, and asserts on the
-//! globally ordered sequence, parking diagnostics, optional-head skipping,
+//! globally ordered sequence, parking diagnostics,
 //! call-count aggregation, and the shared drop assertions.
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -13,8 +13,7 @@ use shadow_point::{park_timeout, Gate};
 
 mod ct {
     shadow_point::define_sp! {
-        pub prefix Ct
-        {
+        pub mod ct_sp {
             a(value: u32),
             b(value: u32),
             c(value: u32),
@@ -33,7 +32,7 @@ fn sequence_order_across_threads() {
     let log = mk_log();
     let gate_a = Arc::new(Gate::new());
     let gate_b = Arc::new(Gate::new());
-    let shared = ct::CtSp::install_shared(());
+    let shared = ct::ct_sp::shared(());
     shared.sequence(|s| {
         s.a({
             let log = log.clone();
@@ -68,17 +67,17 @@ fn sequence_order_across_threads() {
     let s2 = shared.clone();
     let gate_b2 = gate_b.clone();
     let t1 = std::thread::spawn(move || {
-        let _g = s1.install();
-        shadow_point::invoke!(ct::CtSp, a(0));
+        let _g = s1.guard();
+        shadow_point::invoke!(ct::ct_sp, a(0));
         // `gate_b` is set inside step `b` only after `b` is consumed, so `c`
         // always finds itself at the head and never parks (the park arm is
         // exercised by park_until_turn instead).
         gate_b2.must_wait(park_timeout());
-        shadow_point::invoke!(ct::CtSp, c(0));
+        shadow_point::invoke!(ct::ct_sp, c(0));
     });
     let t2 = std::thread::spawn(move || {
-        let _g = s2.install();
-        shadow_point::invoke!(ct::CtSp, b(0));
+        let _g = s2.guard();
+        shadow_point::invoke!(ct::ct_sp, b(0));
     });
     t1.join().unwrap();
     t2.join().unwrap();
@@ -101,15 +100,15 @@ fn sequence_order_across_threads() {
 #[test]
 #[ignore = "parks for the whole budget by design (10 s at the default)"]
 fn unattainable_head_reports_the_park_timeout() {
-    let shared = ct::CtSp::install_shared(());
+    let shared = ct::ct_sp::shared(());
     shared.sequence(|s| {
         s.b(|(), _| ()); // head: nothing will ever fire `b`
         s.a(|(), _| ()); // this fire is the one that parks
     });
     let started = std::time::Instant::now();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _g = shared.install();
-        shadow_point::invoke!(ct::CtSp, a(0));
+        let _g = shared.guard();
+        shadow_point::invoke!(ct::ct_sp, a(0));
     }));
     let waited = started.elapsed();
     let err = outcome.expect_err("the parked fire must panic, not return");
@@ -139,7 +138,7 @@ fn park_until_turn() {
     let entered = Arc::new(Gate::new());
     let go = Arc::new(Gate::new());
     let gate_a = Arc::new(Gate::new());
-    let shared = ct::CtSp::install_shared(());
+    let shared = ct::ct_sp::shared(());
     shared.sequence(|s| {
         s.a({
             let log = log.clone();
@@ -175,15 +174,15 @@ fn park_until_turn() {
     let s2 = shared.clone();
     let go_t1 = go.clone();
     let t1 = std::thread::spawn(move || {
-        let _g = s1.install();
+        let _g = s1.guard();
         // Block BEFORE firing: `a` must still be at the head when T2
         // dispatches, so the rendezvous is deterministic.
         go_t1.must_wait(park_timeout());
-        shadow_point::invoke!(ct::CtSp, a(0));
+        shadow_point::invoke!(ct::ct_sp, a(0));
     });
     let t2 = std::thread::spawn(move || {
-        let _g = s2.install();
-        shadow_point::invoke!(ct::CtSp, b(0));
+        let _g = s2.guard();
+        shadow_point::invoke!(ct::ct_sp, b(0));
     });
     // T2 is provably inside its `b` dispatch, parked at the `a` head.
     // Release T1: `a` is popped, T2 wakes, re-checks, consumes `b`.
@@ -196,36 +195,39 @@ fn park_until_turn() {
 }
 
 #[test]
-#[allow(deprecated)]
-fn optional_head_skipped_cross_thread() {
+fn shared_sequence_consumes_in_order_without_parking() {
     let log = mk_log();
-    let shared = ct::CtSp::install_shared(());
+    let shared = ct::ct_sp::shared(());
     shared.sequence(|s| {
-        s.a({
-            let log = log.clone();
-            move |(), _| {
-                log.lock().unwrap().push("a");
-            }
-        })
-        .optional()
-        .b({
+        s.b({
             let log = log.clone();
             move |(), _| {
                 log.lock().unwrap().push("b");
             }
         });
+        s.a({
+            let log = log.clone();
+            move |(), _| {
+                log.lock().unwrap().push("a");
+            }
+        });
     });
+    // The worker fires the head hook first, then the next: each fire matches
+    // the head, so nothing parks. (The removed `optional` head-skip made the
+    // trace depend on which thread fired first; a mandatory sequence is the
+    // deterministic contract.)
     let s2 = shared.clone();
     let t = std::thread::spawn(move || {
-        let _g = s2.install();
-        shadow_point::invoke!(ct::CtSp, b(0));
+        let _g = s2.guard();
+        shadow_point::invoke!(ct::ct_sp, b(0));
+        shadow_point::invoke!(ct::ct_sp, a(0));
     });
     t.join().unwrap();
     drop(shared);
     assert_eq!(
         *log.lock().unwrap(),
-        ["b"],
-        "optional foreign head is skipped in shared mode; no parking"
+        ["b", "a"],
+        "shared mode consumes the sequence in firing order; no parking"
     );
 }
 
@@ -257,8 +259,8 @@ fn gate_level_triggered() {
 #[test]
 fn fires_aggregates_threads() {
     let count = Arc::new(AtomicU32::new(0));
-    let shared = ct::CtSp::install_shared(());
-    shared.fires(ct::CtSp::a, 4);
+    let shared = ct::ct_sp::shared(());
+    shared.fires(ct::ct_sp::a, 4);
     shared.every(|e| {
         e.a({
             let count = count.clone();
@@ -270,14 +272,14 @@ fn fires_aggregates_threads() {
     let s1 = shared.clone();
     let s2 = shared.clone();
     let t1 = std::thread::spawn(move || {
-        let _g = s1.install();
-        shadow_point::invoke!(ct::CtSp, a(0));
-        shadow_point::invoke!(ct::CtSp, a(0));
+        let _g = s1.guard();
+        shadow_point::invoke!(ct::ct_sp, a(0));
+        shadow_point::invoke!(ct::ct_sp, a(0));
     });
     let t2 = std::thread::spawn(move || {
-        let _g = s2.install();
-        shadow_point::invoke!(ct::CtSp, a(0));
-        shadow_point::invoke!(ct::CtSp, a(0));
+        let _g = s2.guard();
+        shadow_point::invoke!(ct::ct_sp, a(0));
+        shadow_point::invoke!(ct::ct_sp, a(0));
     });
     t1.join().unwrap();
     t2.join().unwrap();
@@ -289,17 +291,17 @@ fn fires_aggregates_threads() {
 
 #[test]
 fn chained_fires_counts_each_worker() {
-    let shared = ct::CtSp::install_shared(());
+    let shared = ct::ct_sp::shared(());
     shared.a(|(), _| ()).fires(2);
     let s1 = shared.clone();
     let t1 = std::thread::spawn(move || {
-        let _g = s1.install();
-        shadow_point::invoke!(ct::CtSp, a(0));
+        let _g = s1.guard();
+        shadow_point::invoke!(ct::ct_sp, a(0));
     });
     let s2 = shared.clone();
     let t2 = std::thread::spawn(move || {
-        let _g = s2.install();
-        shadow_point::invoke!(ct::CtSp, a(1));
+        let _g = s2.guard();
+        shadow_point::invoke!(ct::ct_sp, a(1));
     });
     t1.join().unwrap();
     t2.join().unwrap();
@@ -309,7 +311,7 @@ fn chained_fires_counts_each_worker() {
 #[test]
 #[should_panic(expected = "sequence not fully consumed")]
 fn shared_drop_asserts_unconsumed() {
-    let shared = ct::CtSp::install_shared(());
+    let shared = ct::ct_sp::shared(());
     shared.sequence(|s| {
         s.a(|(), _| {});
     });
@@ -319,7 +321,7 @@ fn shared_drop_asserts_unconsumed() {
 #[test]
 fn two_threads_same_hook_entries() {
     let log = mk_log();
-    let shared = ct::CtSp::install_shared(());
+    let shared = ct::ct_sp::shared(());
     shared.sequence(|s| {
         s.b({
             let log = log.clone();
@@ -337,12 +339,12 @@ fn two_threads_same_hook_entries() {
     let s1 = shared.clone();
     let s2 = shared.clone();
     let t1 = std::thread::spawn(move || {
-        let _g = s1.install();
-        shadow_point::invoke!(ct::CtSp, b(0));
+        let _g = s1.guard();
+        shadow_point::invoke!(ct::ct_sp, b(0));
     });
     let t2 = std::thread::spawn(move || {
-        let _g = s2.install();
-        shadow_point::invoke!(ct::CtSp, b(0));
+        let _g = s2.guard();
+        shadow_point::invoke!(ct::ct_sp, b(0));
     });
     t1.join().unwrap();
     t2.join().unwrap();
@@ -356,12 +358,11 @@ fn two_threads_same_hook_entries() {
 
 // ── Shared-mode reclamation ──────────────────────────────────────────
 //
-// `install_shared` leaked its state through `Box::leak` too, so the shared
-// path had the same blind spot as the guard. Reaching the last `Arc` now
-// frees the state — and the guarded value's `Drop` runs there, which is why
-// the ORDER inside `SharedSp::drop` is load-bearing: without it, the last
-// `Arc` on an unwinding thread would run a consumer destructor mid-unwind,
-// the exact abort 0.3.2 removed the crate's own raise for.
+// The shared path had the same blind spot as the guard. Reaching the last
+// `Arc` now frees the state — and the guarded value's `Drop` runs there,
+// which is why the ORDER inside `Owner::drop` is load-bearing: without it,
+// the last `Arc` on an unwinding thread would run a consumer destructor
+// mid-unwind, the exact abort 0.3.2 removed the crate's own raise for.
 
 /// A shared value whose `Drop` sets a flag, so a test can see the release
 /// without holding a strong handle to the value itself.
@@ -376,7 +377,7 @@ impl Drop for MarksDrop {
 #[test]
 fn the_shared_value_is_dropped_with_the_last_arc() {
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let shared = ct::CtSp::install_shared(MarksDrop(flag.clone()));
+    let shared = ct::ct_sp::shared(MarksDrop(flag.clone()));
     assert!(
         !flag.load(Ordering::SeqCst),
         "the value is alive while its Arc is"
@@ -395,7 +396,7 @@ fn a_worker_guard_keeps_the_shared_value_alive_until_it_leaves() {
     // value. A worker's TLS entry is a strong handle, so a thread inside a
     // dispatch cannot be reading state that the main test just freed.
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let shared = ct::CtSp::install_shared(MarksDrop(flag.clone()));
+    let shared = ct::ct_sp::shared(MarksDrop(flag.clone()));
     // A handshake, not sleeps: the assertion below is only about "the worker
     // holds a guard", and wall-clock guesses made this test fail on a loaded
     // machine whenever the main thread lost its slot for longer than the
@@ -405,7 +406,7 @@ fn a_worker_guard_keeps_the_shared_value_alive_until_it_leaves() {
     let worker = {
         let s = shared.clone();
         std::thread::spawn(move || {
-            let _inst = s.install(); // holds a strong handle for its scope
+            let _inst = s.guard(); // holds a strong handle for its scope
             installed_tx.send(()).expect("the test is still listening");
             release_rx
                 .recv()
@@ -429,8 +430,34 @@ fn a_worker_guard_keeps_the_shared_value_alive_until_it_leaves() {
 }
 
 #[test]
+fn dropping_the_shared_handle_with_a_live_guard_gives_no_verdict() {
+    // D19/D24: the assertion lives in Owner::drop on the LAST Arc<Owner>,
+    // not in Shared::drop. A live Guard holds an Arc<Owner>, so dropping the
+    // Shared handle must neither assert nor free the value — even with an
+    // unconsumed sequence that would fail if the verdict ran here.
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shared = ct::ct_sp::shared(MarksDrop(flag.clone()));
+    shared.sequence(|s| {
+        s.a(|_, _| ()); // never consumed: a premature verdict would panic
+    });
+    let g = shared.guard();
+    drop(shared); // NOT the last owner — the guard still holds one
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "drop(s) with a live guard must not free the value"
+    );
+    // The guard is the last owner now; its drop runs the verdict. The
+    // unconsumed entry fails, so catch it rather than let it abort the test.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(g)));
+    assert!(
+        outcome.is_err(),
+        "the last-owner Guard drop must run the sequence assertion"
+    );
+}
+
+#[test]
 fn a_panicking_last_arc_does_not_run_the_shared_value_destructor() {
-    // The release step is the last thing `SharedSp::drop` does, and on an
+    // The release step is the last thing `Owner::drop` does, and on an
     // unwinding thread it is skipped: `T::drop` is consumer code, and one
     // that panics here would double-panic and abort the run. The state
     // field is an `Option` precisely so this step can be withheld — an
@@ -444,11 +471,11 @@ fn a_panicking_last_arc_does_not_run_the_shared_value_destructor() {
     }
     let before = DROPS.load(Ordering::SeqCst);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let shared = ct::CtSp::install_shared(CountsDrops);
+        let shared = ct::ct_sp::shared(CountsDrops);
         shared.sequence(|q| {
             q.a(|_, _| ()); // left unconsumed on purpose: asserts fire at the end
         });
-        let _inst = shared.install();
+        let _inst = shared.guard();
         // Unwinding drops `_inst` (one handle) and then `shared` — the last
         // one — so both the assertions and the release run mid-unwind.
         panic!("the test's own failure");
@@ -463,7 +490,7 @@ fn a_panicking_last_arc_does_not_run_the_shared_value_destructor() {
 
 #[test]
 fn an_assertion_panic_at_the_last_arc_does_not_run_the_shared_value_destructor() {
-    // Same hole, shared side: `SharedSp::drop` raises its assertions on a
+    // Same hole, shared side: `Owner::drop` raises its assertions on a
     // clean thread, and the state has to be out of the implicit drop path
     // before that, or the unwind frees it and runs `T::drop` mid-unwind.
     static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -475,7 +502,7 @@ fn an_assertion_panic_at_the_last_arc_does_not_run_the_shared_value_destructor()
     }
     let before = DROPS.load(Ordering::SeqCst);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let shared = ct::CtSp::install_shared(CountsDrops);
+        let shared = ct::ct_sp::shared(CountsDrops);
         shared.sequence(|q| {
             q.a(|_, _| ()); // left unconsumed: the drop assertion raises
         });
@@ -500,14 +527,14 @@ fn an_assertion_panic_at_the_last_arc_does_not_run_the_shared_value_destructor()
 fn an_explicit_count_races_registration_without_losing() {
     // Whichever side wins the `expected` lock, the explicit 2 must be the
     // final count: registration fills only an empty slot.
-    let shared = ct::CtSp::install_shared(());
+    let shared = ct::ct_sp::shared(());
     let barrier = Arc::new(std::sync::Barrier::new(2));
 
     let s1 = shared.clone();
     let b1 = barrier.clone();
     let t1 = std::thread::spawn(move || {
         b1.wait();
-        s1.fires(ct::CtSp::a, 2);
+        s1.fires(ct::ct_sp::a, 2);
     });
 
     let s2 = shared.clone();
@@ -520,27 +547,27 @@ fn an_explicit_count_races_registration_without_losing() {
     t1.join().unwrap();
     t2.join().unwrap();
 
-    let g = shared.install();
-    shadow_point::invoke!(ct::CtSp, a(0));
-    shadow_point::invoke!(ct::CtSp, a(1));
+    let g = shared.guard();
+    shadow_point::invoke!(ct::ct_sp, a(0));
+    shadow_point::invoke!(ct::ct_sp, a(1));
     drop(g);
     drop(shared); // last Arc: the shared assertion sees the explicit count
 }
 
 #[test]
 fn verify_on_the_shared_value_checks_the_total_after_joins() {
-    let shared = ct::CtSp::install_shared(());
-    shared.fires(ct::CtSp::a, 2);
+    let shared = ct::ct_sp::shared(());
+    shared.fires(ct::ct_sp::a, 2);
 
     let s1 = shared.clone();
     let t1 = std::thread::spawn(move || {
-        let _g = s1.install();
-        shadow_point::invoke!(ct::CtSp, a(0));
+        let _g = s1.guard();
+        shadow_point::invoke!(ct::ct_sp, a(0));
     });
     let s2 = shared.clone();
     let t2 = std::thread::spawn(move || {
-        let _g = s2.install();
-        shadow_point::invoke!(ct::CtSp, a(1));
+        let _g = s2.guard();
+        shadow_point::invoke!(ct::ct_sp, a(1));
     });
 
     t1.join().unwrap();
@@ -551,13 +578,13 @@ fn verify_on_the_shared_value_checks_the_total_after_joins() {
 #[test]
 #[should_panic(expected = "fired 1 time(s), expected 2")]
 fn verify_on_the_shared_value_reports_a_mismatch() {
-    let shared = ct::CtSp::install_shared(());
-    shared.fires(ct::CtSp::a, 2);
+    let shared = ct::ct_sp::shared(());
+    shared.fires(ct::ct_sp::a, 2);
 
     let s = shared.clone();
     let t = std::thread::spawn(move || {
-        let _g = s.install();
-        shadow_point::invoke!(ct::CtSp, a(0));
+        let _g = s.guard();
+        shadow_point::invoke!(ct::ct_sp, a(0));
     });
     t.join().unwrap();
     shared.verify();
