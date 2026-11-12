@@ -67,9 +67,10 @@ impl Register {
 
 `invoke!` takes the entry point and a plain `hook(args…)` call, using exactly
 the arguments declared in `define_sp!` — without the guarded `&T`, which
-dispatch prepends. It expands to a statement (an `#[cfg(test)]`-attributed
-block), so write `invoke!(…);` on its own line: not as a closure's body, not
-as a block's trailing value. Outside test builds it compiles to nothing.
+dispatch prepends. It expands to a block expression (`{ #[cfg(test)] { … } }`),
+so it works as a statement (`invoke!(…);`) and in expression position — a
+closure's body, a block's trailing value, `let () = invoke!(…);` — in both
+test and production builds. Outside test builds it compiles to an empty block.
 
 Under `[dev-dependencies]` the call site carries its own `#[cfg(test)]`: in
 a production build the crate name does not resolve at all (`E0433`), before

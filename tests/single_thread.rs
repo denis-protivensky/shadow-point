@@ -59,13 +59,6 @@ fn push(log: &Mutex<String>, s: &str) {
     log.lock().unwrap().push_str(s);
 }
 
-// `invoke!` expands to a `#[cfg(test)]`-attributed block, which is only a
-// legal *statement*: hoist fires that must run inside a closure (e.g. under
-// `catch_unwind`) into plain functions.
-fn fire_b(v: u32) {
-    shadow_point::invoke!(single::SingleSp, b(v));
-}
-
 #[test]
 #[allow(deprecated)]
 fn sequence_out_of_order_panics() {
@@ -76,7 +69,7 @@ fn sequence_out_of_order_panics() {
         s.a(|(), _| {}).optional();
         s.b(|(), _| {}).optional();
     });
-    let r = std::panic::catch_unwind(|| fire_b(1));
+    let r = std::panic::catch_unwind(|| shadow_point::invoke!(single::SingleSp, b(1)));
     assert!(
         r.is_err(),
         "firing `b` with `a` at the sequence head must panic"
@@ -154,7 +147,7 @@ fn optional_head_not_skipped_in_private_mode() {
     });
     // Private mode never skips an `optional` head on a mismatched fire: a
     // later matching entry still means ordering violation.
-    let r = std::panic::catch_unwind(|| fire_b(1));
+    let r = std::panic::catch_unwind(|| shadow_point::invoke!(single::SingleSp, b(1)));
     assert!(r.is_err(), "optional head is not skipped in private mode");
     assert_ordering_panic(
         &r,
@@ -1052,4 +1045,47 @@ fn verify_panic_points_at_the_caller() {
         "verify must report the caller, not src/lib.rs: {file}"
     );
     std::mem::forget(g);
+}
+
+/// D28: `invoke!` is a block expression, legal in expression position — not
+/// just a statement. Each form below must compile AND dispatch (the hook
+/// counts prove the fire happened, not merely that the syntax was accepted).
+#[test]
+fn invoke_is_an_expression() {
+    let g = single::SingleSp::install_guard(());
+    let fires = C::new();
+    // `every` runs on each fire (fire-once would run only on counter 0), so
+    // the count proves every expression form actually dispatched.
+    let f = fires.clone();
+    g.every(|e| {
+        e.a(move |(), _| f.inc());
+    });
+    g.fires(single::SingleSp::a, 4);
+
+    // let-binding: a statement cannot sit in a `let` initializer, so this
+    // compiling proves `invoke!` is an expression evaluating to `()`.
+    let () = shadow_point::invoke!(single::SingleSp, a(0));
+    // if-branch expression.
+    let _ = if true {
+        shadow_point::invoke!(single::SingleSp, a(1));
+        5
+    } else {
+        6
+    };
+    // closure body (the form the old statement-only macro could not take).
+    let run = || shadow_point::invoke!(single::SingleSp, a(2));
+    run();
+    // match-arm expression (two arms: a real expression slot).
+    let pick = 0;
+    match pick {
+        0 => shadow_point::invoke!(single::SingleSp, a(3)),
+        _ => shadow_point::invoke!(single::SingleSp, a(3)),
+    }
+
+    assert_eq!(
+        fires.get(),
+        4,
+        "all four expression-position fires dispatched"
+    );
+    g.verify();
 }

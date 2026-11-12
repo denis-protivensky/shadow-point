@@ -34,9 +34,12 @@ pub trait SyncPoint: Send + Sync {}
 ///
 /// Takes the generated entry point and a plain `hook(args…)` call; dispatch
 /// prepends the guarded `&T`, so it is not written at the call site. It
-/// expands to a statement (an `#[cfg(test)]`-attributed block); write
-/// `invoke!(…);` on its own line, not as a closure body or a block's trailing
-/// value.
+/// expands to a block expression (`{ #[cfg(test)] { … } }`): a real dispatch
+/// under `#[cfg(test)]`, an empty block otherwise. It works as a statement
+/// (`invoke!(…);`) and in expression position — a closure body, a block's
+/// trailing value, `let () = invoke!(…);` — in both test and production
+/// builds. The outer brace pair is what makes the expression form legal: a
+/// bare `#[cfg(test)]`-attributed block is a statement, not an expression.
 ///
 /// Expands to a real dispatch under `#[cfg(test)]` (evaluated at the call
 /// site's crate) and to a no-op otherwise — production builds have no
@@ -119,9 +122,11 @@ pub trait SyncPoint: Send + Sync {}
 #[macro_export]
 macro_rules! invoke {
     ($sp:path, $func:ident ( $($args:expr),* $(,)? )) => {
-        #[cfg(test)]
         {
-            <$sp>::with_dyn(|__sp| __sp.$func($($args),*));
+            #[cfg(test)]
+            {
+                <$sp>::with_dyn(|__sp| __sp.$func($($args),*));
+            }
         }
     };
 }
