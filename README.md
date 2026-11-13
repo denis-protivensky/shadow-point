@@ -35,7 +35,7 @@ shadow-point = "0.5"
 Call `define_sp!` in the module that owns the instrumented code, gated with
 `#[cfg(test)]`. Production builds drop the whole declaration.
 
-```text
+```no_run
 // src/register.rs
 
 #[cfg(test)]
@@ -84,7 +84,7 @@ production but every `invoke!` compiles away.
 
 ### 3. A guard test
 
-```text
+```no_run
 #[cfg(test)]
 mod tests {
     use super::*;

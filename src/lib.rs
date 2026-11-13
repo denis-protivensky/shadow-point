@@ -37,7 +37,7 @@
 /// strips its `cfg(test)` body. Hide the path in a local `macro_rules!`
 /// seam:
 ///
-/// ```text
+/// ```no_run
 /// // src/seam.rs — plain macro_rules; nothing here depends on the crate
 /// macro_rules! sp_invoke {
 ///     ($($t:tt)*) => {
@@ -716,11 +716,12 @@ impl Drop for ExecSink {
 ///
 /// # Example
 ///
-/// Illustrative syntax (a `text` block, not a doctest): `invoke!` is
-/// `#[cfg(test)]`-only and expands to nothing in a doctest, so this cannot
-/// run as one. See `examples/register_private.rs` for a runnable version.
+/// `no_run`: the example type-checks but is not executed — `invoke!` is
+/// `#[cfg(test)]`-only and expands to nothing in a doctest, so the fires
+/// would not happen and `verify()` would fail. See
+/// `examples/register_private.rs` for a runnable version.
 ///
-/// ```text
+/// ```no_run
 /// shadow_point::define_sp! {
 ///     pub mod array_sp {
 ///         entry_before_latch(path: &str, found_idx: Option<usize>),
