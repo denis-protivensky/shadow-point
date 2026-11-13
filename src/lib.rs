@@ -119,154 +119,6 @@ macro_rules! invoke {
     };
 }
 
-// Reject hook names that collide with the fixed public surface: the
-// registration methods (sequence/every/fires/verify), the module constructors
-// (guard/shared), the dispatch fn (with_dyn), the gated-step constructor
-// (when), and `clone` (shadows the generated `Clone` impl on `Shared`). The
-// fixed machinery lives in a private submodule, so no other plain name can
-// collide (D26). The 13 `__sp_`/`__SP_`-prefixed internal names of that
-// machinery's fields and methods are also rejected, with a friendly
-// diagnostic instead of a raw duplicate-definition error (9 public + 13
-// private arms).
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __sp_reject_reserved {
-    (sequence) => {
-        ::core::compile_error!(
-            "`sequence` is a reserved hook name: it collides with the generated \
-             registration method `sequence`"
-        );
-    };
-    (every) => {
-        ::core::compile_error!(
-            "`every` is a reserved hook name: it collides with the generated \
-             registration method `every`"
-        );
-    };
-    (fires) => {
-        ::core::compile_error!(
-            "`fires` is a reserved hook name: it collides with the generated \
-             `fires` method and hook constant"
-        );
-    };
-    (verify) => {
-        ::core::compile_error!(
-            "`verify` is a reserved hook name: it collides with the generated \
-             `verify` method"
-        );
-    };
-    (guard) => {
-        ::core::compile_error!(
-            "`guard` is a reserved hook name: it collides with the module \
-             constructor `guard` in the value namespace"
-        );
-    };
-    (shared) => {
-        ::core::compile_error!(
-            "`shared` is a reserved hook name: it collides with the module \
-             constructor `shared` in the value namespace"
-        );
-    };
-    (with_dyn) => {
-        ::core::compile_error!(
-            "`with_dyn` is a reserved hook name: it collides with the module \
-             dispatch fn `with_dyn` in the value namespace"
-        );
-    };
-    (when) => {
-        ::core::compile_error!(
-            "`when` is a reserved hook name: it collides with the gated-step \
-             constructor `Seq::when`"
-        );
-    };
-    (clone) => {
-        ::core::compile_error!(
-            "`clone` is a reserved hook name: it collides with the generated \
-             `Clone` impl on `Shared` (a hook named `clone` would shadow \
-             `Shared::clone`)"
-        );
-    };
-    (__sp_new) => {
-        ::core::compile_error!(
-            "`__sp_new` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    (__sp_state) => {
-        ::core::compile_error!(
-            "`__sp_state` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    (__sp_from_owner) => {
-        ::core::compile_error!(
-            "`__sp_from_owner` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    (__sp_value) => {
-        ::core::compile_error!(
-            "`__sp_value` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    (__sp_calls) => {
-        ::core::compile_error!(
-            "`__sp_calls` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    (__sp_every) => {
-        ::core::compile_error!(
-            "`__sp_every` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    (__sp_expected) => {
-        ::core::compile_error!(
-            "`__sp_expected` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    (__sp_installed_at) => {
-        ::core::compile_error!(
-            "`__sp_installed_at` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    (__sp_reported) => {
-        ::core::compile_error!(
-            "`__sp_reported` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    (__sp_sequence) => {
-        ::core::compile_error!(
-            "`__sp_sequence` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    (__sp_sequence_cv) => {
-        ::core::compile_error!(
-            "`__sp_sequence_cv` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    (__sp_shared) => {
-        ::core::compile_error!(
-            "`__sp_shared` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    (__SP_NAMES) => {
-        ::core::compile_error!(
-            "`__SP_NAMES` is a reserved hook name: it is an internal name of the generated \
-             machinery's private fields and methods"
-        );
-    };
-    ($other:ident) => {};
-}
-
 // --- trace_enabled ---
 /// Check whether sync-point tracing is enabled via the `SP_TRACE` environment
 /// variable. When set, every hook fire prints its name and call index to
@@ -760,17 +612,29 @@ impl Drop for ExecSink {
 /// - every fire: `g.every(|e| e.a(f))` — runs on every non-suppressed fire.
 /// - count only: `g.fires(<hook>, n)` — no closure.
 ///
+/// Closure bounds: a fire-once or sequence closure is
+/// `FnOnce(&T, args…) + Send + 'static`; an `every` closure is
+/// `Fn(&T, args…) + Send + Sync + 'static`; a `when` predicate is
+/// `Fn(args…) -> bool + Send + 'static`. A captured `Rc` or borrow fails
+/// these bounds.
+///
+/// A `when` predicate is evaluated **under the sequence lock**: it must be a
+/// pure check. A predicate that blocks (a `Gate` wait, a channel recv) holds
+/// the lock against every other firing thread in shared mode and can
+/// deadlock; calling `sequence` from it self-deadlocks. The `every` and
+/// fire-once closures run outside the lock.
+///
 /// # Reserved hook names
 ///
 /// `sequence`, `every`, `fires`, `verify`, `guard`, `shared`, `with_dyn`,
 /// `when`, and `clone` collide with the fixed public surface (`clone` would
-/// shadow the generated `Clone` impl on `Shared`), and the 13
-/// `__sp_`/`__SP_` internal names belong to the generated machinery's private
-/// fields and methods; `define_sp!` rejects all of them with a
-/// `compile_error!` naming the hook. All other names — including `value`,
-/// `calls`, `expected`, `state`, `new`, `hook`, `f`, `NAMES` — are legal: the
-/// fixed machinery lives in a private submodule and cannot collide with a
-/// hook name.
+/// shadow the generated `Clone` impl on `Shared`), and the 12 `__sp_`
+/// internal names belong to the generated machinery; `define_sp!` rejects
+/// all of them with a `compile_error!` naming the hook. Any other identifier
+/// — including `value`, `calls`, `expected`, `state`, `new`, `hook`, `f`,
+/// `NAMES`, `__SP_NAMES` — is legal: the fixed machinery lives in a private
+/// submodule and cannot collide with a hook name. (Keywords such as `loop`
+/// are not identifiers; a raw identifier like `r#type` works.)
 ///
 /// # Hook arguments
 ///
@@ -813,8 +677,67 @@ macro_rules! define_sp {
         #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
         $vis mod $name {
             // ── Reserved hook names (the fixed public surface) ───────
+            //
+            // A local macro (not exported): reject hook names that collide
+            // with the fixed public surface — the registration methods
+            // (sequence/every/fires/verify), the module constructors
+            // (guard/shared), the dispatch fn (with_dyn), the gated-step
+            // constructor (when), and `clone` (shadows the generated `Clone`
+            // impl on `Shared`) — plus the 12 `__sp_` internal names of the
+            // private machinery. The machinery lives in a private submodule,
+            // so no other identifier can collide (D26; 9 public + 12 private).
             const _: () = {
-                $( $crate::__sp_reject_reserved!($method); )+
+                macro_rules! __sp_reject {
+                    (@reject $n:literal, $w:literal) => {
+                        ::core::compile_error!(::core::concat!(
+                            "`", $n, "` is a reserved hook name: ", $w
+                        ));
+                    };
+                    (sequence) => { __sp_reject!(@reject "sequence",
+                        "it collides with the generated registration method `sequence`"); };
+                    (every) => { __sp_reject!(@reject "every",
+                        "it collides with the generated registration method `every`"); };
+                    (fires) => { __sp_reject!(@reject "fires",
+                        "it collides with the generated `fires` method and hook constant"); };
+                    (verify) => { __sp_reject!(@reject "verify",
+                        "it collides with the generated `verify` method"); };
+                    (guard) => { __sp_reject!(@reject "guard",
+                        "it collides with the module constructor `guard` in the value namespace"); };
+                    (shared) => { __sp_reject!(@reject "shared",
+                        "it collides with the module constructor `shared` in the value namespace"); };
+                    (with_dyn) => { __sp_reject!(@reject "with_dyn",
+                        "it collides with the module dispatch fn `with_dyn` in the value namespace"); };
+                    (when) => { __sp_reject!(@reject "when",
+                        "it collides with the gated-step constructor `Seq::when`"); };
+                    (clone) => { __sp_reject!(@reject "clone",
+                        "it collides with the generated `Clone` impl on `Shared` (a hook named `clone` would shadow `Shared::clone`)"); };
+                    (__sp_new) => { __sp_reject!(@reject "__sp_new",
+                        "it is an internal name of the generated machinery"); };
+                    (__sp_state) => { __sp_reject!(@reject "__sp_state",
+                        "it is an internal name of the generated machinery"); };
+                    (__sp_from_owner) => { __sp_reject!(@reject "__sp_from_owner",
+                        "it is an internal name of the generated machinery"); };
+                    (__sp_value) => { __sp_reject!(@reject "__sp_value",
+                        "it is an internal name of the generated machinery"); };
+                    (__sp_calls) => { __sp_reject!(@reject "__sp_calls",
+                        "it is an internal name of the generated machinery"); };
+                    (__sp_every) => { __sp_reject!(@reject "__sp_every",
+                        "it is an internal name of the generated machinery"); };
+                    (__sp_expected) => { __sp_reject!(@reject "__sp_expected",
+                        "it is an internal name of the generated machinery"); };
+                    (__sp_installed_at) => { __sp_reject!(@reject "__sp_installed_at",
+                        "it is an internal name of the generated machinery"); };
+                    (__sp_reported) => { __sp_reject!(@reject "__sp_reported",
+                        "it is an internal name of the generated machinery"); };
+                    (__sp_sequence) => { __sp_reject!(@reject "__sp_sequence",
+                        "it is an internal name of the generated machinery"); };
+                    (__sp_sequence_cv) => { __sp_reject!(@reject "__sp_sequence_cv",
+                        "it is an internal name of the generated machinery"); };
+                    (__sp_shared) => { __sp_reject!(@reject "__sp_shared",
+                        "it is an internal name of the generated machinery"); };
+                    ($other:ident) => {};
+                }
+                $( __sp_reject!($method); )+
             };
 
             // ── Hook identifiers ─────────────────────────────────────
@@ -830,20 +753,6 @@ macro_rules! define_sp {
                     #[doc = concat!("The `", stringify!($method), "` hook.")]
                     $method,
                 )+
-            }
-
-            impl Hook {
-                /// Hook names indexed by discriminant, for diagnostics.
-                /// `__sp_`/`__SP_`-prefixed: a hook named `NAMES` would otherwise
-                /// shadow this associated constant (`Hook::NAMES[i]` would
-                /// index the hook variant).
-                const __SP_NAMES: &'static [&'static str] = &[$(stringify!($method)),+];
-                /// The hook's own name, for diagnostics. `__sp_`/`__SP_`-prefixed:
-                /// a hook named `name` would otherwise collide with this
-                /// method in the method namespace.
-                fn __sp_name(&self) -> &'static str {
-                    Self::__SP_NAMES[*self as usize]
-                }
             }
 
             $(
@@ -863,6 +772,16 @@ macro_rules! define_sp {
             #[allow(dead_code, non_camel_case_types, non_snake_case)]
             mod __sp_impl {
                 use super::Hook;
+
+                /// Hook names indexed by discriminant, for diagnostics. A
+                /// free item in the private submodule, so a hook named
+                /// `__SP_NAMES` cannot shadow it (and the name is not reserved).
+                const __SP_NAMES: &[&str] = &[$(stringify!($method)),+];
+
+                /// The hook's own name, for diagnostics.
+                fn __sp_name(h: Hook) -> &'static str {
+                    __SP_NAMES[h as usize]
+                }
 
                 // Dispatch trait: erases the guarded value type so one
                 // thread-local slot serves any `T`.
@@ -936,7 +855,7 @@ macro_rules! define_sp {
                         self.action.hook() == h
                     }
                     fn name(&self) -> &'static str {
-                        self.action.hook().__sp_name()
+                        __sp_name(self.action.hook())
                     }
                 }
 
@@ -989,6 +908,13 @@ macro_rules! define_sp {
                     /// on the returned handle adds the bound for that hook's
                     /// arguments, so a single-hook predicate need only
                     /// satisfy its own signature.
+                    ///
+                    /// The predicate runs under the sequence lock and must be
+                    /// a pure check: a blocking predicate (a `Gate` wait, a
+                    /// channel recv) holds the lock against other firing
+                    /// threads in shared mode and can deadlock; calling
+                    /// `sequence` from it self-deadlocks. The step closure
+                    /// runs outside the lock.
                     pub fn when<P>(&mut self, pred: P) -> When<'_, T, P> {
                         When { seq: self, pred }
                     }
@@ -1023,10 +949,10 @@ macro_rules! define_sp {
 
                 // ── State ────────────────────────────────────────────
 
-                pub struct State<T: Send + Sync + 'static> {
-                    pub __sp_value: T,
+                struct State<T: Send + Sync + 'static> {
+                    __sp_value: T,
                     $(
-                        pub $method: ::std::sync::Mutex<
+                        $method: ::std::sync::Mutex<
                             Option<Box<dyn FnOnce(&T $( , $arg_ty)*) + Send>>
                         >,
                     )+
@@ -1043,7 +969,7 @@ macro_rules! define_sp {
                 }
 
                 impl<T: Send + Sync + 'static> State<T> {
-                    pub fn __sp_new(
+                    fn __sp_new(
                         value: T,
                         shared: bool,
                         installed_at: &'static std::panic::Location<'static>,
@@ -1085,7 +1011,7 @@ macro_rules! define_sp {
 
                 // ── Per-hook operations (free functions) ─────────────
 
-                pub fn bump_call<T: Send + Sync + 'static>(
+                fn bump_call<T: Send + Sync + 'static>(
                     st: &State<T>, h: Hook,
                 ) -> usize {
                     st.__sp_calls[h as usize].fetch_add(
@@ -1093,7 +1019,7 @@ macro_rules! define_sp {
                     )
                 }
 
-                pub fn set_expected<T: Send + Sync + 'static>(
+                fn set_expected<T: Send + Sync + 'static>(
                     st: &State<T>, h: Hook, n: usize,
                 ) {
                     st.__sp_expected
@@ -1115,7 +1041,7 @@ macro_rules! define_sp {
                     }
                 }
 
-                pub fn build_sequence<T: Send + Sync + 'static>(
+                fn build_sequence<T: Send + Sync + 'static>(
                     st: &State<T>, f: impl FnOnce(&mut Seq<T>),
                 ) {
                     let mut builder = Seq {
@@ -1126,7 +1052,7 @@ macro_rules! define_sp {
                         builder.seq;
                 }
 
-                pub fn set_every<T: Send + Sync + 'static>(
+                fn set_every<T: Send + Sync + 'static>(
                     st: &State<T>, f: impl FnOnce(&mut Every<T>),
                 ) {
                     let mut every = Every { $( $method: None, )+ };
@@ -1142,8 +1068,26 @@ macro_rules! define_sp {
                     );
                 }
 
+                /// Mark the state reported, then raise `panic` (or print it
+                /// while unwinding). Shared by both `assert_fires` paths; the
+                /// caller supplies the panic form so the count path keeps its
+                /// `assert_eq!` payload shape.
+                fn report_mismatch<T: Send + Sync + 'static>(
+                    st: &State<T>,
+                    unwinding: bool,
+                    message: &str,
+                    raise: impl FnOnce(),
+                ) {
+                    st.__sp_reported.store(true, ::std::sync::atomic::Ordering::SeqCst);
+                    if unwinding {
+                        report_while_unwinding(message);
+                    } else {
+                        raise();
+                    }
+                }
+
                 #[track_caller]
-                pub fn assert_fires<T: Send + Sync + 'static>(
+                fn assert_fires<T: Send + Sync + 'static>(
                     st: &State<T>, from_drop: bool,
                 ) {
                     if from_drop
@@ -1171,12 +1115,7 @@ macro_rules! define_sp {
                             st.__sp_installed_at,
                         );
                         drop(seq);
-                        st.__sp_reported.store(true, ::std::sync::atomic::Ordering::SeqCst);
-                        if unwinding {
-                            report_while_unwinding(&message);
-                        } else {
-                            panic!("{message}");
-                        }
+                        report_mismatch(st, unwinding, &message, || panic!("{message}"));
                     } else {
                         drop(seq);
                     }
@@ -1194,31 +1133,28 @@ macro_rules! define_sp {
                         let message = format!(
                             "sync point hook `{}` fired {actual} \
                              time(s), expected {expected} ({}installed at {})",
-                            Hook::__SP_NAMES[i],
+                            __SP_NAMES[i],
                             if shared { "shared, " } else { "" },
                             st.__sp_installed_at,
                         );
-                        st.__sp_reported.store(true, ::std::sync::atomic::Ordering::SeqCst);
-                        if unwinding {
-                            report_while_unwinding(&message);
-                        } else {
+                        report_mismatch(st, unwinding, &message, || {
                             assert_eq!(actual, *expected, "{message}");
-                        }
+                        });
                     }
                 }
 
                 // ── Owner: the single assertion/reclamation point ────
 
-                pub struct Owner<T: Send + Sync + 'static> {
+                struct Owner<T: Send + Sync + 'static> {
                     state: Option<::std::sync::Arc<State<T>>>,
                 }
 
                 impl<T: Send + Sync + 'static> Owner<T> {
-                    pub fn __sp_new(state: ::std::sync::Arc<State<T>>) -> Self {
+                    fn __sp_new(state: ::std::sync::Arc<State<T>>) -> Self {
                         Self { state: Some(state) }
                     }
 
-                    pub fn __sp_state(&self) -> &State<T> {
+                    fn __sp_state(&self) -> &State<T> {
                         self.state
                             .as_ref()
                             .expect("shadow-point: owner used after drop")
@@ -1238,7 +1174,7 @@ macro_rules! define_sp {
                             if $crate::trace_enabled() {
                                 eprintln!(
                                     "[sp] {} call #{} thread={}",
-                                    h.__sp_name(),
+                                    __sp_name(h),
                                     idx + 1,
                                     std::thread::current()
                                         .name()
@@ -1246,7 +1182,7 @@ macro_rules! define_sp {
                                 );
                             }
                             let _f = $crate::CurrentFire::install($crate::FireInfo {
-                                hook: h.__sp_name(),
+                                hook: __sp_name(h),
                                 index: idx,
                             });
                             let every = {
@@ -1274,7 +1210,11 @@ macro_rules! define_sp {
                                                     pred($($arg),*)
                                                 }
                                                 SeqAction::$method(None, _) => true,
-                                                _ => true,
+                                                // front.matches(h) guarantees this variant.
+                                                _ => unreachable!(
+                                                    "shadow-point: sequence head matched a \
+                                                     different hook variant"
+                                                ),
                                             };
                                             if pass {
                                                 let entry = seq.pop_front();
@@ -1297,7 +1237,7 @@ macro_rules! define_sp {
                                                          for `{}`, head is `{}` \
                                                          (installed at {})",
                                                         $crate::park_timeout(),
-                                                        h.__sp_name(),
+                                                        __sp_name(h),
                                                         front.name(),
                                                         st.__sp_installed_at,
                                                     );
@@ -1317,7 +1257,7 @@ macro_rules! define_sp {
                                                 "sync point ordering violation: \
                                                  expected `{}` next but `{}` fired",
                                                 front.name(),
-                                                h.__sp_name()
+                                                __sp_name(h)
                                             );
                                         }
                                     }
@@ -1493,13 +1433,13 @@ macro_rules! define_sp {
                     /// Attach this sync point to the calling thread,
                     /// returning a guard that restores the previous install
                     /// on drop.
-                    #[track_caller]
                     pub fn guard(&self) -> Guard<T> {
                         attach(::std::sync::Arc::clone(&self.owner))
                     }
 
                     $(
-                        /// Register a fire-once closure for this hook.
+                        /// Register a fire-once closure for this hook; chain
+                        /// `.fires(n)` for a different count.
                         pub fn $method(
                             &self,
                             f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
@@ -1541,7 +1481,7 @@ macro_rules! define_sp {
 
                 // ── TLS attach (shared by both constructors) ─────────
 
-                pub fn attach<T: Send + Sync + 'static>(
+                fn attach<T: Send + Sync + 'static>(
                     owner: ::std::sync::Arc<Owner<T>>,
                 ) -> Guard<T> {
                     // `.clone()` at the binding, not `Arc::clone`: the

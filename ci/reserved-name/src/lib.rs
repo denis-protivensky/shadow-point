@@ -6,10 +6,10 @@
 //!
 //! Covers the 0.5.0 reserved list (D26): the 9 fixed public names
 //! (registration methods, module constructors, dispatch fn, gated-step
-//! constructor, and `clone`) plus the 13 `__sp_`/`__SP_` internal machinery
-//! names (including `Hook::__SP_NAMES`). Plain names like
-//! `value`/`state`/`new`/`f`/`NAMES` are legal hook names (the machinery lives
-//! in a private submodule) and are NOT listed here.
+//! constructor, and `clone`) plus the 12 `__sp_` internal machinery names.
+//! Plain names like `value`/`state`/`new`/`f`/`NAMES`/`__SP_NAMES` are legal
+//! hook names (the machinery lives in a private submodule) and are NOT
+//! listed here.
 
 shadow_point::define_sp! {
     mod reserved_sp {
@@ -34,6 +34,5 @@ shadow_point::define_sp! {
         __sp_sequence(),
         __sp_sequence_cv(),
         __sp_shared(),
-        __SP_NAMES(),
     }
 }

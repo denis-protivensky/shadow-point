@@ -88,31 +88,40 @@ production but every `invoke!` compiles away.
 ### 3. A guard test
 
 ```rust,no_run
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
-    #[test]
-    fn the_hook_runs_before_the_store() {
-        let guard = register_sp::guard(Register(AtomicU32::new(0)));
+shadow_point::define_sp! {
+    pub mod register_sp { before_store(value: u32), }
+}
 
-        // In this example the closure runs on the first fire, with the call's
-        // arguments. Registration asserts exactly one HOOK fire; `.fires(n)`
-        // pins a different count.
-        guard.before_store(|_register, value| {
-            assert_eq!(value, 7);
-        });
-
-        guard.store(7);
-        assert_eq!(guard.0.load(Ordering::SeqCst), 7);
+struct Register(AtomicU32);
+impl Register {
+    fn store(&self, value: u32) {
+        #[cfg(test)]
+        shadow_point::invoke!(register_sp, before_store(value));
+        self.0.store(value, Ordering::SeqCst);
     }
+}
+
+fn the_hook_runs_before_the_store() {
+    let guard = register_sp::guard(Register(AtomicU32::new(0)));
+
+    // In this example the closure runs on the first fire, with the call's
+    // arguments. Registration asserts exactly one HOOK fire; `.fires(n)`
+    // pins a different count.
+    guard.before_store(|_register, value| {
+        assert_eq!(value, 7);
+    });
+
+    guard.store(7);
+    assert_eq!(guard.0.load(Ordering::SeqCst), 7);
 }
 ```
 
-These snippets are excerpts: they assume `struct Register(AtomicU32);` and
-`use std::sync::atomic::{AtomicU32, Ordering};`. The complete file is
-`examples/register_private.rs`.
+This snippet is a compile gate for the registration surface (it is `no_run`:
+`invoke!` is `cfg(test)`-only, so the fire itself does not happen in a
+doctest). The complete runnable file is `examples/register_private.rs`;
+`api-fixture` and the examples are the API-drift gates.
 
 The guard derefs to `&T`, so `guard.store(…)` and `guard.0` are the guarded
 value's own API. A nested fire of the same sync point on the same thread is
@@ -163,7 +172,7 @@ most common wrong-mode mistake — those fires disappear.
 | assert now | `guard.verify()` — same checks as drop, at the call site |
 | every fire | `guard.every(\|e\| e.<name>(f))` |
 | ordered | `guard.sequence(\|s\| { s.a(f).b(g); })` |
-| conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires the first time `pred` passes |
+| conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires the first time `pred` passes. `pred` runs under the sequence lock: keep it a pure check (a blocking predicate can deadlock shared mode) |
 | shared | `register_sp::shared(value)`, then `shared.guard()` per firing thread |
 
 `<name>` is the hook name declared in `define_sp!`; `define_sp!` generates
@@ -195,8 +204,8 @@ the 0.4.0 deprecations, and drops the `paste` dependency. The counting
 semantics are unchanged from 0.4.0 — only names, types, and ownership move.
 
 - **Module form.** `define_sp! { pub prefix Register { … } }` becomes
-  `define_sp! { pub mod register_sp { … } }`. The prefixed names (`RegisterSp`,
-  `RegisterSpGuard`, `RegisterSharedSp`, `RegisterSharedGuard`,
+  `define_sp! { pub mod register_sp { … } }`. The 0.4.0 generated names
+  (`RegisterSp`, `RegisterSpGuard`, `RegisterSharedSp`, `RegisterSharedGuard`,
   `RegisterSeqBuilder`, `EveryClosures`, `SpExpect`, `RegisterHook`,
   `RegisterSyncPoint`) are gone. The user-facing surface is `guard`, `shared`,
   `Guard`, `Shared`, the `Hook` identifier type, and a hook-identifier constant
@@ -230,11 +239,12 @@ semantics are unchanged from 0.4.0 — only names, types, and ownership move.
 - **Reserved hook names.** The list is `sequence`, `every`, `fires`,
   `verify`, `guard`, `shared`, `with_dyn`, `when`, `clone` — the fixed public
   surface (`clone` would shadow the generated `Clone` impl on `Shared`) —
-  plus the 13 `__sp_`/`__SP_` internal names of the generated machinery's
-  private fields and methods (including `Hook::__SP_NAMES`). A hook with one
-  of these names is rejected with a `compile_error!`. All other names are
-  free: the machinery lives in a private submodule, so hook names like
-  `value`, `state`, `new`, `hook`, `f`, or `NAMES` no longer collide.
+  plus the 12 `__sp_` internal names of the generated machinery. A hook with
+  one of these names is rejected with a `compile_error!`. Any other
+  identifier is a legal hook name — the machinery lives in a private
+  submodule, so names like `value`, `state`, `new`, `hook`, `f`, `NAMES`, or
+  `__SP_NAMES` no longer collide. (Keywords such as `loop` are not
+  identifiers; a raw identifier like `r#type` works.)
 - **Ownership.** Assertions and reclamation run in one place — the last
   owner's drop — for both modes. `drop(shared)` while a worker guard is live
   gives no verdict and frees nothing; the verdict runs when the last guard

@@ -24,7 +24,7 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
 
 ### Changed
 - `define_sp!` now generates a **module**: `define_sp! { pub mod name { … } }`.
-  The prefixed names (`XSp`, `XSpGuard`, `XSharedSp`, `XSharedGuard`,
+  The 0.4.0 generated names (`XSp`, `XSpGuard`, `XSharedSp`, `XSharedGuard`,
   `XSeqBuilder`, `EveryClosures`, `SpExpect`, `XHook`, `XSyncPoint`) are gone.
   The user-facing surface is the `guard`/`shared` constructors, a clonable
   `Shared<T>`, a hook-identifier constant per hook, and the `Hook` identifier
@@ -58,21 +58,22 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   `drop(shared)` with a live guard gives no verdict and frees nothing; the
   last owner may be a `Guard`. The raise-or-print-on-unwind rule and the
   deliberate leak on a failing thread are unchanged.
-- Counters are `Vec`s sized by the hook list; the `__SP_COUNT`/`__SP_NAMES`
-  associated constants and the `[T; N]: Default` (N ≤ 32) ceiling are gone.
+- Counters are a `Vec<AtomicUsize>` sized by the hook list; the `__SP_COUNT`
+  associated constant and the `[T; N]: Default` (N ≤ 32) ceiling are gone.
+  The diagnostics name table lives on as a private `__SP_NAMES` in the
+  generated machinery.
 - Non-`Copy` hook arguments are rejected at the declaration (a nested-fn
   const check spans the declared type) instead of failing inside the
   expansion. Arguments must be `Copy`; declare a reference or raw pointer
   when the call site keeps the value.
-- The reserved-hook-name list is rebuilt for the module surface (22 arms):
+- The reserved-hook-name list is rebuilt for the module surface (21 arms):
   the 9 fixed public names (`sequence`, `every`, `fires`, `verify`, `guard`,
   `shared`, `with_dyn`, `when`, `clone` — the last would shadow the generated
-  `Clone` impl on `Shared`) plus the 13 `__sp_`/`__SP_` internal names of the
-  generated machinery's private fields and methods (including
-  `Hook::__SP_NAMES`). The machinery now lives in a private submodule, so
-  plausible plain hook names (`value`, `state`, `new`, `hook`, `f`, `NAMES`,
-  `calls`, `expected`, …) no longer collide and are legal; the reserved names
-  are rejected with a friendly `compile_error!` rather than a raw
+  `Clone` impl on `Shared`) plus the 12 `__sp_` internal names of the
+  generated machinery. The machinery now lives in a private submodule, so
+  any other identifier (`value`, `state`, `new`, `hook`, `f`, `NAMES`,
+  `__SP_NAMES`, `calls`, `expected`, …) is a legal hook name; the reserved
+  names are rejected with a friendly `compile_error!` rather than a raw
   duplicate-definition error.
 
 ### Removed
