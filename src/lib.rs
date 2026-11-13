@@ -118,7 +118,7 @@ macro_rules! invoke {
 // registration methods (sequence/every/fires/verify), the module constructors
 // (guard/shared), the dispatch fn (with_dyn), and the gated-step constructor
 // (when). The fixed machinery lives in a private submodule, so no other plain
-// name can collide (D26). The `__sp_`-prefixed names of that machinery's
+// name can collide (D26). The `__sp_`/`__SP_`-prefixed names of that machinery's
 // fields and methods are also rejected, with a friendly diagnostic instead of
 // a raw duplicate-definition error (8 public + 13 private arms).
 #[doc(hidden)]
@@ -174,79 +174,79 @@ macro_rules! __sp_reject_reserved {
     };
     (__sp_new) => {
         ::core::compile_error!(
-            "`__sp_new` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__sp_new` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
     (__sp_state) => {
         ::core::compile_error!(
-            "`__sp_state` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__sp_state` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
     (__sp_from_owner) => {
         ::core::compile_error!(
-            "`__sp_from_owner` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__sp_from_owner` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
     (__sp_value) => {
         ::core::compile_error!(
-            "`__sp_value` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__sp_value` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
     (__sp_calls) => {
         ::core::compile_error!(
-            "`__sp_calls` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__sp_calls` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
     (__sp_every) => {
         ::core::compile_error!(
-            "`__sp_every` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__sp_every` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
     (__sp_expected) => {
         ::core::compile_error!(
-            "`__sp_expected` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__sp_expected` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
     (__sp_installed_at) => {
         ::core::compile_error!(
-            "`__sp_installed_at` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__sp_installed_at` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
     (__sp_reported) => {
         ::core::compile_error!(
-            "`__sp_reported` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__sp_reported` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
     (__sp_sequence) => {
         ::core::compile_error!(
-            "`__sp_sequence` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__sp_sequence` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
     (__sp_sequence_cv) => {
         ::core::compile_error!(
-            "`__sp_sequence_cv` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__sp_sequence_cv` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
     (__sp_shared) => {
         ::core::compile_error!(
-            "`__sp_shared` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__sp_shared` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
     (__SP_NAMES) => {
         ::core::compile_error!(
-            "`__SP_NAMES` is a reserved hook name: the `__sp_` prefix is reserved \
+            "`__SP_NAMES` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
@@ -748,7 +748,7 @@ impl Drop for ExecSink {
 /// # Reserved hook names
 ///
 /// `sequence`, `every`, `fires`, `verify`, `guard`, `shared`, `with_dyn`,
-/// and `when` collide with the fixed public surface, and the `__sp_`-prefixed
+/// and `when` collide with the fixed public surface, and the `__sp_`/`__SP_`-prefixed
 /// names belong to the generated machinery's private fields and methods;
 /// `define_sp!` rejects all of them with a `compile_error!` naming the hook.
 /// All other names — including `value`, `calls`, `expected`, `state`, `new`,
@@ -817,11 +817,11 @@ macro_rules! define_sp {
 
             impl Hook {
                 /// Hook names indexed by discriminant, for diagnostics.
-                /// `__sp_`-prefixed: a hook named `NAMES` would otherwise
+                /// `__sp_`/`__SP_`-prefixed: a hook named `NAMES` would otherwise
                 /// shadow this associated constant (`Hook::NAMES[i]` would
                 /// index the hook variant).
                 const __SP_NAMES: &'static [&'static str] = &[$(stringify!($method)),+];
-                /// The hook's own name, for diagnostics. `__sp_`-prefixed:
+                /// The hook's own name, for diagnostics. `__sp_`/`__SP_`-prefixed:
                 /// a hook named `name` would otherwise collide with this
                 /// method in the method namespace.
                 fn __sp_name(&self) -> &'static str {

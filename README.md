@@ -226,7 +226,7 @@ semantics are unchanged from 0.4.0 — only names, types, and ownership move.
   reference (`key: &K`) or raw pointer when the call site keeps the value.
 - **Reserved hook names.** The list is `sequence`, `every`, `fires`,
   `verify`, `guard`, `shared`, `with_dyn`, `when` — the fixed public surface —
-  plus the `__sp_`-prefixed names of the generated machinery's private fields
+  plus the `__sp_`/`__SP_`-prefixed names of the generated machinery's private fields
   and methods (including `Hook::__SP_NAMES`). A hook with one of these names
   is rejected with a `compile_error!`. All other names are free: the machinery
   lives in a private submodule, so hook names like `value`, `state`, `new`,

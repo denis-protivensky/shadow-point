@@ -6,7 +6,7 @@
 //!
 //! Covers the 0.5.0 reserved list (D26): the 8 fixed public names
 //! (registration methods, module constructors, dispatch fn, gated-step
-//! constructor) plus the `__sp_`-prefixed private machinery names (including
+//! constructor) plus the `__sp_`/`__SP_`-prefixed private machinery names (including
 //! `Hook::__SP_NAMES`). Plain names like `value`/`state`/`new`/`f`/`NAMES`
 //! are legal hook names (the machinery lives in a private submodule) and are
 //! NOT listed here.

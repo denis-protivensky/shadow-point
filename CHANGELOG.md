@@ -66,7 +66,7 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   when the call site keeps the value.
 - The reserved-hook-name list is rebuilt for the module surface (21 arms):
   the 8 fixed public names (`sequence`, `every`, `fires`, `verify`, `guard`,
-  `shared`, `with_dyn`, `when`) plus the 13 `__sp_`-prefixed names of the
+  `shared`, `with_dyn`, `when`) plus the 13 `__sp_`/`__SP_`-prefixed names of the
   generated machinery's private fields and methods (including
   `Hook::__SP_NAMES`). The machinery now lives in a private submodule, so
   plausible plain hook names (`value`, `state`, `new`, `hook`, `f`, `NAMES`,
