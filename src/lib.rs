@@ -183,79 +183,79 @@ macro_rules! __sp_reject_reserved {
     };
     (__sp_new) => {
         ::core::compile_error!(
-            "`__sp_new` is a reserved hook name: an internal name of the generated \
+            "`__sp_new` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
     (__sp_state) => {
         ::core::compile_error!(
-            "`__sp_state` is a reserved hook name: an internal name of the generated \
+            "`__sp_state` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
     (__sp_from_owner) => {
         ::core::compile_error!(
-            "`__sp_from_owner` is a reserved hook name: an internal name of the generated \
+            "`__sp_from_owner` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
     (__sp_value) => {
         ::core::compile_error!(
-            "`__sp_value` is a reserved hook name: an internal name of the generated \
+            "`__sp_value` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
     (__sp_calls) => {
         ::core::compile_error!(
-            "`__sp_calls` is a reserved hook name: an internal name of the generated \
+            "`__sp_calls` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
     (__sp_every) => {
         ::core::compile_error!(
-            "`__sp_every` is a reserved hook name: an internal name of the generated \
+            "`__sp_every` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
     (__sp_expected) => {
         ::core::compile_error!(
-            "`__sp_expected` is a reserved hook name: an internal name of the generated \
+            "`__sp_expected` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
     (__sp_installed_at) => {
         ::core::compile_error!(
-            "`__sp_installed_at` is a reserved hook name: an internal name of the generated \
+            "`__sp_installed_at` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
     (__sp_reported) => {
         ::core::compile_error!(
-            "`__sp_reported` is a reserved hook name: an internal name of the generated \
+            "`__sp_reported` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
     (__sp_sequence) => {
         ::core::compile_error!(
-            "`__sp_sequence` is a reserved hook name: an internal name of the generated \
+            "`__sp_sequence` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
     (__sp_sequence_cv) => {
         ::core::compile_error!(
-            "`__sp_sequence_cv` is a reserved hook name: an internal name of the generated \
+            "`__sp_sequence_cv` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
     (__sp_shared) => {
         ::core::compile_error!(
-            "`__sp_shared` is a reserved hook name: an internal name of the generated \
+            "`__sp_shared` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
     (__SP_NAMES) => {
         ::core::compile_error!(
-            "`__SP_NAMES` is a reserved hook name: an internal name of the generated \
+            "`__SP_NAMES` is a reserved hook name: it is an internal name of the generated \
              machinery's private fields and methods"
         );
     };
