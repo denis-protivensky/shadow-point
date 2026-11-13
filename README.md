@@ -51,7 +51,7 @@ shadow_point::define_sp! {
 modes, a clonable `Shared<T>`, a hook-identifier constant per hook
 (`register_sp::before_store`), and the `sequence`/`every` builders. Every
 generated item lives inside the module, so several sync points with distinct
-module names can share a file directly — no wrapper `mod` needed.
+module names can share a file directly.
 
 ### 2. Fire at the linearization point
 
@@ -137,9 +137,10 @@ suppressed: calling instrumented code inside a hook does not recurse.
   proceeds. Assertions run when the last owner drops, after the workers are
   joined.
 
-Both modes return the **same** `Guard<T>` type; registration, `Deref`, and
-`verify()` are defined once. `Guard` is `!Send`: drop it on the thread that
-created it — moving it across threads is a compile error, not a runtime trap.
+The per-thread guard is one `Guard<T>` type in both modes; the registration
+API (`Deref`, fire-once/`sequence`/`every`/`fires`/`verify`) mirrors on `Guard`
+and `Shared`. `Guard` is `!Send`: drop it on the thread that created it —
+moving it across threads is a compile error, not a runtime trap.
 
 The decision rule: one thread under test → private guard. Several threads →
 if each worker's local contract is what you assert, use one private guard
@@ -159,7 +160,7 @@ most common wrong-mode mistake — those fires disappear.
 | assert now | `guard.verify()` — same checks as drop, at the call site |
 | every fire | `guard.every(\|e\| e.<name>(f))` |
 | ordered | `guard.sequence(\|s\| { s.a(f).b(g); })` |
-| conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires on the first fire that passes `pred` |
+| conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires the first time `pred` passes |
 | shared | `register_sp::shared(value)`, then `shared.guard()` per firing thread |
 
 `<name>` is the hook name declared in `define_sp!`; `define_sp!` generates
@@ -194,9 +195,10 @@ semantics are unchanged from 0.4.0 — only names, types, and ownership move.
   `define_sp! { pub mod register_sp { … } }`. The prefixed names (`RegisterSp`,
   `RegisterSpGuard`, `RegisterSharedSp`, `RegisterSharedGuard`,
   `RegisterSeqBuilder`, `EveryClosures`, `SpExpect`, `RegisterHook`,
-  `RegisterSyncPoint`) are gone; the module exposes `guard`, `shared`,
-  `Guard`, `Shared`, `Seq`, `When`, `Every`, `Expect`, `Hook`, and a constant
-  per hook.
+  `RegisterSyncPoint`) are gone. The user-facing surface is `guard`, `shared`,
+  `Guard`, `Shared`, and a hook-identifier constant per hook; the builders and
+  dispatch machinery (`Seq`, `When`, `Every`, `Expect`, `Hook`, `Hooks`,
+  `SetExpected`, `with_dyn`) are `#[doc(hidden)]` internals.
 - **Constructors.** `RegisterSp::install_guard(v)` → `register_sp::guard(v)`;
   `RegisterSp::install_shared(v)` → `register_sp::shared(v)` (returns
   `Shared<T>`, not `Arc<…SharedSp<T>>`); `shared.install()` → `shared.guard()`.

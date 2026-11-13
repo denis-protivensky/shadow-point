@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/denis-protivensky/shadow-point/releases/tag/v0.1.0
 
-## [0.5.0] - 2026-11-12
+## [0.5.0] - Unreleased
 
 Breaking release: the namespace and types change, the 0.4.0 deprecations are
 removed, and the `paste` dependency is dropped. Counting semantics are
@@ -26,17 +26,19 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
 - `define_sp!` now generates a **module**: `define_sp! { pub mod name { … } }`.
   The prefixed names (`XSp`, `XSpGuard`, `XSharedSp`, `XSharedGuard`,
   `XSeqBuilder`, `EveryClosures`, `SpExpect`, `XHook`, `XSyncPoint`) are gone.
-  The module exposes `guard`/`shared` constructors, one `Guard<T>` for both
-  modes, a clonable `Shared<T>`, `Seq`/`When`/`Every`/`Expect` builders, a
-  hidden `Hook` type, and a hook-identifier constant per hook. Several sync
-  points can now share a file (one module each); the one-invocation-per-module
-  rule is gone.
+  The user-facing surface is the `guard`/`shared` constructors, one `Guard<T>`
+  for both modes, a clonable `Shared<T>`, and a hook-identifier constant per
+  hook; the builders and dispatch machinery (`Seq`, `When`, `Every`, `Expect`,
+  `Hook`, `Hooks`, `SetExpected`, `with_dyn`) are `#[doc(hidden)]` internals.
+  Several sync points can now share a file (distinct module names); the
+  one-invocation-per-module rule is gone.
 - `install_guard`/`install_shared`/`install` → `guard`/`shared`/`shared.guard()`.
   `shared(value)` returns `Shared<T>` (`Clone`, `Send + Sync`), not
   `Arc<…SharedSp<T>>`; hand clones to workers.
-- One `Guard<T>` type serves both modes; registration, `Deref`, and `verify()`
-  are defined once. `Guard` is `!Send` (`PhantomData<*const ()>`): moving it
-  across threads is a compile error.
+- The per-thread guard is one `Guard<T>` type in both modes; the registration
+  API (`Deref`, fire-once/`sequence`/`every`/`fires`/`verify`) mirrors on
+  `Guard` and `Shared`. `Guard` is `!Send` (`PhantomData<*const ()>`): moving
+  it across threads is a compile error.
 - `invoke!` takes the module path (`invoke!(name, hook(args))`) and expands to
   a block expression, so it works in expression position (closure body, block
   tail, `let` initializer) in both test and production builds.
@@ -61,6 +63,14 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   const check spans the declared type) instead of failing inside the
   expansion. Arguments must be `Copy`; declare a reference or raw pointer
   when the call site keeps the value.
+- The reserved-hook-name list is rebuilt for the module surface (14 arms):
+  `sequence`, `every`, `fires`, `verify`, `guard`, `shared`, `with_dyn`,
+  `when`, and the private state fields (`value`, `calls`, `expected`,
+  `installed_at`, `sequence_cv`, `__sp_reported`). `with_dyn` stays reserved
+  (a hook constant collides with the dispatch fn in the module value
+  namespace); `when` and `guard` are added. Private helpers are renamed to
+  `__sp_*` so plausible hook names (`state`, `new`, `set_expected`, …) no
+  longer collide with the expansion — the surface is not narrowed.
 
 ### Removed
 - `SeqBuilder::optional`, the `SeqEntry.optional` field, the shared-mode
@@ -72,14 +82,6 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
 - The public `SyncPoint` marker trait (the dispatch trait stays internal for
   type erasure) and the `paste` dependency — the crate now has **zero
   non-optional dependencies**.
-
-### Fixed
-- The reserved-hook-name list is rebuilt for the module surface (14 arms):
-  `sequence`, `every`, `fires`, `verify`, `guard`, `shared`, `with_dyn`,
-  `when`, and the private state fields (`value`, `calls`, `expected`,
-  `installed_at`, `sequence_cv`, `__sp_reported`). `with_dyn` stays reserved
-  (a hook constant collides with the dispatch fn in the module value
-  namespace); `when` and `guard` are added.
 
 ## [0.4.0] - 2026-11-10
 
