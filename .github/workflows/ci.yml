@@ -70,7 +70,7 @@ jobs:
             echo "::error::reserved-name fixture compiled"
             exit 1
           fi
-          for name in sequence every fires verify guard shared with_dyn when value calls expected installed_at sequence_cv __sp_reported; do
+          for name in sequence every fires verify guard shared with_dyn when __sp_new __sp_state __sp_from_owner __sp_value __sp_calls __sp_every __sp_expected __sp_installed_at __sp_reported __sp_sequence __sp_sequence_cv __sp_shared; do
             grep -F "\`$name\` is a reserved hook name" reserved-name.err
           done
 

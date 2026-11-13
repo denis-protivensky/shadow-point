@@ -224,10 +224,11 @@ semantics are unchanged from 0.4.0 — only names, types, and ownership move.
   declaration (it already failed inside the expansion in 0.4.0); declare a
   reference (`key: &K`) or raw pointer when the call site keeps the value.
 - **Reserved hook names.** The list is `sequence`, `every`, `fires`,
-  `verify`, `guard`, `shared`, `with_dyn`, `when` — the fixed public surface.
-  A hook with one of these names is rejected with a `compile_error!`. All
-  other names are free: the generated machinery lives in a private submodule,
-  so hook names like `value`, `state`, or `new` no longer collide.
+  `verify`, `guard`, `shared`, `with_dyn`, `when` — the fixed public surface —
+  plus the `__sp_`-prefixed names of the generated machinery's private fields
+  and methods. A hook with one of these names is rejected with a
+  `compile_error!`. All other names are free: the machinery lives in a private
+  submodule, so hook names like `value`, `state`, or `new` no longer collide.
 - **Ownership.** Assertions and reclamation run in one place — the last
   owner's drop — for both modes. `drop(shared)` while a worker guard is live
   gives no verdict and frees nothing; the verdict runs when the last guard

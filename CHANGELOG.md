@@ -26,10 +26,10 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
 - `define_sp!` now generates a **module**: `define_sp! { pub mod name { … } }`.
   The prefixed names (`XSp`, `XSpGuard`, `XSharedSp`, `XSharedGuard`,
   `XSeqBuilder`, `EveryClosures`, `SpExpect`, `XHook`, `XSyncPoint`) are gone.
-  The user-facing surface is the `guard`/`shared` constructors, one `Guard<T>`
-  for both modes, a clonable `Shared<T>`, and a hook-identifier constant per
-  hook; the builders and dispatch machinery (`Seq`, `When`, `Every`, `Expect`,
-  `Hook`, `Hooks`, `with_dyn`) are `#[doc(hidden)]` internals.
+  The user-facing surface is the `guard`/`shared` constructors, a clonable
+  `Shared<T>`, a hook-identifier constant per hook, and the `Hook` identifier
+  type; the builders and dispatch machinery (`Seq`, `When`, `Every`, `Expect`,
+  `Hooks`, `with_dyn`) are `#[doc(hidden)]` internals.
   Several sync points can now share a file (distinct module names); the
   one-invocation-per-module rule is gone.
 - `install_guard`/`install_shared`/`install` → `guard`/`shared`/`shared.guard()`.
@@ -63,14 +63,14 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   const check spans the declared type) instead of failing inside the
   expansion. Arguments must be `Copy`; declare a reference or raw pointer
   when the call site keeps the value.
-- The reserved-hook-name list is rebuilt for the module surface (14 arms):
-  `sequence`, `every`, `fires`, `verify`, `guard`, `shared`, `with_dyn`,
-  `when`, and the private state fields (`value`, `calls`, `expected`,
-  `installed_at`, `sequence_cv`, `__sp_reported`). `with_dyn` stays reserved
-  (a hook constant collides with the dispatch fn in the module value
-  namespace); `when` and `guard` are added. Private helpers are renamed to
-  `__sp_*` so plausible hook names (`state`, `new`, `set_expected`, …) no
-  longer collide with the expansion — the surface is not narrowed.
+- The reserved-hook-name list is rebuilt for the module surface (20 arms):
+  the 8 fixed public names (`sequence`, `every`, `fires`, `verify`, `guard`,
+  `shared`, `with_dyn`, `when`) plus the 12 `__sp_`-prefixed names of the
+  generated machinery's private fields and methods. The machinery now lives
+  in a private submodule, so plausible plain hook names (`value`, `state`,
+  `new`, `hook`, `calls`, `expected`, …) no longer collide and are legal;
+  the `__sp_` names are rejected with a friendly `compile_error!` rather than
+  a raw duplicate-definition error.
 
 ### Removed
 - `SeqBuilder::optional`, the `SeqEntry.optional` field, the shared-mode

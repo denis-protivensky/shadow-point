@@ -117,8 +117,10 @@ macro_rules! invoke {
 // Reject hook names that collide with the fixed public surface: the
 // registration methods (sequence/every/fires/verify), the module constructors
 // (guard/shared), the dispatch fn (with_dyn), and the gated-step constructor
-// (when). The fixed machinery lives in a private submodule, so no other name
-// can collide (D26, 8 arms).
+// (when). The fixed machinery lives in a private submodule, so no other plain
+// name can collide (D26). The `__sp_`-prefixed names of that machinery's
+// fields and methods are also rejected, with a friendly diagnostic instead of
+// a raw duplicate-definition error (8 public + 12 private arms).
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __sp_reject_reserved {
@@ -168,6 +170,78 @@ macro_rules! __sp_reject_reserved {
         ::core::compile_error!(
             "`when` is a reserved hook name: it collides with the gated-step \
              constructor `Seq::when`"
+        );
+    };
+    (__sp_new) => {
+        ::core::compile_error!(
+            "`__sp_new` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
+        );
+    };
+    (__sp_state) => {
+        ::core::compile_error!(
+            "`__sp_state` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
+        );
+    };
+    (__sp_from_owner) => {
+        ::core::compile_error!(
+            "`__sp_from_owner` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
+        );
+    };
+    (__sp_value) => {
+        ::core::compile_error!(
+            "`__sp_value` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
+        );
+    };
+    (__sp_calls) => {
+        ::core::compile_error!(
+            "`__sp_calls` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
+        );
+    };
+    (__sp_every) => {
+        ::core::compile_error!(
+            "`__sp_every` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
+        );
+    };
+    (__sp_expected) => {
+        ::core::compile_error!(
+            "`__sp_expected` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
+        );
+    };
+    (__sp_installed_at) => {
+        ::core::compile_error!(
+            "`__sp_installed_at` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
+        );
+    };
+    (__sp_reported) => {
+        ::core::compile_error!(
+            "`__sp_reported` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
+        );
+    };
+    (__sp_sequence) => {
+        ::core::compile_error!(
+            "`__sp_sequence` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
+        );
+    };
+    (__sp_sequence_cv) => {
+        ::core::compile_error!(
+            "`__sp_sequence_cv` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
+        );
+    };
+    (__sp_shared) => {
+        ::core::compile_error!(
+            "`__sp_shared` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
         );
     };
     ($other:ident) => {};
@@ -1379,7 +1453,7 @@ macro_rules! define_sp {
                 }
 
                 impl<T: Send + Sync + 'static> Shared<T> {
-                    pub fn __sp_from_owner(owner: ::std::sync::Arc<Owner<T>>) -> Self {
+                    fn __sp_from_owner(owner: ::std::sync::Arc<Owner<T>>) -> Self {
                         Self { owner }
                     }
 
@@ -1451,12 +1525,40 @@ macro_rules! define_sp {
                     });
                     Guard { owner, old, _not_send: ::std::marker::PhantomData }
                 }
+
+                // Constructors live here, not in the public module: the
+                // parameter `value` would otherwise collide with a hook
+                // constant named `value` in the module's value namespace.
+                /// Install a private guard driving this sync point for `value`.
+                #[track_caller]
+                pub fn guard<T: Send + Sync + 'static>(value: T) -> Guard<T> {
+                    let owner = ::std::sync::Arc::new(Owner::__sp_new(
+                        ::std::sync::Arc::new(State::__sp_new(
+                            value,
+                            false,
+                            std::panic::Location::caller(),
+                        )),
+                    ));
+                    attach(owner)
+                }
+
+                /// Create a sync point shared across threads.
+                #[track_caller]
+                pub fn shared<T: Send + Sync + 'static>(value: T) -> Shared<T> {
+                    Shared::__sp_from_owner(::std::sync::Arc::new(Owner::__sp_new(
+                        ::std::sync::Arc::new(State::__sp_new(
+                            value,
+                            true,
+                            std::panic::Location::caller(),
+                        )),
+                    )))
+                }
             }
 
             // ── Public surface (re-exports + constructors) ───────────
 
             #[doc(inline)]
-            pub use __sp_impl::{Guard, Shared};
+            pub use __sp_impl::{guard, shared, Guard, Shared};
             #[doc(hidden)]
             pub use __sp_impl::{Every, Expect, Seq, When};
 
@@ -1466,31 +1568,6 @@ macro_rules! define_sp {
             #[inline]
             pub fn with_dyn<R>(f: impl ::std::ops::FnOnce(&dyn __sp_impl::Hooks) -> R) -> R {
                 __sp_impl::with_dyn(f)
-            }
-
-            /// Install a private guard driving this sync point for `value`.
-            #[track_caller]
-            pub fn guard<T: Send + Sync + 'static>(__sp_value: T) -> Guard<T> {
-                let owner = ::std::sync::Arc::new(__sp_impl::Owner::__sp_new(
-                    ::std::sync::Arc::new(__sp_impl::State::__sp_new(
-                        __sp_value,
-                        false,
-                        std::panic::Location::caller(),
-                    )),
-                ));
-                __sp_impl::attach(owner)
-            }
-
-            /// Create a sync point shared across threads.
-            #[track_caller]
-            pub fn shared<T: Send + Sync + 'static>(__sp_value: T) -> Shared<T> {
-                Shared::__sp_from_owner(::std::sync::Arc::new(__sp_impl::Owner::__sp_new(
-                    ::std::sync::Arc::new(__sp_impl::State::__sp_new(
-                        __sp_value,
-                        true,
-                        std::panic::Location::caller(),
-                    )),
-                )))
             }
         }
     };
