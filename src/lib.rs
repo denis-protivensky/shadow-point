@@ -37,7 +37,7 @@
 /// strips its `cfg(test)` body. Hide the path in a local `macro_rules!`
 /// seam:
 ///
-/// ```no_run
+/// ```rust,no_run
 /// // src/seam.rs — plain macro_rules; nothing here depends on the crate
 /// macro_rules! sp_invoke {
 ///     ($($t:tt)*) => {
@@ -69,7 +69,13 @@
 /// declares the flag as its last argument; the macro creates it, dispatches,
 /// and runs the block the call site supplies:
 ///
-/// ```text
+/// ```rust,no_run
+/// # struct Full;
+/// # #[cfg(test)]
+/// # shadow_point::define_sp! {
+/// #     pub(crate) mod MapSp { before_alloc_node(capacity: usize, inject: &std::cell::Cell<bool>), }
+/// # }
+/// # fn alloc(capacity: usize) -> Result<(), Full> {
 /// macro_rules! sp_inject {
 ///     ($sp:path, $hook:ident($($arg:expr),* $(,)?), $body:block) => {
 ///         #[cfg(test)]
@@ -84,6 +90,8 @@
 /// }
 ///
 /// sp_inject!(MapSp, before_alloc_node(capacity), { return Err(Full); });
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// A block that produces a value is rejected: the injection path must
@@ -721,7 +729,7 @@ impl Drop for ExecSink {
 /// would not happen and `verify()` would fail. See
 /// `examples/register_private.rs` for a runnable version.
 ///
-/// ```no_run
+/// ```rust,no_run
 /// shadow_point::define_sp! {
 ///     pub mod array_sp {
 ///         entry_before_latch(path: &str, found_idx: Option<usize>),

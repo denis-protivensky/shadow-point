@@ -35,7 +35,7 @@ shadow-point = "0.5"
 Call `define_sp!` in the module that owns the instrumented code, gated with
 `#[cfg(test)]`. Production builds drop the whole declaration.
 
-```no_run
+```rust,no_run
 // src/register.rs
 
 #[cfg(test)]
@@ -55,7 +55,13 @@ module names can share a file directly.
 
 ### 2. Fire at the linearization point
 
-```text
+```rust,no_run
+# use std::sync::atomic::{AtomicU32, Ordering};
+# struct Register(AtomicU32);
+# #[cfg(test)]
+# shadow_point::define_sp! {
+#     pub(crate) mod register_sp { before_store(value: u32), }
+# }
 impl Register {
     fn store(&self, value: u32) {
         #[cfg(test)]
@@ -84,7 +90,7 @@ production but every `invoke!` compiles away.
 
 ### 3. A guard test
 
-```no_run
+```rust,no_run
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,7 +285,14 @@ runtime arming with `FAILPOINTS`/`fail::cfg`) use `fail`; hook dispatch is
 compiled only under `cfg(test)`. Give the hook a test-only flag and check it
 at the site:
 
-```text
+```rust,no_run
+# use std::cell::Cell;
+# struct Full;
+# #[cfg(test)]
+# shadow_point::define_sp! {
+#     pub(crate) mod map_sp { before_alloc_node(capacity: usize, inject: &Cell<bool>), }
+# }
+# fn alloc(capacity: usize) -> Result<(), Full> {
 // hook: before_alloc_node(capacity: usize, inject: &Cell<bool>)
 #[cfg(test)]
 {
@@ -289,6 +302,8 @@ at the site:
         return Err(Full);
     }
 }
+# Ok(())
+# }
 ```
 
 The flag is per call, so `Cell` is enough in private and shared mode; the
