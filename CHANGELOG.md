@@ -29,7 +29,7 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   The user-facing surface is the `guard`/`shared` constructors, one `Guard<T>`
   for both modes, a clonable `Shared<T>`, and a hook-identifier constant per
   hook; the builders and dispatch machinery (`Seq`, `When`, `Every`, `Expect`,
-  `Hook`, `Hooks`, `SetExpected`, `with_dyn`) are `#[doc(hidden)]` internals.
+  `Hook`, `Hooks`, `with_dyn`) are `#[doc(hidden)]` internals.
   Several sync points can now share a file (distinct module names); the
   one-invocation-per-module rule is gone.
 - `install_guard`/`install_shared`/`install` → `guard`/`shared`/`shared.guard()`.
