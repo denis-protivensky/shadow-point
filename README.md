@@ -56,12 +56,9 @@ module names can share a file directly.
 ### 2. Fire at the linearization point
 
 ```rust,no_run
-# use std::sync::atomic::{AtomicU32, Ordering};
-# struct Register(AtomicU32);
-# #[cfg(test)]
-# shadow_point::define_sp! {
-#     pub(crate) mod register_sp { before_store(value: u32), }
-# }
+use std::sync::atomic::{AtomicU32, Ordering};
+struct Register(AtomicU32);
+
 impl Register {
     fn store(&self, value: u32) {
         #[cfg(test)]
@@ -286,24 +283,20 @@ compiled only under `cfg(test)`. Give the hook a test-only flag and check it
 at the site:
 
 ```rust,no_run
-# use std::cell::Cell;
-# struct Full;
-# #[cfg(test)]
-# shadow_point::define_sp! {
-#     pub(crate) mod map_sp { before_alloc_node(capacity: usize, inject: &Cell<bool>), }
-# }
-# fn alloc(capacity: usize) -> Result<(), Full> {
-// hook: before_alloc_node(capacity: usize, inject: &Cell<bool>)
-#[cfg(test)]
-{
-    let inject = ::core::cell::Cell::new(false);
-    shadow_point::invoke!(map_sp, before_alloc_node(capacity, &inject));
-    if inject.get() {
-        return Err(Full);
+struct Full;
+
+fn alloc(capacity: usize) -> Result<(), Full> {
+    // hook: before_alloc_node(capacity: usize, inject: &Cell<bool>)
+    #[cfg(test)]
+    {
+        let inject = ::core::cell::Cell::new(false);
+        shadow_point::invoke!(map_sp, before_alloc_node(capacity, &inject));
+        if inject.get() {
+            return Err(Full);
+        }
     }
+    Ok(())
 }
-# Ok(())
-# }
 ```
 
 The flag is per call, so `Cell` is enough in private and shared mode; the

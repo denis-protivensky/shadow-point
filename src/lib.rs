@@ -70,28 +70,25 @@
 /// and runs the block the call site supplies:
 ///
 /// ```rust,no_run
-/// # struct Full;
-/// # #[cfg(test)]
-/// # shadow_point::define_sp! {
-/// #     pub(crate) mod MapSp { before_alloc_node(capacity: usize, inject: &std::cell::Cell<bool>), }
-/// # }
-/// # fn alloc(capacity: usize) -> Result<(), Full> {
-/// macro_rules! sp_inject {
-///     ($sp:path, $hook:ident($($arg:expr),* $(,)?), $body:block) => {
-///         #[cfg(test)]
-///         {
-///             let __sp_inject = ::core::cell::Cell::new(false);
-///             ::shadow_point::invoke!($sp, $hook($($arg,)* &__sp_inject));
-///             if __sp_inject.get() {
-///                 let _: () = $body; // rejects a value block; write `return`
-///             }
-///         }
-///     };
-/// }
+/// struct Full;
 ///
-/// sp_inject!(MapSp, before_alloc_node(capacity), { return Err(Full); });
-/// # Ok(())
-/// # }
+/// fn alloc(capacity: usize) -> Result<(), Full> {
+///     macro_rules! sp_inject {
+///         ($sp:path, $hook:ident($($arg:expr),* $(,)?), $body:block) => {
+///             #[cfg(test)]
+///             {
+///                 let __sp_inject = ::core::cell::Cell::new(false);
+///                 ::shadow_point::invoke!($sp, $hook($($arg,)* &__sp_inject));
+///                 if __sp_inject.get() {
+///                     let _: () = $body; // rejects a value block; write `return`
+///                 }
+///             }
+///         };
+///     }
+///
+///     sp_inject!(MapSp, before_alloc_node(capacity), { return Err(Full); });
+///     Ok(())
+/// }
 /// ```
 ///
 /// A block that produces a value is rejected: the injection path must
