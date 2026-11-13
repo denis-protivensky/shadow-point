@@ -116,11 +116,13 @@ macro_rules! invoke {
 
 // Reject hook names that collide with the fixed public surface: the
 // registration methods (sequence/every/fires/verify), the module constructors
-// (guard/shared), the dispatch fn (with_dyn), and the gated-step constructor
-// (when). The fixed machinery lives in a private submodule, so no other plain
-// name can collide (D26). The `__sp_`/`__SP_`-prefixed names of that machinery's
-// fields and methods are also rejected, with a friendly diagnostic instead of
-// a raw duplicate-definition error (8 public + 13 private arms).
+// (guard/shared), the dispatch fn (with_dyn), the gated-step constructor
+// (when), and `clone` (shadows the generated `Clone` impl on `Shared`). The
+// fixed machinery lives in a private submodule, so no other plain name can
+// collide (D26). The 13 `__sp_`/`__SP_`-prefixed internal names of that
+// machinery's fields and methods are also rejected, with a friendly
+// diagnostic instead of a raw duplicate-definition error (9 public + 13
+// private arms).
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __sp_reject_reserved {
@@ -172,82 +174,89 @@ macro_rules! __sp_reject_reserved {
              constructor `Seq::when`"
         );
     };
+    (clone) => {
+        ::core::compile_error!(
+            "`clone` is a reserved hook name: it collides with the generated \
+             `Clone` impl on `Shared` (a hook named `clone` would shadow \
+             `Shared::clone`)"
+        );
+    };
     (__sp_new) => {
         ::core::compile_error!(
-            "`__sp_new` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__sp_new` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     (__sp_state) => {
         ::core::compile_error!(
-            "`__sp_state` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__sp_state` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     (__sp_from_owner) => {
         ::core::compile_error!(
-            "`__sp_from_owner` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__sp_from_owner` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     (__sp_value) => {
         ::core::compile_error!(
-            "`__sp_value` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__sp_value` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     (__sp_calls) => {
         ::core::compile_error!(
-            "`__sp_calls` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__sp_calls` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     (__sp_every) => {
         ::core::compile_error!(
-            "`__sp_every` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__sp_every` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     (__sp_expected) => {
         ::core::compile_error!(
-            "`__sp_expected` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__sp_expected` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     (__sp_installed_at) => {
         ::core::compile_error!(
-            "`__sp_installed_at` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__sp_installed_at` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     (__sp_reported) => {
         ::core::compile_error!(
-            "`__sp_reported` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__sp_reported` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     (__sp_sequence) => {
         ::core::compile_error!(
-            "`__sp_sequence` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__sp_sequence` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     (__sp_sequence_cv) => {
         ::core::compile_error!(
-            "`__sp_sequence_cv` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__sp_sequence_cv` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     (__sp_shared) => {
         ::core::compile_error!(
-            "`__sp_shared` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__sp_shared` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     (__SP_NAMES) => {
         ::core::compile_error!(
-            "`__SP_NAMES` is a reserved hook name: the `__sp_`/`__SP_` prefix is reserved \
-             for the generated machinery's private fields and methods"
+            "`__SP_NAMES` is a reserved hook name: an internal name of the generated \
+             machinery's private fields and methods"
         );
     };
     ($other:ident) => {};
@@ -748,12 +757,14 @@ impl Drop for ExecSink {
 /// # Reserved hook names
 ///
 /// `sequence`, `every`, `fires`, `verify`, `guard`, `shared`, `with_dyn`,
-/// and `when` collide with the fixed public surface, and the `__sp_`/`__SP_`-prefixed
-/// names belong to the generated machinery's private fields and methods;
-/// `define_sp!` rejects all of them with a `compile_error!` naming the hook.
-/// All other names — including `value`, `calls`, `expected`, `state`, `new`,
-/// `hook`, `f`, `NAMES` — are legal: the fixed machinery lives in a private
-/// submodule and cannot collide with a hook name.
+/// `when`, and `clone` collide with the fixed public surface (`clone` would
+/// shadow the generated `Clone` impl on `Shared`), and the 13
+/// `__sp_`/`__SP_` internal names belong to the generated machinery's private
+/// fields and methods; `define_sp!` rejects all of them with a
+/// `compile_error!` naming the hook. All other names — including `value`,
+/// `calls`, `expected`, `state`, `new`, `hook`, `f`, `NAMES` — are legal: the
+/// fixed machinery lives in a private submodule and cannot collide with a
+/// hook name.
 ///
 /// # Hook arguments
 ///
@@ -927,7 +938,7 @@ macro_rules! define_sp {
 
                 /// The `every` registration builder.
                 pub struct Every<T: Send + Sync + 'static> {
-                    $( pub $method: Option<
+                    $( $method: Option<
                         ::std::sync::Arc<dyn Fn(&T $( , $arg_ty)*) + Send + Sync>
                     >, )+
                 }
@@ -1363,7 +1374,7 @@ macro_rules! define_sp {
                 }
 
                 impl<'a, T: Send + Sync + 'static, R> Expect<'a, T, R> {
-                    pub fn __sp_new(reg: &'a R, state: &'a State<T>, hook: Hook) -> Self {
+                    fn __sp_new(reg: &'a R, state: &'a State<T>, hook: Hook) -> Self {
                         Self { reg, state, hook }
                     }
 

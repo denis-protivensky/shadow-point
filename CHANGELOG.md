@@ -64,13 +64,14 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   const check spans the declared type) instead of failing inside the
   expansion. Arguments must be `Copy`; declare a reference or raw pointer
   when the call site keeps the value.
-- The reserved-hook-name list is rebuilt for the module surface (21 arms):
-  the 8 fixed public names (`sequence`, `every`, `fires`, `verify`, `guard`,
-  `shared`, `with_dyn`, `when`) plus the 13 `__sp_`/`__SP_`-prefixed names of the
+- The reserved-hook-name list is rebuilt for the module surface (22 arms):
+  the 9 fixed public names (`sequence`, `every`, `fires`, `verify`, `guard`,
+  `shared`, `with_dyn`, `when`, `clone` — the last would shadow the generated
+  `Clone` impl on `Shared`) plus the 13 `__sp_`/`__SP_` internal names of the
   generated machinery's private fields and methods (including
   `Hook::__SP_NAMES`). The machinery now lives in a private submodule, so
   plausible plain hook names (`value`, `state`, `new`, `hook`, `f`, `NAMES`,
-  `calls`, `expected`, …) no longer collide and are legal; the `__sp_` names
+  `calls`, `expected`, …) no longer collide and are legal; the reserved names
   are rejected with a friendly `compile_error!` rather than a raw
   duplicate-definition error.
 
