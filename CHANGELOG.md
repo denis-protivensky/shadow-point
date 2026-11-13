@@ -42,7 +42,11 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   tail, `let` initializer) in both test and production builds.
 - Hook identifiers are module constants (`name::before_store`) instead of
   associated constants on the entry point.
-- Gated sequence steps: `s.<hook>_when(pred, f)` → `s.when().<hook>(pred, f)`.
+- Gated sequence steps: `s.<hook>_when(pred, f)` → `s.when(pred).<hook>(f)`.
+  The predicate is stored untyped by `when`; each `.<hook>` adds the bound
+  for that hook's arguments, so a single-hook predicate need only satisfy
+  its own signature (a postfix `.when(pred)` on the builder cannot: it would
+  have to fit every hook's signature at once).
 - Both `fires` forms return the handle (`&Guard` / `&Shared`), so fire-once
   registrations chain: `g.a(f).fires(2).b(g).fires(1)`.
 - Assertions and reclamation run in one place — `Owner<T>::drop` on the last

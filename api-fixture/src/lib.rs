@@ -16,6 +16,9 @@ shadow_point::define_sp! {
     }
 }
 
+/// The gated-step handle is generic over the predicate type `P`.
+type WhenHandle<'a> = api_sp::When<'a, u32, fn(u32) -> bool>;
+
 /// Name the generated types, hook constants, and hidden dispatch seam.
 pub fn generated_surface_names() {
     let _hook: api_sp::Hook = api_sp::before_store;
@@ -23,7 +26,7 @@ pub fn generated_surface_names() {
     let _guard: Option<api_sp::Guard<u32>> = None;
     let _shared: Option<api_sp::Shared<u32>> = None;
     let _seq: Option<api_sp::Seq<u32>> = None;
-    let _when: Option<api_sp::When<'_, u32>> = None;
+    let _when: Option<WhenHandle<'_>> = None;
     let _every: Option<api_sp::Every<u32>> = None;
     let _expect: Option<api_sp::Expect<'_, u32>> = None;
     let _shared_expect: Option<api_sp::SharedExpect<'_, u32>> = None;
@@ -48,8 +51,8 @@ pub fn guard_surface(g: &api_sp::Guard<u32>) {
 
     g.sequence(|s| {
         s.before_store(|_, _| ()).flush(|_| ());
-        s.when().before_store(|_| true, |_, _| ());
-        s.when().flush(|| true, |_| ());
+        s.when(|_| true).before_store(|_, _| ());
+        s.when(|| true).flush(|_| ());
     });
 
     g.every(|e| {
@@ -69,7 +72,7 @@ pub fn shared_surface(s: &api_sp::Shared<u32>) {
 
     s.sequence(|q| {
         q.before_store(|_, _| ()).flush(|_| ());
-        q.when().before_store(|_| true, |_, _| ());
+        q.when(|_| true).before_store(|_, _| ());
     });
 
     s.every(|e| {

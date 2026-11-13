@@ -50,8 +50,8 @@ shadow_point::define_sp! {
 `register_sp::guard` and `register_sp::shared`, one `Guard<T>` type for both
 modes, a clonable `Shared<T>`, a hook-identifier constant per hook
 (`register_sp::before_store`), and the `sequence`/`every` builders. Every
-generated item lives inside the module, so several sync points can share a
-file — give each its own `mod { … }`.
+generated item lives inside the module, so several sync points with distinct
+module names can share a file directly — no wrapper `mod` needed.
 
 ### 2. Fire at the linearization point
 
@@ -159,7 +159,7 @@ most common wrong-mode mistake — those fires disappear.
 | assert now | `guard.verify()` — same checks as drop, at the call site |
 | every fire | `guard.every(\|e\| e.<name>(f))` |
 | ordered | `guard.sequence(\|s\| { s.a(f).b(g); })` |
-| conditional step | `s.when().<name>(pred, f)` — only inside `sequence`; the step fires on the first fire that passes `pred` |
+| conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires on the first fire that passes `pred` |
 | shared | `register_sp::shared(value)`, then `shared.guard()` per firing thread |
 
 `<name>` is the hook name declared in `define_sp!`; `define_sp!` generates
@@ -209,7 +209,7 @@ semantics are unchanged from 0.4.0 — only names, types, and ownership move.
   it also works as a closure body / block tail / `let` initializer.
 - **Hook identifiers.** `RegisterSp::before_store` → `register_sp::before_store`
   (a module constant of type `register_sp::Hook`).
-- **Gated step.** `s.<name>_when(pred, f)` → `s.when().<name>(pred, f)`.
+- **Gated step.** `s.<name>_when(pred, f)` → `s.when(pred).<name>(f)`.
 - **Removed deprecations.** `.expect(n)` → `.fires(n)`;
   `.expect_calls(hook, n)` → `fires(hook, n)`; `PARK_TIMEOUT` →
   `park_timeout()`. `SeqBuilder::optional()` is gone with no replacement:

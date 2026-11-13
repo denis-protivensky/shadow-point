@@ -82,7 +82,7 @@ fn when_predicate_gates_until_match_and_blocks_fire_once() {
     let steps = C::new();
     let fire_once = C::new();
     g.sequence(|s| {
-        s.when().a(|v| v == 1, {
+        s.when(|v| v == 1).a({
             let steps = steps.clone();
             move |(), _| steps.inc()
         });

@@ -693,7 +693,7 @@ impl Drop for ExecSink {
 ///   sequence fell through to fire-once. Chain `.fires(n)` for a different
 ///   count; both `fires` forms return `&Guard` so registrations chain.
 /// - ordered: `g.sequence(|s| { s.a(f).b(g); })` — entries consumed in order;
-///   a gated step is `s.when().<hook>(pred, f)`.
+///   a gated step is `s.when(pred).<hook>(f)`.
 /// - every fire: `g.every(|e| e.a(f))` — runs on every non-suppressed fire.
 /// - count only: `g.fires(<hook>, n)` — no closure.
 ///
@@ -1241,29 +1241,38 @@ macro_rules! define_sp {
                     }
                 )+
 
-                /// Start a predicate-gated step: `s.when().<hook>(pred, f)`.
-                pub fn when(&mut self) -> When<'_, T> {
-                    When { seq: self }
+                /// Start a predicate-gated step: `s.when(pred).<hook>(f)`.
+                /// The predicate is stored untyped here; each `.<hook>` on
+                /// the returned handle adds the bound for that hook's
+                /// arguments, so a single-hook predicate need only satisfy
+                /// its own signature.
+                pub fn when<P>(&mut self, pred: P) -> When<'_, T, P> {
+                    When { seq: self, pred }
                 }
             }
 
             /// The gated-step sub-builder returned by `Seq::when`. Hidden.
             #[doc(hidden)]
             #[allow(dead_code)]
-            pub struct When<'a, T: Send + Sync + 'static> {
+            pub struct When<'a, T: Send + Sync + 'static, P> {
                 seq: &'a mut Seq<T>,
+                pred: P,
             }
 
-            impl<T: Send + Sync + 'static> When<'_, T> {
+            impl<'a, T: Send + Sync + 'static, P> When<'a, T, P> {
                 $(
                     /// Push a predicate-gated sequence entry for this hook.
+                    /// The bound on `P` is applied here, at hook selection,
+                    /// so it covers only this hook's argument signature.
                     pub fn $method(
-                        &mut self,
-                        pred: impl Fn($($arg_ty),*) -> bool + Send + 'static,
+                        self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
-                    ) -> &mut Seq<T> {
+                    ) -> &'a mut Seq<T>
+                    where
+                        P: Fn($($arg_ty),*) -> bool + Send + 'static,
+                    {
                         self.seq.seq.push_back(SeqEntry {
-                            action: SeqAction::$method(Some(Box::new(pred)), Box::new(f)),
+                            action: SeqAction::$method(Some(Box::new(self.pred)), Box::new(f)),
                         });
                         self.seq
                     }
