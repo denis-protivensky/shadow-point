@@ -118,8 +118,8 @@ fn the_hook_runs_before_the_store() {
 }
 ```
 
-Illustrative snippet, not intended for real code as written. The complete
-runnable file is `examples/register_private.rs`.
+*Illustrative snippet, not intended for real code as written. The complete
+runnable file is `examples/register_private.rs`.*
 
 The guard derefs to `&T`, so `guard.store(…)` and `guard.0` are the guarded
 value's own API. A nested fire of the same sync point on the same thread is
