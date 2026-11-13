@@ -28,8 +28,9 @@ pub fn generated_surface_names() {
     let _seq: Option<api_sp::Seq<u32>> = None;
     let _when: Option<WhenHandle<'_>> = None;
     let _every: Option<api_sp::Every<u32>> = None;
-    let _expect: Option<api_sp::Expect<'_, u32>> = None;
-    let _shared_expect: Option<api_sp::SharedExpect<'_, u32>> = None;
+    let _expect: Option<api_sp::Expect<'_, api_sp::Guard<u32>>> = None;
+    let _expect_shared: Option<api_sp::Expect<'_, api_sp::Shared<u32>>> = None;
+    let _set_expected: Option<&dyn api_sp::SetExpected> = None;
     let _trait_object: Option<&dyn api_sp::Hooks> = None;
     let _budget: Duration = shadow_point::park_timeout();
     let _with_dyn: () = api_sp::with_dyn(|_| ());

@@ -691,7 +691,8 @@ impl Drop for ExecSink {
 /// - one-shot: `g.<hook>(f)` — the hook must fire exactly once; the closure
 ///   runs at most once, on the fire whose per-hook counter was 0 and whose
 ///   sequence fell through to fire-once. Chain `.fires(n)` for a different
-///   count; both `fires` forms return `&Guard` so registrations chain.
+///   count; both `fires` forms return the registration handle (`&Guard` or
+///   `&Shared`) so registrations chain.
 /// - ordered: `g.sequence(|s| { s.a(f).b(g); })` — entries consumed in order;
 ///   a gated step is `s.when(pred).<hook>(f)`.
 /// - every fire: `g.every(|e| e.a(f))` — runs on every non-suppressed fire.
@@ -1281,20 +1282,31 @@ macro_rules! define_sp {
 
             // ── Fire-once handle ─────────────────────────────────────
 
+            /// Pin a hook's expected fire count on the underlying state.
+            /// Hidden: the seam `Expect::fires` uses to hand the original
+            /// registration handle (`Guard` or `Shared`) back for chaining.
+            #[doc(hidden)]
+            pub trait SetExpected {
+                /// Pin the hook's expected fire count on the underlying state.
+                fn set_expected(&self, hook: Hook, n: usize);
+            }
+
             /// The handle returned by a fire-once registration; `.fires(n)`
-            /// pins the count and returns the guard for chaining. Hidden.
+            /// pins the count and returns the registration handle for
+            /// chaining. Hidden.
             #[doc(hidden)]
             #[allow(dead_code)]
-            pub struct Expect<'a, T: Send + Sync + 'static> {
-                guard: &'a Guard<T>,
+            pub struct Expect<'a, R> {
+                reg: &'a R,
                 hook: Hook,
             }
 
-            impl<'a, T: Send + Sync + 'static> Expect<'a, T> {
-                /// Assert the hook fires exactly `n` times; returns the guard.
-                pub fn fires(self, n: usize) -> &'a Guard<T> {
-                    self.guard.state().set_expected(self.hook, n);
-                    self.guard
+            impl<'a, R: SetExpected> Expect<'a, R> {
+                /// Assert the hook fires exactly `n` times; returns the
+                /// registration handle.
+                pub fn fires(self, n: usize) -> &'a R {
+                    self.reg.set_expected(self.hook, n);
+                    self.reg
                 }
             }
 
@@ -1322,9 +1334,9 @@ macro_rules! define_sp {
                     pub fn $method(
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
-                    ) -> Expect<'_, T> {
+                    ) -> Expect<'_, Self> {
                         self.state().$method(f);
-                        Expect { guard: self, hook: Hook::$method }
+                        Expect { reg: self, hook: Hook::$method }
                     }
                 )+
 
@@ -1413,9 +1425,9 @@ macro_rules! define_sp {
                     pub fn $method(
                         &self,
                         f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
-                    ) -> SharedExpect<'_, T> {
+                    ) -> Expect<'_, Self> {
                         self.state().$method(f);
-                        SharedExpect { shared: self, hook: Hook::$method }
+                        Expect { reg: self, hook: Hook::$method }
                     }
                 )+
 
@@ -1449,19 +1461,17 @@ macro_rules! define_sp {
                 }
             }
 
-            /// The handle returned by a shared fire-once registration. Hidden.
-            #[doc(hidden)]
-            #[allow(dead_code)]
-            pub struct SharedExpect<'a, T: Send + Sync + 'static> {
-                shared: &'a Shared<T>,
-                hook: Hook,
+            // ── SetExpected impls on both registration handles ───────
+
+            impl<T: Send + Sync + 'static> SetExpected for Guard<T> {
+                fn set_expected(&self, hook: Hook, n: usize) {
+                    self.state().set_expected(hook, n);
+                }
             }
 
-            impl<'a, T: Send + Sync + 'static> SharedExpect<'a, T> {
-                /// Assert the hook fires exactly `n` times; returns the shared.
-                pub fn fires(self, n: usize) -> &'a Shared<T> {
-                    self.shared.state().set_expected(self.hook, n);
-                    self.shared
+            impl<T: Send + Sync + 'static> SetExpected for Shared<T> {
+                fn set_expected(&self, hook: Hook, n: usize) {
+                    self.state().set_expected(hook, n);
                 }
             }
 
