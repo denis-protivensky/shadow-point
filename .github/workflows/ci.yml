@@ -25,6 +25,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --locked --all-features --all-targets
       - run: cargo test --locked --all-targets
+      # --all-targets excludes doctests; run them separately so the
+      # compile_fail (!Send guard) and other doctests stay gated.
+      - run: cargo test --locked --all-features --doc
+      - run: cargo test --locked --doc
 
   lint:
     runs-on: ubuntu-latest
@@ -70,7 +74,7 @@ jobs:
             echo "::error::reserved-name fixture compiled"
             exit 1
           fi
-          for name in sequence every fires verify guard shared with_dyn when __sp_new __sp_state __sp_from_owner __sp_value __sp_calls __sp_every __sp_expected __sp_installed_at __sp_reported __sp_sequence __sp_sequence_cv __sp_shared; do
+          for name in sequence every fires verify guard shared with_dyn when __sp_new __sp_state __sp_from_owner __sp_value __sp_calls __sp_every __sp_expected __sp_installed_at __sp_reported __sp_sequence __sp_sequence_cv __sp_shared __SP_NAMES; do
             grep -F "\`$name\` is a reserved hook name" reserved-name.err
           done
 

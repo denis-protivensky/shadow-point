@@ -37,7 +37,7 @@
 /// strips its `cfg(test)` body. Hide the path in a local `macro_rules!`
 /// seam:
 ///
-/// ```rust,ignore
+/// ```text
 /// // src/seam.rs — plain macro_rules; nothing here depends on the crate
 /// macro_rules! sp_invoke {
 ///     ($($t:tt)*) => {
@@ -47,7 +47,7 @@
 /// }
 /// ```
 ///
-/// ```rust,ignore
+/// ```text
 /// // src/lib.rs — textual macro scope: the seam module must precede every
 /// // module that calls sp_invoke!; an explicit `use` per module works too
 /// #[macro_use]
@@ -69,7 +69,7 @@
 /// declares the flag as its last argument; the macro creates it, dispatches,
 /// and runs the block the call site supplies:
 ///
-/// ```rust,ignore
+/// ```text
 /// macro_rules! sp_inject {
 ///     ($sp:path, $hook:ident($($arg:expr),* $(,)?), $body:block) => {
 ///         #[cfg(test)]
@@ -120,7 +120,7 @@ macro_rules! invoke {
 // (when). The fixed machinery lives in a private submodule, so no other plain
 // name can collide (D26). The `__sp_`-prefixed names of that machinery's
 // fields and methods are also rejected, with a friendly diagnostic instead of
-// a raw duplicate-definition error (8 public + 12 private arms).
+// a raw duplicate-definition error (8 public + 13 private arms).
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __sp_reject_reserved {
@@ -241,6 +241,12 @@ macro_rules! __sp_reject_reserved {
     (__sp_shared) => {
         ::core::compile_error!(
             "`__sp_shared` is a reserved hook name: the `__sp_` prefix is reserved \
+             for the generated machinery's private fields and methods"
+        );
+    };
+    (__SP_NAMES) => {
+        ::core::compile_error!(
+            "`__SP_NAMES` is a reserved hook name: the `__sp_` prefix is reserved \
              for the generated machinery's private fields and methods"
         );
     };
@@ -701,11 +707,11 @@ impl Drop for ExecSink {
 ///
 /// # Example
 ///
-/// `invoke!` is `#[cfg(test)]`-only, so this example is `ignore`d (a doctest
-/// compiles without `cfg(test)`); see `examples/register_private.rs` for a
-/// runnable version.
+/// Illustrative syntax (a `text` block, not a doctest): `invoke!` is
+/// `#[cfg(test)]`-only and expands to nothing in a doctest, so this cannot
+/// run as one. See `examples/register_private.rs` for a runnable version.
 ///
-/// ```rust,ignore
+/// ```text
 /// shadow_point::define_sp! {
 ///     pub mod array_sp {
 ///         entry_before_latch(path: &str, found_idx: Option<usize>),
@@ -742,11 +748,12 @@ impl Drop for ExecSink {
 /// # Reserved hook names
 ///
 /// `sequence`, `every`, `fires`, `verify`, `guard`, `shared`, `with_dyn`,
-/// and `when` collide with the fixed public surface; `define_sp!` rejects
-/// them with a `compile_error!` naming the hook. All other names — including
-/// `value`, `calls`, `expected`, `state`, `new`, `hook` — are legal: the
-/// fixed machinery lives in a private submodule and cannot collide with a
-/// hook name.
+/// and `when` collide with the fixed public surface, and the `__sp_`-prefixed
+/// names belong to the generated machinery's private fields and methods;
+/// `define_sp!` rejects all of them with a `compile_error!` naming the hook.
+/// All other names — including `value`, `calls`, `expected`, `state`, `new`,
+/// `hook`, `f`, `NAMES` — are legal: the fixed machinery lives in a private
+/// submodule and cannot collide with a hook name.
 ///
 /// # Hook arguments
 ///
@@ -810,10 +817,15 @@ macro_rules! define_sp {
 
             impl Hook {
                 /// Hook names indexed by discriminant, for diagnostics.
-                const NAMES: &'static [&'static str] = &[$(stringify!($method)),+];
-                /// The hook's own name, for diagnostics.
-                fn name(&self) -> &'static str {
-                    Self::NAMES[*self as usize]
+                /// `__sp_`-prefixed: a hook named `NAMES` would otherwise
+                /// shadow this associated constant (`Hook::NAMES[i]` would
+                /// index the hook variant).
+                const __SP_NAMES: &'static [&'static str] = &[$(stringify!($method)),+];
+                /// The hook's own name, for diagnostics. `__sp_`-prefixed:
+                /// a hook named `name` would otherwise collide with this
+                /// method in the method namespace.
+                fn __sp_name(&self) -> &'static str {
+                    Self::__SP_NAMES[*self as usize]
                 }
             }
 
@@ -907,7 +919,7 @@ macro_rules! define_sp {
                         self.action.hook() == h
                     }
                     fn name(&self) -> &'static str {
-                        self.action.hook().name()
+                        self.action.hook().__sp_name()
                     }
                 }
 
@@ -1165,7 +1177,7 @@ macro_rules! define_sp {
                         let message = format!(
                             "sync point hook `{}` fired {actual} \
                              time(s), expected {expected} ({}installed at {})",
-                            Hook::NAMES[i],
+                            Hook::__SP_NAMES[i],
                             if shared { "shared, " } else { "" },
                             st.__sp_installed_at,
                         );
@@ -1209,7 +1221,7 @@ macro_rules! define_sp {
                             if $crate::trace_enabled() {
                                 eprintln!(
                                     "[sp] {} call #{} thread={}",
-                                    h.name(),
+                                    h.__sp_name(),
                                     idx + 1,
                                     std::thread::current()
                                         .name()
@@ -1217,7 +1229,7 @@ macro_rules! define_sp {
                                 );
                             }
                             let _f = $crate::CurrentFire::install($crate::FireInfo {
-                                hook: h.name(),
+                                hook: h.__sp_name(),
                                 index: idx,
                             });
                             let every = {
@@ -1268,7 +1280,7 @@ macro_rules! define_sp {
                                                          for `{}`, head is `{}` \
                                                          (installed at {})",
                                                         $crate::park_timeout(),
-                                                        h.name(),
+                                                        h.__sp_name(),
                                                         front.name(),
                                                         st.__sp_installed_at,
                                                     );
@@ -1288,7 +1300,7 @@ macro_rules! define_sp {
                                                 "sync point ordering violation: \
                                                  expected `{}` next but `{}` fired",
                                                 front.name(),
-                                                h.name()
+                                                h.__sp_name()
                                             );
                                         }
                                     }
@@ -1560,15 +1572,7 @@ macro_rules! define_sp {
             #[doc(inline)]
             pub use __sp_impl::{guard, shared, Guard, Shared};
             #[doc(hidden)]
-            pub use __sp_impl::{Every, Expect, Seq, When};
-
-            /// Dispatch a closure with the sync point installed on this
-            /// thread. Hidden: used by `invoke!`.
-            #[doc(hidden)]
-            #[inline]
-            pub fn with_dyn<R>(f: impl ::std::ops::FnOnce(&dyn __sp_impl::Hooks) -> R) -> R {
-                __sp_impl::with_dyn(f)
-            }
+            pub use __sp_impl::{with_dyn, Every, Expect, Seq, When};
         }
     };
 }

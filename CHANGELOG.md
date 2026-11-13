@@ -28,8 +28,9 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   `XSeqBuilder`, `EveryClosures`, `SpExpect`, `XHook`, `XSyncPoint`) are gone.
   The user-facing surface is the `guard`/`shared` constructors, a clonable
   `Shared<T>`, a hook-identifier constant per hook, and the `Hook` identifier
-  type; the builders and dispatch machinery (`Seq`, `When`, `Every`, `Expect`,
-  `Hooks`, `with_dyn`) are `#[doc(hidden)]` internals.
+  type; the builders (`Seq`, `When`, `Every`, `Expect`) and the `with_dyn`
+  dispatch seam are `#[doc(hidden)]` internals, and the `Hooks` dispatch trait
+  is private to the generated submodule (not re-exported).
   Several sync points can now share a file (distinct module names); the
   one-invocation-per-module rule is gone.
 - `install_guard`/`install_shared`/`install` → `guard`/`shared`/`shared.guard()`.
@@ -63,14 +64,15 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   const check spans the declared type) instead of failing inside the
   expansion. Arguments must be `Copy`; declare a reference or raw pointer
   when the call site keeps the value.
-- The reserved-hook-name list is rebuilt for the module surface (20 arms):
+- The reserved-hook-name list is rebuilt for the module surface (21 arms):
   the 8 fixed public names (`sequence`, `every`, `fires`, `verify`, `guard`,
-  `shared`, `with_dyn`, `when`) plus the 12 `__sp_`-prefixed names of the
-  generated machinery's private fields and methods. The machinery now lives
-  in a private submodule, so plausible plain hook names (`value`, `state`,
-  `new`, `hook`, `calls`, `expected`, …) no longer collide and are legal;
-  the `__sp_` names are rejected with a friendly `compile_error!` rather than
-  a raw duplicate-definition error.
+  `shared`, `with_dyn`, `when`) plus the 13 `__sp_`-prefixed names of the
+  generated machinery's private fields and methods (including
+  `Hook::__SP_NAMES`). The machinery now lives in a private submodule, so
+  plausible plain hook names (`value`, `state`, `new`, `hook`, `f`, `NAMES`,
+  `calls`, `expected`, …) no longer collide and are legal; the `__sp_` names
+  are rejected with a friendly `compile_error!` rather than a raw
+  duplicate-definition error.
 
 ### Removed
 - `SeqBuilder::optional`, the `SeqEntry.optional` field, the shared-mode

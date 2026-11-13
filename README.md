@@ -35,7 +35,7 @@ shadow-point = "0.5"
 Call `define_sp!` in the module that owns the instrumented code, gated with
 `#[cfg(test)]`. Production builds drop the whole declaration.
 
-```rust,ignore
+```text
 // src/register.rs
 
 #[cfg(test)]
@@ -55,7 +55,7 @@ module names can share a file directly.
 
 ### 2. Fire at the linearization point
 
-```rust,ignore
+```text
 impl Register {
     fn store(&self, value: u32) {
         #[cfg(test)]
@@ -84,7 +84,7 @@ production but every `invoke!` compiles away.
 
 ### 3. A guard test
 
-```rust,ignore
+```text
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,9 +196,10 @@ semantics are unchanged from 0.4.0 — only names, types, and ownership move.
   `RegisterSpGuard`, `RegisterSharedSp`, `RegisterSharedGuard`,
   `RegisterSeqBuilder`, `EveryClosures`, `SpExpect`, `RegisterHook`,
   `RegisterSyncPoint`) are gone. The user-facing surface is `guard`, `shared`,
-  `Guard`, `Shared`, and a hook-identifier constant per hook; the builders and
-  dispatch machinery (`Seq`, `When`, `Every`, `Expect`, `Hook`, `Hooks`,
-  `SetExpected`, `with_dyn`) are `#[doc(hidden)]` internals.
+  `Guard`, `Shared`, the `Hook` identifier type, and a hook-identifier constant
+  per hook; the builders (`Seq`, `When`, `Every`, `Expect`) and the `with_dyn`
+  dispatch seam are `#[doc(hidden)]` internals, and the `Hooks` dispatch trait
+  is private to the generated submodule (not re-exported).
 - **Constructors.** `RegisterSp::install_guard(v)` → `register_sp::guard(v)`;
   `RegisterSp::install_shared(v)` → `register_sp::shared(v)` (returns
   `Shared<T>`, not `Arc<…SharedSp<T>>`); `shared.install()` → `shared.guard()`.
@@ -226,9 +227,10 @@ semantics are unchanged from 0.4.0 — only names, types, and ownership move.
 - **Reserved hook names.** The list is `sequence`, `every`, `fires`,
   `verify`, `guard`, `shared`, `with_dyn`, `when` — the fixed public surface —
   plus the `__sp_`-prefixed names of the generated machinery's private fields
-  and methods. A hook with one of these names is rejected with a
-  `compile_error!`. All other names are free: the machinery lives in a private
-  submodule, so hook names like `value`, `state`, or `new` no longer collide.
+  and methods (including `Hook::__SP_NAMES`). A hook with one of these names
+  is rejected with a `compile_error!`. All other names are free: the machinery
+  lives in a private submodule, so hook names like `value`, `state`, `new`,
+  `hook`, `f`, or `NAMES` no longer collide.
 - **Ownership.** Assertions and reclamation run in one place — the last
   owner's drop — for both modes. `drop(shared)` while a worker guard is live
   gives no verdict and frees nothing; the verdict runs when the last guard
@@ -276,7 +278,7 @@ runtime arming with `FAILPOINTS`/`fail::cfg`) use `fail`; hook dispatch is
 compiled only under `cfg(test)`. Give the hook a test-only flag and check it
 at the site:
 
-```rust,ignore
+```text
 // hook: before_alloc_node(capacity: usize, inject: &Cell<bool>)
 #[cfg(test)]
 {
