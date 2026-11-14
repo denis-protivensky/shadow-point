@@ -5,7 +5,8 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-[Unreleased]: https://github.com/denis-protivensky/shadow-point/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/denis-protivensky/shadow-point/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/denis-protivensky/shadow-point/compare/v0.3.1...v0.3.2
@@ -13,6 +14,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.3.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/denis-protivensky/shadow-point/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/denis-protivensky/shadow-point/releases/tag/v0.1.0
+
+## [0.5.0] - Unreleased
+
+Breaking release: the namespace and types change, the 0.4.0 deprecations are
+removed, and the `paste` dependency is dropped. Counting semantics are
+unchanged from 0.4.0 — only names, types, and ownership move. See the README
+"Migrating from 0.4.x" for the full call-site map.
+
+### Changed
+- `define_sp!` now generates a **module**: `define_sp! { pub mod name { … } }`.
+  The 0.4.0 generated names (`XSp`, `XSpGuard`, `XSharedSp`, `XSharedGuard`,
+  `XSeqBuilder`, `EveryClosures`, `SpExpect`, `XHook`, `XSyncPoint`) are gone.
+  The user-facing surface is the `guard`/`shared` constructors, a clonable
+  `Shared<T>`, a hook-identifier constant per hook, and the `Hook` identifier
+  type; the builders (`Seq`, `When`, `Every`, `Expect`) and the `with_dyn`
+  dispatch seam are `#[doc(hidden)]` internals, and the `Hooks` dispatch trait
+  is private to the generated submodule (not re-exported).
+  Several sync points can now share a file (distinct module names); the
+  one-invocation-per-module rule is gone.
+- `install_guard`/`install_shared`/`install` → `guard`/`shared`/`shared.guard()`.
+  `shared(value)` returns `Shared<T>` (`Clone`, `Send + Sync`), not
+  `Arc<…SharedSp<T>>`; hand clones to workers.
+- The per-thread guard is one `Guard<T>` type in both modes; the registration
+  API (`Deref`, fire-once/`sequence`/`every`/`fires`/`verify`) mirrors on
+  `Guard` and `Shared`. `Guard` is `!Send` (`PhantomData<*const ()>`): moving
+  it across threads is a compile error.
+- `invoke!` takes the module path (`invoke!(name, hook(args))`) and expands to
+  a block expression, so it works in expression position (closure body, block
+  tail, `let` initializer) in both test and production builds.
+- Hook identifiers are module constants (`name::before_store`) instead of
+  associated constants on the entry point.
+- Gated sequence steps: `s.<hook>_when(pred, f)` → `s.when(pred).<hook>(f)`.
+  The predicate is stored untyped by `when`; each `.<hook>` adds the bound
+  for that hook's arguments, so a single-hook predicate need only satisfy
+  its own signature (a postfix `.when(pred)` on the builder cannot: it would
+  have to fit every hook's signature at once).
+- Both `fires` forms return the handle (`&Guard` / `&Shared`), so fire-once
+  registrations chain: `g.a(f).fires(2).b(g).fires(1)`.
+- Assertions and reclamation run in one place — `Owner<T>::drop` on the last
+  `Arc<Owner<T>>` — for both modes, without `unsafe` (`#![forbid(unsafe_code)]`
+  stays). `State<T>` has no `Drop`; `Guard::drop` only restores TLS.
+  `drop(shared)` with a live guard gives no verdict and frees nothing; the
+  last owner may be a `Guard`. The raise-or-print-on-unwind rule and the
+  deliberate leak on a failing thread are unchanged.
+- Counters are a `Vec<AtomicUsize>` sized by the hook list; the `__SP_COUNT`
+  associated constant and the `[T; N]: Default` (N ≤ 32) ceiling are gone.
+  The diagnostics name table lives on as a private `__SP_NAMES` in the
+  generated machinery.
+- Non-`Copy` hook arguments are rejected at the declaration (a nested-fn
+  const check spans the declared type) instead of failing inside the
+  expansion. Arguments must be `Copy`; declare a reference or raw pointer
+  when the call site keeps the value.
+- The reserved-hook-name list is rebuilt for the module surface (21 arms):
+  the 9 fixed public names (`sequence`, `every`, `fires`, `verify`, `guard`,
+  `shared`, `with_dyn`, `when`, `clone` — the last would shadow the generated
+  `Clone` impl on `Shared`) plus the 12 `__sp_` internal names of the
+  generated machinery. The machinery now lives in a private submodule, so
+  any other identifier (`value`, `state`, `new`, `hook`, `f`, `NAMES`,
+  `__SP_NAMES`, `calls`, `expected`, …) is a legal hook name; the reserved
+  names are rejected with a friendly `compile_error!` rather than a raw
+  duplicate-definition error.
+- `SP_TRACE` prints the zero-based call index, the same value
+  `current_fire()` reports (0.4.0 printed `index + 1`).
+
+### Removed
+- `SeqBuilder::optional`, the `SeqEntry.optional` field, the shared-mode
+  optional head-skip, and the `assert_fires` optional filter. Every sequence
+  entry is mandatory; use `fires(hook, 0)` for "must not fire" or split the
+  test.
+- The deprecated `.expect(n)`, `.expect_calls(hook, n)`, and `PARK_TIMEOUT`.
+  Use `.fires(n)`, `fires(hook, n)`, and `park_timeout()`.
+- The public `SyncPoint` marker trait (the dispatch trait stays internal for
+  type erasure) and the `paste` dependency — the crate now has **zero
+  non-optional dependencies**.
 
 ## [0.4.0] - 2026-11-10
 

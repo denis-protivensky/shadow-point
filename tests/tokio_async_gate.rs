@@ -13,8 +13,7 @@ use tokio::runtime::Builder;
 
 mod ag {
     shadow_point::define_sp! {
-        pub prefix Ag
-        {
+        pub mod ag_sp {
             a(value: u32),
             b(value: u32),
         }
@@ -34,7 +33,7 @@ fn current_thread_body_waits_on_future_fires() {
     let rt = Builder::new_current_thread().build().unwrap();
     let gate = TokioAsyncGate::new();
     let seen = std::sync::Arc::new(AtomicU32::new(0));
-    let shared = ag::AgSp::install_shared(());
+    let shared = ag::ag_sp::shared(());
     let g = gate.clone();
     let s = seen.clone();
     shared.every(|e| {
@@ -45,15 +44,15 @@ fn current_thread_body_waits_on_future_fires() {
     });
     let bound = shared.clone();
     rt.block_on(async move {
-        let _guard = bound.install();
+        let _guard = bound.guard();
         gate.wait_at_least(0).await; // n == 0 returns immediately
         let waiting = gate.wait_at_least(2);
         // `spawn`, not `join!`: keeps the `macros` feature (and its
         // proc-macro chain) out of the dev-dep graph. Order not
         // load-bearing — see doc; `spawn` already queued the fires.
         let firing = tokio::spawn(async {
-            shadow_point::invoke!(ag::AgSp, a(0));
-            shadow_point::invoke!(ag::AgSp, a(1));
+            shadow_point::invoke!(ag::ag_sp, a(0));
+            shadow_point::invoke!(ag::ag_sp, a(1));
         });
         waiting.await;
         firing.await.unwrap();
@@ -75,16 +74,16 @@ fn current_thread_body_waits_on_future_fires() {
 fn spawn_blocking_worker_fires_async_waiter() {
     let rt = Builder::new_current_thread().build().unwrap();
     let gate = TokioAsyncGate::new();
-    let shared = ag::AgSp::install_shared(());
+    let shared = ag::ag_sp::shared(());
     let g = gate.clone();
     shared.every(|e| {
         e.b(move |(), _| g.fire());
     });
     let worker_shared = shared.clone();
     let worker = rt.spawn_blocking(move || {
-        let _guard = worker_shared.install();
-        shadow_point::invoke!(ag::AgSp, b(0));
-        shadow_point::invoke!(ag::AgSp, b(1));
+        let _guard = worker_shared.guard();
+        shadow_point::invoke!(ag::ag_sp, b(0));
+        shadow_point::invoke!(ag::ag_sp, b(1));
     });
     std::thread::sleep(Duration::from_millis(50));
     rt.block_on(async {

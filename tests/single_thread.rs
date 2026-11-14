@@ -2,7 +2,7 @@
 //!
 //! These pin the private dispatch branches: head-expects suppresses
 //! fire-once, predicate-fail leaves the entry in place, ordering panics,
-//! `optional` semantics, per-thread re-entry suppression (including
+//! per-thread re-entry suppression (including
 //! transitive A -> B -> A across two prefixes), and `current_fire()`.
 //!
 //! The suite existed as zero tests before the cross-thread rework; the
@@ -12,8 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 mod single {
     shadow_point::define_sp! {
-        pub prefix Single
-        {
+        pub mod single_sp {
             a(value: u32),
             b(value: u32),
             c(value: u32),
@@ -23,8 +22,7 @@ mod single {
 
 mod first {
     shadow_point::define_sp! {
-        pub prefix First
-        {
+        pub mod first_sp {
             ping(value: u32),
         }
     }
@@ -32,8 +30,7 @@ mod first {
 
 mod second {
     shadow_point::define_sp! {
-        pub prefix Second
-        {
+        pub mod second_sp {
             ping(value: u32),
         }
     }
@@ -59,41 +56,33 @@ fn push(log: &Mutex<String>, s: &str) {
     log.lock().unwrap().push_str(s);
 }
 
-// `invoke!` expands to a `#[cfg(test)]`-attributed block, which is only a
-// legal *statement*: hoist fires that must run inside a closure (e.g. under
-// `catch_unwind`) into plain functions.
-fn fire_b(v: u32) {
-    shadow_point::invoke!(single::SingleSp, b(v));
-}
-
 #[test]
-#[allow(deprecated)]
 fn sequence_out_of_order_panics() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     g.sequence(|s| {
-        // Both entries optional: the ordering panic below is the assertion,
-        // and drop must not add a second panic on top of it.
-        s.a(|(), _| {}).optional();
-        s.b(|(), _| {}).optional();
+        // The ordering panic below is the assertion; the guard is forgotten
+        // so drop does not add a second panic on top of it.
+        s.a(|(), _| {});
+        s.b(|(), _| {});
     });
-    let r = std::panic::catch_unwind(|| fire_b(1));
+    let r = std::panic::catch_unwind(|| shadow_point::invoke!(single::single_sp, b(1)));
     assert!(
         r.is_err(),
         "firing `b` with `a` at the sequence head must panic"
     );
     assert_ordering_panic(&r, "`b` before `a`", "expected `a` next but `b` fired");
     // Nothing was consumed by the failed fire: `a` is still consumable.
-    shadow_point::invoke!(single::SingleSp, a(0));
-    drop(g);
+    shadow_point::invoke!(single::single_sp, a(0));
+    std::mem::forget(g);
 }
 
 #[test]
 fn when_predicate_gates_until_match_and_blocks_fire_once() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     let steps = C::new();
     let fire_once = C::new();
     g.sequence(|s| {
-        s.a_when(|v| v == 1, {
+        s.when(|v| v == 1).a({
             let steps = steps.clone();
             move |(), _| steps.inc()
         });
@@ -107,11 +96,11 @@ fn when_predicate_gates_until_match_and_blocks_fire_once() {
     .fires(2);
     // a(0): predicate fails -> entry stays at the head; fire-once is NOT
     // triggered (the pending entry still expects this hook).
-    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::single_sp, a(0));
     assert_eq!(steps.get(), 0, "predicate-failed fire must not consume");
     assert_eq!(fire_once.get(), 0, "pending head must suppress fire-once");
     // a(1): predicate passes -> consumed and step runs.
-    shadow_point::invoke!(single::SingleSp, a(1));
+    shadow_point::invoke!(single::single_sp, a(1));
     assert_eq!(steps.get(), 1);
     assert_eq!(fire_once.get(), 0, "fire-once stays suppressed");
     drop(g);
@@ -119,7 +108,7 @@ fn when_predicate_gates_until_match_and_blocks_fire_once() {
 
 #[test]
 fn sequence_head_consumes_the_first_fire_and_blocks_fire_once() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     let fire_once = C::new();
     let step = C::new();
     g.a({
@@ -133,8 +122,8 @@ fn sequence_head_consumes_the_first_fire_and_blocks_fire_once() {
             move |(), _| step.inc()
         });
     });
-    shadow_point::invoke!(single::SingleSp, a(0));
-    shadow_point::invoke!(single::SingleSp, a(1));
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, a(1));
     assert_eq!(step.get(), 1, "the sequence consumes the first fire");
     assert_eq!(
         fire_once.get(),
@@ -145,23 +134,21 @@ fn sequence_head_consumes_the_first_fire_and_blocks_fire_once() {
 }
 
 #[test]
-#[allow(deprecated)]
-fn optional_head_not_skipped_in_private_mode() {
-    let g = single::SingleSp::install_guard(());
+fn mismatched_head_with_later_match_panics_in_private_mode() {
+    let g = single::single_sp::guard(());
     g.sequence(|s| {
-        s.a(|(), _| {}).optional();
-        s.b(|(), _| {}).optional();
+        s.a(|(), _| {});
+        s.b(|(), _| {});
     });
-    // Private mode never skips an `optional` head on a mismatched fire: a
-    // later matching entry still means ordering violation.
-    let r = std::panic::catch_unwind(|| fire_b(1));
-    assert!(r.is_err(), "optional head is not skipped in private mode");
-    assert_ordering_panic(
-        &r,
-        "`b` before optional `a`",
-        "expected `a` next but `b` fired",
+    // Private mode never skips the head on a mismatched fire: a later
+    // matching entry still means ordering violation.
+    let r = std::panic::catch_unwind(|| shadow_point::invoke!(single::single_sp, b(1)));
+    assert!(
+        r.is_err(),
+        "a later match makes the mismatched fire an ordering violation"
     );
-    drop(g);
+    assert_ordering_panic(&r, "`b` before `a`", "expected `a` next but `b` fired");
+    std::mem::forget(g);
 }
 
 /// Extract the panic payload of a `catch_unwind` result as a borrowed `&str`
@@ -190,21 +177,21 @@ fn assert_ordering_panic(r: &std::thread::Result<()>, what: &str, tail: &str) {
 }
 
 #[test]
-#[allow(deprecated)]
-fn trailing_optional_entry_forgiven_at_drop() {
-    let g = single::SingleSp::install_guard(());
+#[should_panic(expected = "sequence not fully consumed: 1 entry remaining [c]")]
+fn trailing_unconsumed_entry_fails_at_drop() {
+    let g = single::single_sp::guard(());
     g.sequence(|s| {
-        s.a(|(), _| {}).b(|(), _| {}).c(|(), _| {}).optional();
+        s.a(|(), _| {}).b(|(), _| {}).c(|(), _| {});
     });
-    shadow_point::invoke!(single::SingleSp, a(0));
-    shadow_point::invoke!(single::SingleSp, b(0));
-    // `c` never fires; optional -> drop forgives it.
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, b(0));
+    // `c` never fires; every entry is mandatory, so drop asserts.
     drop(g);
 }
 
 #[test]
 fn fire_once_runs_once_and_fires_pass() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     let runs = C::new();
     let every = C::new();
     g.a({
@@ -218,9 +205,9 @@ fn fire_once_runs_once_and_fires_pass() {
             move |(), _| every.inc()
         });
     });
-    shadow_point::invoke!(single::SingleSp, a(0));
-    shadow_point::invoke!(single::SingleSp, a(1));
-    shadow_point::invoke!(single::SingleSp, a(2));
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, a(1));
+    shadow_point::invoke!(single::single_sp, a(2));
     assert_eq!(runs.get(), 1, "fire-once runs exactly once");
     assert_eq!(every.get(), 3, "every runs per fire");
     drop(g);
@@ -229,10 +216,10 @@ fn fire_once_runs_once_and_fires_pass() {
 #[test]
 #[should_panic(expected = "fired 2 time(s), expected 3")]
 fn fires_mismatch_panics_at_drop() {
-    let g = single::SingleSp::install_guard(());
-    g.fires(single::SingleSp::a, 3);
-    shadow_point::invoke!(single::SingleSp, a(0));
-    shadow_point::invoke!(single::SingleSp, a(1));
+    let g = single::single_sp::guard(());
+    g.fires(single::single_sp::a, 3);
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, a(1));
     // Explicit drop: the assertion panic originates here, inside the scope.
     drop(g);
 }
@@ -257,7 +244,7 @@ fn fires_mismatch_panics_at_drop() {
 #[test]
 fn guard_drop_assertion_does_not_abort_while_unwinding() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let g = single::SingleSp::install_guard(());
+        let g = single::single_sp::guard(());
         g.sequence(|q| {
             q.a(|_, _| ());
         });
@@ -272,20 +259,20 @@ fn guard_drop_assertion_does_not_abort_while_unwinding() {
     // The TLS install of this thread was restored by that Drop: a fire
     // now dispatches to the default no-op, so a fresh guard can assert
     // normally again — the unwind path left no half-installed state.
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     g.sequence(|q| {
         q.a(|_, _| ());
     });
-    shadow_point::invoke!(single::SingleSp, a(1));
+    shadow_point::invoke!(single::single_sp, a(1));
     drop(g);
 }
 
 #[test]
 fn fires_mismatch_assertion_does_not_abort_while_unwinding() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let g = single::SingleSp::install_guard(());
-        g.fires(single::SingleSp::a, 3);
-        shadow_point::invoke!(single::SingleSp, a(0));
+        let g = single::single_sp::guard(());
+        g.fires(single::single_sp::a, 3);
+        shadow_point::invoke!(single::single_sp, a(0));
         panic!("the test's own failure");
     }));
     assert!(
@@ -297,9 +284,9 @@ fn fires_mismatch_assertion_does_not_abort_while_unwinding() {
 #[test]
 fn unwinding_assertion_prints_the_diagnostic() {
     if std::env::var("SP_UNWIND_CHILD").is_ok() {
-        let g = single::SingleSp::install_guard(());
-        g.fires(single::SingleSp::a, 3);
-        shadow_point::invoke!(single::SingleSp, a(0));
+        let g = single::single_sp::guard(());
+        g.fires(single::single_sp::a, 3);
+        shadow_point::invoke!(single::single_sp, a(0));
         panic!("the test's own failure");
     }
     let exe = std::env::current_exe().expect("the test binary path");
@@ -328,9 +315,9 @@ fn unwinding_assertion_prints_the_diagnostic() {
 #[test]
 fn failed_verify_owns_the_unreached_mismatch() {
     if std::env::var("SP_VERIFY_TWO_CHILD").is_ok() {
-        let g = single::SingleSp::install_guard(());
-        g.fires(single::SingleSp::a, 5);
-        g.fires(single::SingleSp::b, 6);
+        let g = single::single_sp::guard(());
+        g.fires(single::single_sp::a, 5);
+        g.fires(single::single_sp::b, 6);
         g.verify();
     }
     let exe = std::env::current_exe().expect("the test binary path");
@@ -359,11 +346,11 @@ fn failed_verify_owns_the_unreached_mismatch() {
 #[test]
 fn shared_last_arc_assertion_does_not_abort_while_unwinding() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let shared = single::SingleSp::install_shared(());
+        let shared = single::single_sp::shared(());
         shared.sequence(|q| {
             q.a(|_, _| ());
         });
-        let _inst = shared.install();
+        let _inst = shared.guard();
         // Unwind drops `_inst` (one Arc clone) and then `shared` — the
         // last reference — so the shared assertion fires mid-unwinding.
         panic!("the test's own failure");
@@ -378,7 +365,7 @@ fn shared_last_arc_assertion_does_not_abort_while_unwinding() {
 #[test]
 #[should_panic(expected = "sequence not fully consumed")]
 fn unconsumed_sequence_still_panics_on_a_clean_exit() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     g.sequence(|q| {
         q.a(|_, _| ());
     });
@@ -391,7 +378,7 @@ fn unconsumed_sequence_still_panics_on_a_clean_exit() {
 #[test]
 fn second_sequence_replaces_the_first() {
     let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     g.sequence(|q| {
         q.a({
             let log = log.clone();
@@ -407,8 +394,8 @@ fn second_sequence_replaces_the_first() {
     });
     // Only the replacement is in force: `b` is the head now, and a fire of
     // `a` matches no entry at all (it falls through, it does not consume).
-    shadow_point::invoke!(single::SingleSp, a(0));
-    shadow_point::invoke!(single::SingleSp, b(1));
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, b(1));
     drop(g);
     assert_eq!(
         log.lock().unwrap().clone(),
@@ -419,7 +406,7 @@ fn second_sequence_replaces_the_first() {
 
 #[test]
 fn nested_invoke_of_same_sp_is_suppressed() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     let outer = C::new();
     g.a({
         let outer = outer.clone();
@@ -427,26 +414,26 @@ fn nested_invoke_of_same_sp_is_suppressed() {
             outer.inc();
             // Nested dispatch of the same hook on the same thread:
             // suppressed before it counts or re-runs.
-            shadow_point::invoke!(single::SingleSp, a(9));
+            shadow_point::invoke!(single::single_sp, a(9));
         }
     });
-    g.fires(single::SingleSp::a, 1);
-    shadow_point::invoke!(single::SingleSp, a(0));
+    g.fires(single::single_sp::a, 1);
+    shadow_point::invoke!(single::single_sp, a(0));
     assert_eq!(outer.get(), 1, "nested invoke must not re-run the closure");
     drop(g);
 }
 
 #[test]
 fn transitive_reentry_across_prefixes_a_b_a() {
-    let first = first::FirstSp::install_guard(());
-    let second = second::SecondSp::install_guard(());
+    let first = first::first_sp::guard(());
+    let second = second::second_sp::guard(());
     let log = Arc::new(Mutex::new(String::new()));
     first.sequence(|s| {
         s.ping({
             let log = log.clone();
             move |(), _| {
                 push(&log, "A-");
-                shadow_point::invoke!(second::SecondSp, ping(0));
+                shadow_point::invoke!(second::second_sp, ping(0));
                 push(&log, "-a");
             }
         });
@@ -458,13 +445,13 @@ fn transitive_reentry_across_prefixes_a_b_a() {
             // Inner `First::ping` from within `Second::ping` must be
             // suppressed: the outer A is still dispatching on this thread
             // (per-sync-point re-entry, not a single global slot).
-            shadow_point::invoke!(first::FirstSp, ping(0));
+            shadow_point::invoke!(first::first_sp, ping(0));
             push(&log, "-b");
         }
     });
-    first.fires(first::FirstSp::ping, 1);
-    second.fires(second::SecondSp::ping, 1);
-    shadow_point::invoke!(first::FirstSp, ping(0));
+    first.fires(first::first_sp::ping, 1);
+    second.fires(second::second_sp::ping, 1);
+    shadow_point::invoke!(first::first_sp, ping(0));
     assert_eq!(*log.lock().unwrap(), "A-B--b-a");
     drop(first);
     drop(second);
@@ -480,7 +467,7 @@ fn deref_and_current_fire() {
         "no fire outside a hook"
     );
 
-    let g = single::SingleSp::install_guard(V { n: 42 });
+    let g = single::single_sp::guard(V { n: 42 });
     assert_eq!(g.n, 42, "guard derefs to the value");
     g.a(|v, arg| {
         assert_eq!(v.n, 42);
@@ -490,7 +477,7 @@ fn deref_and_current_fire() {
         assert_eq!(f.index, 0, "first fire has zero-based index 0");
     });
     // trailing comma in invoke! is supported:
-    shadow_point::invoke!(single::SingleSp, a(7,));
+    shadow_point::invoke!(single::single_sp, a(7,));
     assert!(
         shadow_point::current_fire().is_none(),
         "fire info restored after the dispatch"
@@ -509,7 +496,7 @@ fn deref_and_current_fire() {
 #[test]
 #[should_panic(expected = "expected panic")]
 fn should_panic_test_passes_with_an_incomplete_scenario() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     g.sequence(|q| {
         q.a(|_, _| ());
     });
@@ -526,7 +513,7 @@ fn should_panic_test_passes_with_an_incomplete_scenario() {
 #[test]
 fn guard_dropped_before_the_expected_panic_still_asserts() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let g = single::SingleSp::install_guard(());
+        let g = single::single_sp::guard(());
         g.sequence(|q| {
             q.a(|_, _| ());
         });
@@ -552,9 +539,9 @@ fn guard_dropped_before_the_expected_panic_still_asserts() {
 #[test]
 fn raised_assertions_keep_their_payload_shape() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let g = single::SingleSp::install_guard(());
-        g.fires(single::SingleSp::a, 3);
-        shadow_point::invoke!(single::SingleSp, a(0));
+        let g = single::single_sp::guard(());
+        g.fires(single::single_sp::a, 3);
+        shadow_point::invoke!(single::single_sp, a(0));
         drop(g);
     }));
     let msg = panic_message(&outcome);
@@ -577,7 +564,7 @@ fn raised_assertions_keep_their_payload_shape() {
     );
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let g = single::SingleSp::install_guard(());
+        let g = single::single_sp::guard(());
         g.sequence(|q| {
             q.a(|_, _| ());
         });
@@ -610,7 +597,7 @@ impl Drop for MarksDrop {
 #[test]
 fn the_guarded_value_is_dropped_when_the_guard_drops() {
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let g = single::SingleSp::install_guard(MarksDrop(flag.clone()));
+    let g = single::single_sp::guard(MarksDrop(flag.clone()));
     assert!(
         !flag.load(std::sync::atomic::Ordering::SeqCst),
         "the value is alive while the guard is"
@@ -629,7 +616,7 @@ fn a_weak_guard_does_not_keep_the_value_alive() {
     // decides when the value goes.
     let v = Arc::new(());
     let w = Arc::downgrade(&v);
-    let g = single::SingleSp::install_guard(w.clone());
+    let g = single::single_sp::guard(w.clone());
     assert!(w.upgrade().is_some(), "the test holds the value alive");
     drop(g);
     assert!(w.upgrade().is_some(), "the guard was not the last owner");
@@ -643,12 +630,12 @@ fn a_captured_handle_is_freed_with_the_state() {
     // never consumed, so under `Box::leak` its captures were immortal.
     let seen = Arc::new(Mutex::new(Vec::new()));
     {
-        let g = single::SingleSp::install_guard(());
+        let g = single::single_sp::guard(());
         let s = seen.clone();
         g.every(|q| {
             q.a(move |(), _| s.lock().unwrap().push(1));
         });
-        shadow_point::invoke!(single::SingleSp, a(0));
+        shadow_point::invoke!(single::single_sp, a(0));
         assert_eq!(seen.lock().unwrap().len(), 1);
         drop(g);
     }
@@ -664,7 +651,7 @@ fn a_captured_handle_is_freed_with_the_state() {
 #[test]
 fn a_fire_once_that_never_fired_is_freed_with_the_state() {
     let held = Arc::new(Mutex::new(0u32));
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     let h = held.clone();
     g.a(move |(), _| drop(h)).fires(0); // registered, never fired
     drop(g);
@@ -681,22 +668,22 @@ fn install_inside_a_hook_and_a_reinstall_do_not_break_dispatch() {
     // that installs (or drops) a guard takes the same TLS slot mutably, and
     // a live borrow would turn that into a harness-owned panic.
     let outer_hits = Arc::new(Mutex::new(0u32));
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     let o = outer_hits.clone();
     g.every(|q| {
         q.a(move |(), _| {
             *o.lock().unwrap() += 1;
             // A nested install on the same thread, dropped inside the fire.
-            let inner = single::SingleSp::install_guard(());
+            let inner = single::single_sp::guard(());
             inner.b(|(), _| ());
-            shadow_point::invoke!(single::SingleSp, b(0));
+            shadow_point::invoke!(single::single_sp, b(0));
             drop(inner);
         });
     });
     g.sequence(|q| {
         q.a(|(), _| ());
     });
-    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::single_sp, a(0));
     assert_eq!(
         *outer_hits.lock().unwrap(),
         1,
@@ -704,11 +691,11 @@ fn install_inside_a_hook_and_a_reinstall_do_not_break_dispatch() {
     );
     drop(g);
     // And the thread's dispatch is clean afterwards: a fresh install works.
-    let g2 = single::SingleSp::install_guard(());
+    let g2 = single::single_sp::guard(());
     g2.sequence(|q| {
         q.a(|(), _| ());
     });
-    shadow_point::invoke!(single::SingleSp, a(1));
+    shadow_point::invoke!(single::single_sp, a(1));
     drop(g2);
 }
 
@@ -720,7 +707,7 @@ fn reuses_of_the_state_address_do_not_suppress_a_live_dispatch() {
     // dispatch holds a strong count for its whole duration, which is what
     // prevents that; this loop is the shape that would catch it.
     for i in 0..200 {
-        let g = single::SingleSp::install_guard(i);
+        let g = single::single_sp::guard(i);
         let hits = Arc::new(Mutex::new(0u32));
         let h = hits.clone();
         g.every(|q| {
@@ -729,7 +716,7 @@ fn reuses_of_the_state_address_do_not_suppress_a_live_dispatch() {
                 assert_eq!(*v, i, "the fire reached the state that owns it");
             });
         });
-        shadow_point::invoke!(single::SingleSp, a(0));
+        shadow_point::invoke!(single::single_sp, a(0));
         assert_eq!(*hits.lock().unwrap(), 1, "iteration {i} suppressed");
         drop(g);
     }
@@ -740,26 +727,26 @@ fn stacked_installs_release_the_inner_and_keep_the_outer_alive() {
     // The outer state lives on through the inner guard's `old` handle: the
     // outer fires must still reach it after the inner scope closes.
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let outer = single::SingleSp::install_guard(MarksDrop(flag.clone()));
+    let outer = single::single_sp::guard(MarksDrop(flag.clone()));
     let hits = Arc::new(Mutex::new(0u32));
     let h = hits.clone();
     outer.every(|q| {
         q.a(move |_, _| *h.lock().unwrap() += 1);
     });
-    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::single_sp, a(0));
     {
-        let inner = single::SingleSp::install_guard(());
+        let inner = single::single_sp::guard(());
         inner.sequence(|q| {
             q.b(|(), _| ());
         });
-        shadow_point::invoke!(single::SingleSp, b(0));
+        shadow_point::invoke!(single::single_sp, b(0));
         drop(inner);
         assert!(
             !flag.load(std::sync::atomic::Ordering::SeqCst),
             "dropping the inner guard must not release the outer state"
         );
     }
-    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::single_sp, a(0));
     assert_eq!(*hits.lock().unwrap(), 2, "the outer install survived");
     drop(outer);
     assert!(
@@ -782,7 +769,7 @@ fn an_unwinding_guard_does_not_run_the_value_destructor() {
     }
     let before = DROPS.load(std::sync::atomic::Ordering::SeqCst);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _g = single::SingleSp::install_guard(CountsDrops);
+        let _g = single::single_sp::guard(CountsDrops);
         panic!("the test's own failure");
     }));
     assert!(outcome.is_err(), "the scenario failed as designed");
@@ -796,7 +783,7 @@ fn an_unwinding_guard_does_not_run_the_value_destructor() {
 #[test]
 fn an_assertion_panic_does_not_run_the_value_destructor_mid_unwind() {
     // The drop assertions are OUR panic and fire on a clean thread, so
-    // `SpGuard::drop` unwinds out of `assert_fires` rather than entering it
+    // `Owner::drop` unwinds out of `assert_fires` rather than entering it
     // with `panicking()` already true. The state must be out of the implicit
     // drop path by then: a plain local `Arc` would be freed by that unwind,
     // running `T::drop` mid-unwind — a second panic if the destructor raises,
@@ -810,7 +797,7 @@ fn an_assertion_panic_does_not_run_the_value_destructor_mid_unwind() {
     }
     let before = DROPS.load(std::sync::atomic::Ordering::SeqCst);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let g = single::SingleSp::install_guard(CountsDrops);
+        let g = single::single_sp::guard(CountsDrops);
         g.sequence(|q| {
             q.a(|_, _| ()); // left unconsumed: the drop assertion raises
         });
@@ -833,16 +820,16 @@ fn an_assertion_panic_does_not_run_the_value_destructor_mid_unwind() {
 
 #[test]
 fn fire_once_without_a_count_expects_exactly_one() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     g.a(|(), _| ());
-    shadow_point::invoke!(single::SingleSp, a(0));
+    shadow_point::invoke!(single::single_sp, a(0));
     drop(g);
 }
 
 #[test]
 #[should_panic(expected = "fired 0 time(s), expected 1")]
 fn fire_once_default_rejects_no_fire() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     g.a(|(), _| ());
     drop(g);
 }
@@ -850,45 +837,45 @@ fn fire_once_default_rejects_no_fire() {
 #[test]
 #[should_panic(expected = "fired 2 time(s), expected 1")]
 fn fire_once_default_rejects_a_second_fire() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     g.a(|(), _| ());
-    shadow_point::invoke!(single::SingleSp, a(0));
-    shadow_point::invoke!(single::SingleSp, a(1));
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, a(1));
     drop(g);
 }
 
 #[test]
 fn explicit_count_before_registration_wins() {
-    let g = single::SingleSp::install_guard(());
-    g.fires(single::SingleSp::a, 2);
+    let g = single::single_sp::guard(());
+    g.fires(single::single_sp::a, 2);
     g.a(|(), _| ());
-    shadow_point::invoke!(single::SingleSp, a(0));
-    shadow_point::invoke!(single::SingleSp, a(1));
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, a(1));
     drop(g);
 }
 
 #[test]
 fn explicit_count_after_registration_wins() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     g.a(|(), _| ()).fires(2);
-    shadow_point::invoke!(single::SingleSp, a(0));
-    shadow_point::invoke!(single::SingleSp, a(1));
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, a(1));
     drop(g);
 }
 
 #[test]
 fn explicit_fires_last_call_wins() {
-    let g = single::SingleSp::install_guard(());
-    g.fires(single::SingleSp::a, 1);
-    g.fires(single::SingleSp::a, 2);
-    shadow_point::invoke!(single::SingleSp, a(0));
-    shadow_point::invoke!(single::SingleSp, a(1));
+    let g = single::single_sp::guard(());
+    g.fires(single::single_sp::a, 1);
+    g.fires(single::single_sp::a, 2);
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, a(1));
     drop(g);
 }
 
 #[test]
 fn a_second_registration_keeps_the_explicit_count() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     let calls = C::new();
     g.a(|(), _| ()).fires(2);
     // The last registration replaces the closure; it must not reset the
@@ -897,8 +884,8 @@ fn a_second_registration_keeps_the_explicit_count() {
         let calls = calls.clone();
         move |(), _| calls.inc()
     });
-    shadow_point::invoke!(single::SingleSp, a(0));
-    shadow_point::invoke!(single::SingleSp, a(1));
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, a(1));
     assert_eq!(
         calls.get(),
         1,
@@ -909,52 +896,32 @@ fn a_second_registration_keeps_the_explicit_count() {
 
 #[test]
 fn standalone_fires_zero_accepts_no_fire() {
-    let g = single::SingleSp::install_guard(());
-    g.fires(single::SingleSp::a, 0);
+    let g = single::single_sp::guard(());
+    g.fires(single::single_sp::a, 0);
     drop(g);
 }
 
 #[test]
 #[should_panic(expected = "fired 1 time(s), expected 0")]
 fn standalone_fires_zero_rejects_a_fire() {
-    let g = single::SingleSp::install_guard(());
-    g.fires(single::SingleSp::a, 0);
-    shadow_point::invoke!(single::SingleSp, a(0));
-    drop(g);
-}
-
-#[test]
-#[allow(deprecated)]
-fn explicit_zero_with_optional_in_either_order() {
-    // Count first, optional entry second.
-    let g = single::SingleSp::install_guard(());
-    g.fires(single::SingleSp::a, 0);
-    g.sequence(|s| {
-        s.a(|(), _| {}).optional();
-    });
-    drop(g);
-
-    // Optional entry first, count second.
-    let g = single::SingleSp::install_guard(());
-    g.sequence(|s| {
-        s.a(|(), _| {}).optional();
-    });
-    g.fires(single::SingleSp::a, 0);
+    let g = single::single_sp::guard(());
+    g.fires(single::single_sp::a, 0);
+    shadow_point::invoke!(single::single_sp, a(0));
     drop(g);
 }
 
 #[test]
 #[should_panic(expected = "fired 2 time(s), expected 1")]
 fn every_and_fire_once_default_counts() {
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     let hits = C::new();
     let hits2 = hits.clone();
     g.every(|e| {
         e.a(move |(), _| hits2.inc());
     });
     g.a(|(), _| ());
-    shadow_point::invoke!(single::SingleSp, a(0));
-    shadow_point::invoke!(single::SingleSp, a(1));
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, a(1));
     assert_eq!(hits.get(), 2, "every runs on both fires");
     drop(g);
 }
@@ -969,8 +936,8 @@ fn verify_fails_before_drop_and_skips_the_value_destructor() {
         }
     }
     let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let g = single::SingleSp::install_guard(DropFlag(dropped.clone()));
-    g.fires(single::SingleSp::a, 7);
+    let g = single::single_sp::guard(DropFlag(dropped.clone()));
+    g.fires(single::single_sp::a, 7);
     let r = catch_unwind(AssertUnwindSafe(|| g.verify()));
     let err = r.expect_err("verify must fail before drop");
     let msg = err
@@ -991,8 +958,8 @@ fn verify_fails_before_drop_and_skips_the_value_destructor() {
 #[test]
 fn a_failed_verify_is_not_reported_again_by_drop() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    let g = single::SingleSp::install_guard(());
-    g.fires(single::SingleSp::a, 7);
+    let g = single::single_sp::guard(());
+    g.fires(single::single_sp::a, 7);
     let r = catch_unwind(AssertUnwindSafe(|| g.verify()));
     assert!(r.is_err(), "verify must fail");
     // A caught verify failure still leaves the guard alive; Drop must skip
@@ -1003,10 +970,10 @@ fn a_failed_verify_is_not_reported_again_by_drop() {
 #[test]
 fn verify_rejects_an_extra_fire() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     g.a(|(), _| ()); // default: exactly one hook fire
-    shadow_point::invoke!(single::SingleSp, a(0));
-    shadow_point::invoke!(single::SingleSp, a(1));
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, a(1));
     let r = catch_unwind(AssertUnwindSafe(|| g.verify()));
     let err = r.expect_err("verify must reject the second fire");
     let msg = err
@@ -1019,10 +986,10 @@ fn verify_rejects_an_extra_fire() {
 #[test]
 fn verify_panic_points_at_the_caller() {
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    let g = single::SingleSp::install_guard(());
+    let g = single::single_sp::guard(());
     // A marker no neighboring test uses: the hook is process-global while
     // this test has it installed, so another test's panic must not match.
-    g.fires(single::SingleSp::a, 7_777_777);
+    g.fires(single::single_sp::a, 7_777_777);
     let slot = Arc::new(Mutex::new(None::<String>));
     let prev = std::panic::take_hook();
     {
@@ -1052,4 +1019,47 @@ fn verify_panic_points_at_the_caller() {
         "verify must report the caller, not src/lib.rs: {file}"
     );
     std::mem::forget(g);
+}
+
+/// D28: `invoke!` is a block expression, legal in expression position — not
+/// just a statement. Each form below must compile AND dispatch (the hook
+/// counts prove the fire happened, not merely that the syntax was accepted).
+#[test]
+fn invoke_is_an_expression() {
+    let g = single::single_sp::guard(());
+    let fires = C::new();
+    // `every` runs on each fire (fire-once would run only on counter 0), so
+    // the count proves every expression form actually dispatched.
+    let f = fires.clone();
+    g.every(|e| {
+        e.a(move |(), _| f.inc());
+    });
+    g.fires(single::single_sp::a, 4);
+
+    // let-binding: a statement cannot sit in a `let` initializer, so this
+    // compiling proves `invoke!` is an expression evaluating to `()`.
+    let () = shadow_point::invoke!(single::single_sp, a(0));
+    // if-branch expression.
+    let _ = if true {
+        shadow_point::invoke!(single::single_sp, a(1));
+        5
+    } else {
+        6
+    };
+    // closure body (the form the old statement-only macro could not take).
+    let run = || shadow_point::invoke!(single::single_sp, a(2));
+    run();
+    // match-arm expression (two arms: a real expression slot).
+    let pick = 0;
+    match pick {
+        0 => shadow_point::invoke!(single::single_sp, a(3)),
+        _ => shadow_point::invoke!(single::single_sp, a(3)),
+    }
+
+    assert_eq!(
+        fires.get(),
+        4,
+        "all four expression-position fires dispatched"
+    );
+    g.verify();
 }
