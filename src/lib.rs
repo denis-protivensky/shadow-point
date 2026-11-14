@@ -22,10 +22,7 @@
 /// trailing value, `let () = invoke!(…);` — in both test and production
 /// builds. The outer brace pair is what makes the expression form legal: a
 /// bare `#[cfg(test)]`-attributed block is a statement, not an expression.
-///
-/// Expands to a real dispatch under `#[cfg(test)]` (evaluated at the call
-/// site's crate) and to a no-op otherwise — production builds have no
-/// dispatch code and do not reference the crate.
+/// Production builds carry no dispatch code and never resolve the crate.
 ///
 /// # Dev-dependency seam
 ///
@@ -233,8 +230,7 @@ impl Gate {
     ///
     /// # Panics
     ///
-    /// Panics with `shadow-point: gate wait timed out after {timeout:?}` if
-    /// the gate is not set within `timeout`.
+    /// With `shadow-point: gate wait timed out after {timeout:?}`.
     pub fn must_wait(&self, timeout: std::time::Duration) {
         assert!(
             self.wait_timeout(timeout),
@@ -607,7 +603,7 @@ impl Drop for ExecSink {
 ///   runs at most once, on the fire whose per-hook counter was 0 and whose
 ///   sequence fell through to fire-once. Chain `.fires(n)` for a different
 ///   count; both `fires` forms return the registration handle (`&Guard` or
-///   `&Shared`) so registrations chain.
+///   `&Shared`).
 /// - ordered: `g.sequence(|s| { s.a(f).b(g); })` — entries consumed in order;
 ///   a gated step is `s.when(pred).<hook>(f)`.
 /// - every fire: `g.every(|e| { e.a(f); })` — runs on every non-suppressed fire.
