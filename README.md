@@ -375,7 +375,8 @@ full public API is documented at <https://docs.rs/shadow-point>.
 
 Set `SP_TRACE` (any value, including `0`) to print every hook fire to stderr,
 with the hook name, fire index, and firing thread. Inside a closure,
-`current_fire()` reports the hook name and the fire index; the closure runs
+`current_fire()` reports the hook name and the fire index; both indices are
+zero-based and name the same fire. The closure runs
 on the firing thread, so take thread info from `std::thread::current()`.
 `trace_enabled()` answers the same question programmatically. Every drop
 assertion names the install site.

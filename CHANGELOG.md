@@ -75,6 +75,8 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   `__SP_NAMES`, `calls`, `expected`, …) is a legal hook name; the reserved
   names are rejected with a friendly `compile_error!` rather than a raw
   duplicate-definition error.
+- `SP_TRACE` prints the zero-based call index, the same value
+  `current_fire()` reports (0.4.0 printed `index + 1`).
 
 ### Removed
 - `SeqBuilder::optional`, the `SeqEntry.optional` field, the shared-mode

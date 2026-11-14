@@ -121,8 +121,9 @@ macro_rules! invoke {
 
 // --- trace_enabled ---
 /// Check whether sync-point tracing is enabled via the `SP_TRACE` environment
-/// variable. When set, every hook fire prints its name and call index to
-/// stderr — useful for discovering expected sequences and call counts.
+/// variable. When set, every hook fire prints its name and zero-based call
+/// index (the same value [`current_fire`] reports) to stderr — useful for
+/// discovering expected sequences and call counts.
 pub fn trace_enabled() -> bool {
     use std::sync::atomic::{AtomicBool, Ordering};
     // The environment is process-global, so the answer is computed once and
@@ -1175,7 +1176,7 @@ macro_rules! define_sp {
                                 eprintln!(
                                     "[sp] {} call #{} thread={}",
                                     __sp_name(h),
-                                    idx + 1,
+                                    idx,
                                     std::thread::current()
                                         .name()
                                         .unwrap_or("<unnamed>"),
