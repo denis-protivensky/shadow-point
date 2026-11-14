@@ -845,18 +845,11 @@ macro_rules! define_sp {
                             $( Self::$method(..) => Hook::$method, )+
                         }
                     }
-                }
-
-                pub struct SeqEntry<T: Send + Sync + 'static> {
-                    action: SeqAction<T>,
-                }
-
-                impl<T: Send + Sync + 'static> SeqEntry<T> {
                     fn matches(&self, h: Hook) -> bool {
-                        self.action.hook() == h
+                        self.hook() == h
                     }
                     fn name(&self) -> &'static str {
-                        __sp_name(self.action.hook())
+                        __sp_name(self.hook())
                     }
                 }
 
@@ -887,7 +880,7 @@ macro_rules! define_sp {
 
                 /// The `sequence` registration builder.
                 pub struct Seq<T: Send + Sync + 'static> {
-                    seq: ::std::collections::VecDeque<SeqEntry<T>>,
+                    seq: ::std::collections::VecDeque<SeqAction<T>>,
                 }
 
                 impl<T: Send + Sync + 'static> Seq<T> {
@@ -897,9 +890,7 @@ macro_rules! define_sp {
                             &mut self,
                             f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
                         ) -> &mut Self {
-                            self.seq.push_back(SeqEntry {
-                                action: SeqAction::$method(None, Box::new(f)),
-                            });
+                            self.seq.push_back(SeqAction::$method(None, Box::new(f)));
                             self
                         }
                     )+
@@ -940,9 +931,9 @@ macro_rules! define_sp {
                         where
                             P: Fn($($arg_ty),*) -> bool + Send + 'static,
                         {
-                            self.seq.seq.push_back(SeqEntry {
-                                action: SeqAction::$method(Some(Box::new(self.pred)), Box::new(f)),
-                            });
+                            self.seq.seq.push_back(
+                                SeqAction::$method(Some(Box::new(self.pred)), Box::new(f)),
+                            );
                             self.seq
                         }
                     )+
@@ -959,7 +950,7 @@ macro_rules! define_sp {
                     )+
                     __sp_every: ::std::sync::Mutex<Every<T>>,
                     __sp_sequence: ::std::sync::Mutex<
-                        ::std::collections::VecDeque<SeqEntry<T>>
+                        ::std::collections::VecDeque<SeqAction<T>>
                     >,
                     __sp_sequence_cv: ::std::sync::Condvar,
                     __sp_shared: bool,
@@ -1206,7 +1197,7 @@ macro_rules! define_sp {
                                     match seq.front() {
                                         None => break (false, None),
                                         Some(front) if front.matches(h) => {
-                                            let pass = match &front.action {
+                                            let pass = match front {
                                                 SeqAction::$method(Some(pred), _) => {
                                                     pred($($arg),*)
                                                 }
@@ -1220,7 +1211,7 @@ macro_rules! define_sp {
                                             if pass {
                                                 let entry = seq.pop_front();
                                                 st.__sp_sequence_cv.notify_all();
-                                                break (true, entry.map(|e| e.action));
+                                                break (true, entry);
                                             }
                                             break (true, None);
                                         }
