@@ -168,7 +168,7 @@ most common wrong-mode mistake — those fires disappear.
 | chained registration | `guard.a(f).fires(2).b(g).fires(1)` — both `fires` forms return the guard |
 | count only | `guard.fires(register_sp::a, n)` |
 | assert now | `guard.verify()` — same checks as drop, at the call site |
-| every fire | `guard.every(\|e\| e.<name>(f))` |
+| every fire | `guard.every(\|e\| { e.<name>(f); })` |
 | ordered | `guard.sequence(\|s\| { s.a(f).b(g); })` |
 | conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires the first time `pred` passes. `pred` runs under the sequence lock: keep it a pure check (a blocking predicate can deadlock shared mode) |
 | shared | `register_sp::shared(value)`, then `shared.guard()` per firing thread |

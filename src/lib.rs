@@ -609,7 +609,7 @@ impl Drop for ExecSink {
 ///   `&Shared`) so registrations chain.
 /// - ordered: `g.sequence(|s| { s.a(f).b(g); })` — entries consumed in order;
 ///   a gated step is `s.when(pred).<hook>(f)`.
-/// - every fire: `g.every(|e| e.a(f))` — runs on every non-suppressed fire.
+/// - every fire: `g.every(|e| { e.a(f); })` — runs on every non-suppressed fire.
 /// - count only: `g.fires(<hook>, n)` — no closure.
 ///
 /// Closure bounds: a fire-once or sequence closure is
