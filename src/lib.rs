@@ -932,7 +932,7 @@ macro_rules! define_sp {
                 }
 
                 struct State<T: Send + Sync + 'static> {
-                    fixed: StateFixed<T>,
+                    __sp_fixed: StateFixed<T>,
                     $(
                         $method: ::std::sync::Mutex<
                             Option<Box<dyn FnOnce(&T $( , $arg_ty)*) + Send>>
@@ -947,7 +947,7 @@ macro_rules! define_sp {
                 ) -> State<T> {
                     let n = [$( stringify!($method) ),+].len();
                     State {
-                        fixed: StateFixed {
+                        __sp_fixed: StateFixed {
                             __sp_value: value,
                             __sp_every: ::std::sync::Mutex::new(Every {
                                 $( $method: None, )+
@@ -993,7 +993,7 @@ macro_rules! define_sp {
                 fn bump_call<T: Send + Sync + 'static>(
                     st: &State<T>, h: Hook,
                 ) -> usize {
-                    st.fixed.__sp_calls[h as usize].fetch_add(
+                    st.__sp_fixed.__sp_calls[h as usize].fetch_add(
                         1, ::std::sync::atomic::Ordering::SeqCst,
                     )
                 }
@@ -1001,7 +1001,7 @@ macro_rules! define_sp {
                 fn set_expected<T: Send + Sync + 'static>(
                     st: &State<T>, h: Hook, n: usize,
                 ) {
-                    st.fixed.__sp_expected
+                    st.__sp_fixed.__sp_expected
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         [h as usize] = Some(n);
@@ -1011,7 +1011,7 @@ macro_rules! define_sp {
                     st: &State<T>, h: Hook, n: usize,
                 ) {
                     let mut expected = st
-                        .fixed.__sp_expected
+                        .__sp_fixed.__sp_expected
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let slot = &mut expected[h as usize];
@@ -1027,7 +1027,7 @@ macro_rules! define_sp {
                         seq: ::std::collections::VecDeque::new(),
                     };
                     f(&mut builder);
-                    *st.fixed.__sp_sequence.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    *st.__sp_fixed.__sp_sequence.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
                         builder.seq;
                 }
 
@@ -1036,7 +1036,7 @@ macro_rules! define_sp {
                 ) {
                     let mut every = Every { $( $method: None, )+ };
                     f(&mut every);
-                    *st.fixed.__sp_every.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = every;
+                    *st.__sp_fixed.__sp_every.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = every;
                 }
 
                 fn report_while_unwinding(message: &str) {
@@ -1057,7 +1057,7 @@ macro_rules! define_sp {
                     message: &str,
                     raise: impl FnOnce(),
                 ) {
-                    st.fixed.__sp_reported.store(true, ::std::sync::atomic::Ordering::SeqCst);
+                    st.__sp_fixed.__sp_reported.store(true, ::std::sync::atomic::Ordering::SeqCst);
                     if unwinding {
                         report_while_unwinding(message);
                     } else {
@@ -1070,14 +1070,14 @@ macro_rules! define_sp {
                     st: &State<T>, from_drop: bool,
                 ) {
                     if from_drop
-                        && st.fixed.__sp_reported.load(::std::sync::atomic::Ordering::SeqCst)
+                        && st.__sp_fixed.__sp_reported.load(::std::sync::atomic::Ordering::SeqCst)
                     {
                         return;
                     }
                     let unwinding = std::thread::panicking();
-                    let shared = st.fixed.__sp_shared;
+                    let shared = st.__sp_fixed.__sp_shared;
                     let seq = st
-                        .fixed.__sp_sequence
+                        .__sp_fixed.__sp_sequence
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if !seq.is_empty() {
@@ -1091,7 +1091,7 @@ macro_rules! define_sp {
                                 .collect::<Vec<_>>()
                                 .join(", "),
                             if shared { "shared, " } else { "" },
-                            st.fixed.__sp_installed_at,
+                            st.__sp_fixed.__sp_installed_at,
                         );
                         drop(seq);
                         report_mismatch(st, unwinding, &message, || panic!("{message}"));
@@ -1099,12 +1099,12 @@ macro_rules! define_sp {
                         drop(seq);
                     }
                     let expected = st
-                        .fixed.__sp_expected
+                        .__sp_fixed.__sp_expected
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     for (i, expected) in expected.iter().enumerate() {
                         let Some(expected) = expected else { continue };
-                        let actual = st.fixed.__sp_calls[i]
+                        let actual = st.__sp_fixed.__sp_calls[i]
                             .load(::std::sync::atomic::Ordering::SeqCst);
                         if actual == *expected {
                             continue;
@@ -1114,7 +1114,7 @@ macro_rules! define_sp {
                              time(s), expected {expected} ({}installed at {})",
                             __SP_NAMES[i],
                             if shared { "shared, " } else { "" },
-                            st.fixed.__sp_installed_at,
+                            st.__sp_fixed.__sp_installed_at,
                         );
                         report_mismatch(st, unwinding, &message, || {
                             assert_eq!(actual, *expected, "{message}");
@@ -1166,17 +1166,17 @@ macro_rules! define_sp {
                             });
                             let every = {
                                 let guard = st
-                                    .fixed.__sp_every
+                                    .__sp_fixed.__sp_every
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                                 guard.$method.clone()
                             };
                             if let Some(f) = every {
-                                f(&st.fixed.__sp_value $( , $arg)*);
+                                f(&st.__sp_fixed.__sp_value $( , $arg)*);
                             }
                             let (head_expects, consumed) = {
                                 let mut seq = st
-                                    .fixed.__sp_sequence
+                                    .__sp_fixed.__sp_sequence
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                                 let mut timed_out_last = false;
@@ -1197,7 +1197,7 @@ macro_rules! define_sp {
                                             };
                                             if pass {
                                                 let entry = seq.pop_front();
-                                                st.fixed.__sp_sequence_cv.notify_all();
+                                                st.__sp_fixed.__sp_sequence_cv.notify_all();
                                                 break (true, entry);
                                             }
                                             break (true, None);
@@ -1208,7 +1208,7 @@ macro_rules! define_sp {
                                             if !has_more {
                                                 break (false, None);
                                             }
-                                            if st.fixed.__sp_shared {
+                                            if st.__sp_fixed.__sp_shared {
                                                 if timed_out_last {
                                                     panic!(
                                                         "shadow-point: sequence park \
@@ -1218,11 +1218,11 @@ macro_rules! define_sp {
                                                         $crate::park_timeout(),
                                                         __sp_name(h),
                                                         front.name(),
-                                                        st.fixed.__sp_installed_at,
+                                                        st.__sp_fixed.__sp_installed_at,
                                                     );
                                                 }
                                                 let (g, w) = st
-                                                    .fixed.__sp_sequence_cv
+                                                    .__sp_fixed.__sp_sequence_cv
                                                     .wait_timeout(
                                                         seq,
                                                         $crate::park_timeout(),
@@ -1244,7 +1244,7 @@ macro_rules! define_sp {
                             };
                             match consumed {
                                 Some(SeqAction::$method(_, f)) => {
-                                    f(&st.fixed.__sp_value $( , $arg)*);
+                                    f(&st.__sp_fixed.__sp_value $( , $arg)*);
                                 }
                                 Some(_) => unreachable!(
                                     "shadow-point: consumed a non-matching sequence entry"
@@ -1259,7 +1259,7 @@ macro_rules! define_sp {
                                             slot.take()
                                         };
                                         if let Some(f) = fire_once {
-                                            f(&st.fixed.__sp_value $( , $arg)*);
+                                            f(&st.__sp_fixed.__sp_value $( , $arg)*);
                                         }
                                     }
                                 }
@@ -1375,7 +1375,7 @@ macro_rules! define_sp {
                 impl<T: Send + Sync + 'static> std::ops::Deref for Guard<T> {
                     type Target = T;
                     fn deref(&self) -> &T {
-                        &guard_state(self).fixed.__sp_value
+                        &guard_state(self).__sp_fixed.__sp_value
                     }
                 }
 
@@ -1470,7 +1470,7 @@ macro_rules! define_sp {
                 impl<T: Send + Sync + 'static> std::ops::Deref for Shared<T> {
                     type Target = T;
                     fn deref(&self) -> &T {
-                        &shared_state(self).fixed.__sp_value
+                        &shared_state(self).__sp_fixed.__sp_value
                     }
                 }
 
