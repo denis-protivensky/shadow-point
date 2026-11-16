@@ -236,18 +236,21 @@ semantics are unchanged from 0.4.0 — only names, types, and ownership move.
   reference (`key: &K`) or raw pointer when the call site keeps the value.
 - **Reserved hook names.** The list is `sequence`, `every`, `fires`,
   `verify`, `guard`, `shared`, `with_dyn`, `when`, `clone` — the fixed public
-  surface (`clone` would shadow the generated `Clone` impl on `Shared`) —
-  plus the 12 `__sp_` internal names of the generated machinery. A hook with
-  one of these names is rejected with a `compile_error!`. Any other
-  identifier is a legal hook name — the machinery lives in a private
-  submodule, so names like `value`, `state`, `new`, `hook`, `f`, `NAMES`, or
-  `__SP_NAMES` no longer collide. (Keywords such as `loop` are not
-  identifiers; a raw identifier like `r#type` works.)
+  surface (`clone` would shadow the generated `Clone` impl on `Shared`). A
+  hook with one of these names is rejected with a `compile_error!`. Any other
+  identifier is a legal hook name: the fixed fields and functions live apart
+  from the generated ones in a private submodule, so names like `value`,
+  `state`, `new`, `hook`, `f`, `NAMES`, `__SP_NAMES`, `__sp_state` and
+  `__sp_value` do not collide. (Keywords such as `loop` are not identifiers;
+  a raw identifier like `r#type` works.)
 - **Ownership.** Assertions and reclamation run in one place — the last
   owner's drop — for both modes. `drop(shared)` while a worker guard is live
   gives no verdict and frees nothing; the verdict runs when the last guard
-  leaves. The raise-or-print-on-unwind rule and the deliberate leak on a
-  failing thread are unchanged (see "Reclamation and ownership" below).
+  leaves. Nested guards of one sync point restore a saved TLS install, so
+  drop them in reverse order: dropping an outer guard first detaches the
+  inner one, whose fires become no-ops. The raise-or-print-on-unwind rule
+  and the deliberate leak on a failing thread are unchanged (see
+  "Reclamation and ownership" below).
 
 ## Examples
 
@@ -349,9 +352,11 @@ site needs the gate or the seam.
 `Arc`; the last owner releases it, and the guarded value's `Drop` runs
 there, after the sync-point assertions. Both modes share one assertion
 point: `drop(shared)` while a guard is live gives no verdict, and the last
-owner may be a `Guard`, not the `Shared` handle. On a thread that is already
-unwinding the state is deliberately leaked instead, so a panicking
-destructor cannot abort the test binary. Captures of an `every` closure or
+owner may be a `Guard`, not the `Shared` handle. A failed `verify()` owns the
+diagnostic: drop then skips the remaining assertions and the value's
+destructor. On a thread that is already unwinding the state is deliberately
+leaked instead, so a panicking destructor cannot abort the test binary.
+Captures of an `every` closure or
 an unfired fire-once are freed with the state; a fire-once that did fire is
 dropped when its slot is taken. A destructor assertion inside `T::drop` runs
 at the last-owner drop, so a scenario that abandoned entries can fail there

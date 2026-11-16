@@ -66,15 +66,15 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   const check spans the declared type) instead of failing inside the
   expansion. Arguments must be `Copy`; declare a reference or raw pointer
   when the call site keeps the value.
-- The reserved-hook-name list is rebuilt for the module surface (21 arms):
-  the 9 fixed public names (`sequence`, `every`, `fires`, `verify`, `guard`,
+- The reserved-hook-name list is rebuilt for the module surface (9 arms):
+  the fixed public names (`sequence`, `every`, `fires`, `verify`, `guard`,
   `shared`, `with_dyn`, `when`, `clone` — the last would shadow the generated
-  `Clone` impl on `Shared`) plus the 12 `__sp_` internal names of the
-  generated machinery. The machinery now lives in a private submodule, so
-  any other identifier (`value`, `state`, `new`, `hook`, `f`, `NAMES`,
-  `__SP_NAMES`, `calls`, `expected`, …) is a legal hook name; the reserved
-  names are rejected with a friendly `compile_error!` rather than a raw
-  duplicate-definition error.
+  `Clone` impl on `Shared`). All fixed machinery lives in a private submodule,
+  with fixed fields/functions kept apart from the generated per-hook ones,
+  so any other identifier (`value`, `state`, `new`, `hook`, `f`, `NAMES`,
+  `__SP_NAMES`, `__sp_state`, `__sp_value`, …) is a legal hook name; the
+  reserved names are rejected with a friendly `compile_error!` rather than a
+  raw duplicate-definition error.
 - `SP_TRACE` prints the zero-based call index, the same value
   `current_fire()` reports (0.4.0 printed `index + 1`).
 
