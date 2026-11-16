@@ -1063,3 +1063,137 @@ fn invoke_is_an_expression() {
     );
     g.verify();
 }
+
+/// D26: hook names that mirror fixed machinery names stay legal. The fixed
+/// fields live in `StateFixed` behind `State::__sp_fixed`, the fixed free
+/// functions sit in `__sp_impl`, and the generated per-hook functions live
+/// in `__sp_hooks` — so a hook may carry any of those names. This sync point
+/// declares one hook per fixed internal name (fields, free functions, types,
+/// the name table); compiling it is half the assertion, firing every hook
+/// through `invoke!` and verifying the counts is the other half. The 9
+/// reserved public names are pinned by `ci/reserved-name` instead.
+mod free_names {
+    shadow_point::define_sp! {
+        pub mod free_sp {
+            // StateFixed fields + the State wrapper's unprefixed twin.
+            // (__sp_fixed itself shares State with the per-hook fields and
+            // is not a free name; `fixed` is.)
+            __sp_value(),
+            fixed(),
+            __sp_every(),
+            __sp_sequence(),
+            __sp_sequence_cv(),
+            __sp_shared(),
+            __sp_installed_at(),
+            __sp_calls(),
+            __sp_expected(),
+            __sp_reported(),
+            // fixed free functions and constructors
+            new_state(),
+            new_owner(),
+            owner_state(),
+            guard_state(),
+            shared_state(),
+            shared_from_owner(),
+            attach(),
+            bump_call(),
+            set_expected(),
+            set_expected_if_unset(),
+            build_sequence(),
+            set_every(),
+            assert_fires(),
+            report_mismatch(),
+            report_while_unwinding(),
+            // the name table and its accessor
+            __SP_NAMES(),
+            __sp_name(),
+            // fixed types and modules (type namespace vs hook constants)
+            State(),
+            StateFixed(),
+            Owner(),
+            Hooks(),
+            Default(),
+            TL(),
+            DEFAULT(),
+            __sp_impl(),
+            __sp_hooks(),
+            // formerly-colliding plain names from earlier review rounds
+            value(),
+            state(),
+            new(),
+            hook(),
+            f(),
+            NAMES(),
+            name(),
+            calls(),
+            expected(),
+        }
+    }
+}
+
+#[test]
+fn machinery_names_are_legal_hook_names() {
+    let fires = C::new();
+    let g = free_names::free_sp::guard(0u32);
+    // Every hook fires exactly once; each closure bumps the shared counter.
+    macro_rules! register_and_fire {
+        ($($hook:ident),+ $(,)?) => {
+            $(
+                {
+                    let fires = fires.clone();
+                    g.$hook(move |_| fires.inc());
+                }
+                shadow_point::invoke!(free_names::free_sp, $hook());
+            )+
+        };
+    }
+    register_and_fire!(
+        __sp_value,
+        fixed,
+        __sp_every,
+        __sp_sequence,
+        __sp_sequence_cv,
+        __sp_shared,
+        __sp_installed_at,
+        __sp_calls,
+        __sp_expected,
+        __sp_reported,
+        new_state,
+        new_owner,
+        owner_state,
+        guard_state,
+        shared_state,
+        shared_from_owner,
+        attach,
+        bump_call,
+        set_expected,
+        set_expected_if_unset,
+        build_sequence,
+        set_every,
+        assert_fires,
+        report_mismatch,
+        report_while_unwinding,
+        __SP_NAMES,
+        __sp_name,
+        State,
+        StateFixed,
+        Owner,
+        Hooks,
+        Default,
+        TL,
+        DEFAULT,
+        __sp_impl,
+        __sp_hooks,
+        value,
+        state,
+        new,
+        hook,
+        f,
+        NAMES,
+        name,
+        calls,
+        expected,
+    );
+    assert_eq!(fires.get(), 45, "every machinery-named hook dispatched");
+    g.verify();
+}
