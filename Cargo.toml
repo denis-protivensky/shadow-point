@@ -1,6 +1,6 @@
 [package]
 name = "shadow-point"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.65"
 description = "Deterministic testing of concurrent Rust code — hooks at linearization points, single-threaded via guards or shared sync points across threads"
@@ -12,7 +12,6 @@ categories = ["development-tools::testing"]
 exclude = ["ci", "api-fixture"]
 
 [dependencies]
-paste = "1.0"
 # The library uses `tokio::sync::Notify` and `tokio::pin!` only. `pin!` is
 # re-exported outside `cfg_macros!`, so `rt`/`macros` are not needed here —
 # and dropping `macros` also drops the `tokio-macros` -> `quote`/`syn` chain

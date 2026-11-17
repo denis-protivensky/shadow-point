@@ -9,7 +9,7 @@
 //! span belongs to a dependency.
 
 shadow_point::define_sp! {
-    pub prefix Consumer {
+    pub mod consumer_sp {
         before_store(value: u32),
         flush(),
     }

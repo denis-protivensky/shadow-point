@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(test)]
 shadow_point::define_sp! {
-    pub(crate) prefix Register {
+    pub(crate) mod register_sp {
         before_store(value: u32),
         after_store(value: u32),
     }
@@ -33,9 +33,9 @@ impl Register {
     }
 
     fn store(&self, value: u32) {
-        shadow_point::invoke!(RegisterSp, before_store(value));
+        shadow_point::invoke!(register_sp, before_store(value));
         self.0.store(value, Ordering::SeqCst);
-        shadow_point::invoke!(RegisterSp, after_store(value));
+        shadow_point::invoke!(register_sp, after_store(value));
     }
 }
 
@@ -59,7 +59,7 @@ mod tests {
         let log: Log = Arc::new(Mutex::new(Vec::new()));
         let stored = Arc::new(Gate::new());
 
-        let shared = RegisterSp::install_shared(Register::new(0));
+        let shared = register_sp::shared(Register::new(0));
         shared.sequence(|s| {
             s.before_store({
                 let log = log.clone();
@@ -92,12 +92,12 @@ mod tests {
 
         let s1 = shared.clone();
         let t1 = std::thread::spawn(move || {
-            let _g = s1.install();
+            let _g = s1.guard();
             s1.store(1);
         });
         let s2 = shared.clone();
         let t2 = std::thread::spawn(move || {
-            let _g = s2.install();
+            let _g = s2.guard();
             // Completion, not just consumption: T1 sets the gate from inside
             // its after_store closure, so its 1 is already in the register.
             stored.must_wait(park_timeout());

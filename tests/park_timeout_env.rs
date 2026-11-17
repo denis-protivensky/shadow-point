@@ -21,8 +21,7 @@ use std::time::{Duration, Instant};
 
 mod ct {
     shadow_point::define_sp! {
-        pub prefix Ct
-        {
+        pub mod ct_sp {
             a(value: u32),
             b(value: u32),
         }
@@ -32,15 +31,15 @@ mod ct {
 /// Park with an unattainable head and report how long the wait was and
 /// what the diagnostic said.
 fn park_and_report() -> (Duration, String) {
-    let shared = ct::CtSp::install_shared(());
+    let shared = ct::ct_sp::shared(());
     shared.sequence(|s| {
         s.b(|(), _| ()); // head: nothing will ever fire `b`
         s.a(|(), _| ()); // this fire is the one that parks
     });
     let started = Instant::now();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _g = shared.install();
-        shadow_point::invoke!(ct::CtSp, a(0));
+        let _g = shared.guard();
+        shadow_point::invoke!(ct::ct_sp, a(0));
     }));
     let waited = started.elapsed();
     let err = outcome.expect_err("the parked fire must panic, not return");
@@ -234,14 +233,14 @@ fn zero_budget_is_honored_not_ignored() {
 #[test]
 fn the_park_reports_the_timeout_and_names_the_head() {
     if std::env::var("SP_PARK_MSG").is_ok() {
-        let shared = ct::CtSp::install_shared(());
+        let shared = ct::ct_sp::shared(());
         shared.sequence(|s| {
             s.b(|(), _| ());
             s.a(|(), _| ());
         });
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _g = shared.install();
-            shadow_point::invoke!(ct::CtSp, a(0));
+            let _g = shared.guard();
+            shadow_point::invoke!(ct::ct_sp, a(0));
         }));
         let err = outcome.expect_err("the parked fire must panic, not return");
         let msg = err
