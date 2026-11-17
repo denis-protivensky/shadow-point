@@ -347,9 +347,7 @@ fn failed_verify_owns_the_unreached_mismatch() {
 fn shared_last_arc_assertion_does_not_abort_while_unwinding() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let shared = single::single_sp::shared(());
-        shared.sequence(|q| {
-            q.a(|_, _| ());
-        });
+        shared.fires(single::single_sp::a, 1); // never fired: verdict at the last Arc
         let _inst = shared.guard();
         // Unwind drops `_inst` (one Arc clone) and then `shared` — the
         // last reference — so the shared assertion fires mid-unwinding.
@@ -1082,7 +1080,6 @@ mod free_names {
             fixed(),
             __sp_every(),
             __sp_sequence(),
-            __sp_sequence_cv(),
             __sp_shared(),
             __sp_installed_at(),
             __sp_calls(),
@@ -1095,7 +1092,9 @@ mod free_names {
             guard_state(),
             shared_state(),
             shared_from_owner(),
+            install_tls(),
             attach(),
+            attach_worker(),
             bump_call(),
             set_expected(),
             set_expected_if_unset(),
@@ -1111,6 +1110,9 @@ mod free_names {
             State(),
             StateFixed(),
             Owner(),
+            Guard(),
+            Shared(),
+            WorkerGuard(),
             Hooks(),
             Default(),
             TL(),
@@ -1152,7 +1154,6 @@ fn machinery_names_are_legal_hook_names() {
         fixed,
         __sp_every,
         __sp_sequence,
-        __sp_sequence_cv,
         __sp_shared,
         __sp_installed_at,
         __sp_calls,
@@ -1164,7 +1165,9 @@ fn machinery_names_are_legal_hook_names() {
         guard_state,
         shared_state,
         shared_from_owner,
+        install_tls,
         attach,
+        attach_worker,
         bump_call,
         set_expected,
         set_expected_if_unset,
@@ -1178,6 +1181,9 @@ fn machinery_names_are_legal_hook_names() {
         State,
         StateFixed,
         Owner,
+        Guard,
+        Shared,
+        WorkerGuard,
         Hooks,
         Default,
         TL,
@@ -1194,6 +1200,6 @@ fn machinery_names_are_legal_hook_names() {
         calls,
         expected,
     );
-    assert_eq!(fires.get(), 45, "every machinery-named hook dispatched");
+    assert_eq!(fires.get(), 49, "every machinery-named hook dispatched");
     g.verify();
 }

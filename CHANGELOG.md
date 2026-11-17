@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Breaking release: the namespace and types change, the 0.4.0 deprecations are
 removed, and the `paste` dependency is dropped. Counting semantics are
-unchanged from 0.4.0 — only names, types, and ownership move. See the README
-"Migrating from 0.4.x" for the full call-site map.
+unchanged from 0.4.0 — names, types, and ownership move, and shared mode
+becomes observe-only. See the README "Migrating from 0.4.x" for the full
+call-site map.
 
 ### Changed
 - `define_sp!` now generates a **module**: `define_sp! { pub mod name { … } }`.
@@ -36,10 +37,24 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
 - `install_guard`/`install_shared`/`install` → `guard`/`shared`/`shared.guard()`.
   `shared(value)` returns `Shared<T>` (`Clone`, `Send + Sync`), not
   `Arc<…SharedSp<T>>`; hand clones to workers.
-- The per-thread guard is one `Guard<T>` type in both modes; the registration
-  API (`Deref`, fire-once/`sequence`/`every`/`fires`/`verify`) mirrors on
-  `Guard` and `Shared`. `Guard` is `!Send` (`PhantomData<*const ()>`): moving
-  it across threads is a compile error.
+- The per-thread guards split by mode: `Guard<T>` is private-mode only and
+  keeps the full registration API (`Deref`, fire-once/`sequence`/`every`/
+  `fires`/`verify`); `shared.guard()` returns an attach-only `WorkerGuard<T>`
+  (`Deref` + `Drop`) — it installs dispatch on the worker thread and holds
+  the state alive, nothing more. Registration and `verify` live on the
+  `Shared` handle: `shared.guard().<hook>(f)` → `shared.<hook>(f)`. Both
+  guard types are `!Send` (`PhantomData<*const ()>`): moving one across
+  threads is a compile error.
+- **Shared mode is an observer, not a scheduler.** `Shared::sequence` is
+  removed: ordering cross-thread fires by parking an out-of-order worker
+  happened inside the instrumented function, holding its production locks
+  — the lock the head's thread could need to arrive, a mutual deadlock until
+  the park timeout. Order workers with `Gate` waits in the worker bodies
+  after `invoke!`; `every` closures record traces and set gates, never wait.
+  A blocking wait inside a *private* step closure remains legitimate
+  choreography (the private dispatcher never waits on another thread), and
+  per-worker private guards with `sequence` are the documented pattern for
+  multithreaded tests that pin one worker's protocol.
 - `invoke!` takes the module path (`invoke!(name, hook(args))`) and expands to
   a block expression, so it works in expression position (closure body, block
   tail, `let` initializer) in both test and production builds.
@@ -79,12 +94,20 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   `current_fire()` reports (0.4.0 printed `index + 1`).
 
 ### Removed
+- `Shared::sequence`, the shared-park dispatch arm, the sequence condvar,
+  `park_timeout()`, `SP_PARK_TIMEOUT_MS`, and the timeout cache/resolver with
+  their tests (`tests/park_timeout_env.rs`, the resolver unit tests, the
+  32-bit `test32` CI job that existed for the cache boundary). The parking
+  mechanism had no real consumer and was the only source of timeouts inside
+  dispatch. A gate-wait budget is test policy: pass a local constant to
+  `Gate::must_wait`/`wait_timeout`.
 - `SeqBuilder::optional`, the `SeqEntry.optional` field, the shared-mode
   optional head-skip, and the `assert_fires` optional filter. Every sequence
   entry is mandatory; use `fires(hook, 0)` for "must not fire" or split the
   test.
 - The deprecated `.expect(n)`, `.expect_calls(hook, n)`, and `PARK_TIMEOUT`.
-  Use `.fires(n)`, `fires(hook, n)`, and `park_timeout()`.
+  Use `.fires(n)` and `fires(hook, n)`; `PARK_TIMEOUT`'s replacement
+  `park_timeout()` is itself removed with the parking (see above).
 - The public `SyncPoint` marker trait (the dispatch trait stays internal for
   type erasure) and the `paste` dependency — the crate now has **zero
   non-optional dependencies**.
