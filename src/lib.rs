@@ -156,8 +156,11 @@ pub fn trace_enabled() -> bool {
 /// the test body. `wait_timeout`/`must_wait` accept any duration, zero
 /// included: zero inspects the flag without waiting, and
 /// `must_wait(Duration::ZERO)` fails the test at once when the gate is
-/// unset. Pick the budget per test (a local constant); a short value on a
-/// busy machine can fail a correct test.
+/// unset. The budget is a hang detector, not a timing assumption: a correct
+/// test waits on an event its scenario guarantees, so load delays the wait
+/// but never fails it — a timeout means a missing release, a test bug. Pick
+/// it per test (a local constant), generous enough to never fire on a
+/// correct run.
 ///
 /// The gate is panic-safe: a poisoned lock (a panicking waiter) is
 /// transparently recovered via [`into_inner`](std::sync::PoisonError::into_inner).

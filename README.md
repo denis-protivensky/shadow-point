@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/crates/l/shadow-point)](#license)
 [![CI](https://github.com/denis-protivensky/shadow-point/actions/workflows/ci.yml/badge.svg)](https://github.com/denis-protivensky/shadow-point/actions/workflows/ci.yml)
 
-**No more flaky tests.** `shadow-point` lets you name one interleaving of a
+**One interleaving, replayed.** `shadow-point` lets you name one interleaving of a
 concurrent operation and replay it. A hook sits at the operation's
 *linearization point* — the instant it takes effect — and the hook closure
 runs the competing operation right there, on the same value. One test, one
