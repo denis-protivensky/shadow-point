@@ -146,9 +146,11 @@ suppressed: calling instrumented code inside a hook does not recurse.
   after `invoke!` to order shared workers. `Gate::new()` gives a reusable
   boolean rendezvous shared with the workers. `Shared::sequence` was removed:
   parking an out-of-order worker inside dispatch could deadlock on the
-  production locks it still held. `every` closures record the trace and set
-  gates; worker bodies wait with `must_wait` and a test-local budget.
-  Assertions run when the last owner drops, after the workers are joined.
+  production locks it still held. No dispatch closure may wait in shared
+  mode: `every` and fire-once callbacks both run on the worker's stack
+  inside the instrumented function. They record the trace and set gates;
+  worker bodies wait with `must_wait` and a test-local budget. Assertions
+  run when the last owner drops, after the workers are joined.
 
 `Guard` and `WorkerGuard` are `!Send`: drop them on the thread that created
 them. Moving one across threads is a compile error, not a runtime trap.
@@ -175,14 +177,15 @@ worker's sequence never waits on another thread's hooks. The pattern:
 - Victim protocol under contention: the victim worker installs a private
   guard and pins its own steps (`sequence`); the racers run uninstrumented
   or with their own guards. A gate freezes the victim at the chosen step.
-  A blocking wait inside a private step closure is legitimate choreography:
-  the private dispatcher never waits on another thread (out-of-order fires
-  panic). Use `must_wait` with a budget, and only when the thread that
-  releases the gate needs nothing the blocked frame holds — the frame still
-  owns the instrumented function's locks, so a racer that needs them
-  deadlocks; the budget bounds that to a failing test, it does not remove
-  the class. The sequence catches intra-worker step reorderings that
-  counters miss; the racers' effects are asserted after the joins.
+  A blocking wait inside a private dispatch closure, including a step, is
+  legitimate choreography: the private dispatcher never waits on another
+  thread (out-of-order fires panic). Use `must_wait` with a budget, and only
+  when the thread that releases the gate needs nothing the blocked frame
+  holds. The frame still owns the instrumented function's locks, so a racer
+  that needs them deadlocks; the budget bounds that to a failing test, it
+  does not remove the class. The sequence catches intra-worker step
+  reorderings that counters miss; the racers' effects are asserted after the
+  joins.
 - Freeze-frame window: generalize the single-hook freeze to a whole path.
   `sequence([step_before(freeze), step_after_recovery(assert)])` orders the
   victim's entire journey through the interference window, not just one
@@ -194,9 +197,10 @@ worker's sequence never waits on another thread's hooks. The pattern:
   as plain production code. Shared mode would force an attach in every
   firing thread; private per-worker guards do not.
 
-In shared mode, `every` closures never block. A wait there blocks the worker
-inside the instrumented function, holding production locks — the deadlock
-class the removed shared `sequence` created.
+In shared mode, no dispatch closure may block: `every` and fire-once
+callbacks both run on the worker's stack inside the instrumented function.
+A wait there holds production locks, the deadlock class the removed shared
+`sequence` created.
 
 ## Cheat sheet
 
@@ -211,7 +215,7 @@ class the removed shared `sequence` created.
 | ordered (private only) | `guard.sequence(\|s\| { s.a(f).b(g); })` |
 | conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires the first time `pred` passes. `pred` runs under the sequence lock: keep it a pure check (a blocking predicate can deadlock the test) |
 | shared | `register_sp::shared(value)`, then `shared.guard()` per firing thread (attach-only `WorkerGuard`); register on the `Shared` handle |
-| cross-thread order | `Gate` in the worker bodies after `invoke!`; `every` records and sets gates, never waits |
+| cross-thread order | `Gate` in the worker bodies after `invoke!`; dispatch closures (`every`, fire-once) record traces and set gates, never wait |
 
 `<name>` is the hook name declared in `define_sp!`; `define_sp!` generates
 one registration method per hook, and the table covers the registration
@@ -264,9 +268,10 @@ shared mode becomes observe-only (no cross-thread `sequence`, no parking).
 - Shared `sequence` is gone: cross-thread ordering by parking a worker
   inside dispatch could deadlock on the production locks the parked frame
   holds. Order workers with `Gate` waits in the worker bodies after
-  `invoke!`; keep `every` closures non-blocking (record and set gates only).
-  A shared test that pinned consumption order becomes: `every` records the
-  trace, gates order the bodies, assert the trace after the joins.
+  `invoke!`; keep every dispatch closure non-blocking (record and set gates
+  only). A shared test that pinned consumption order becomes: `every`
+  records the trace, gates order the bodies, assert the trace after the
+  joins.
 - `park_timeout()` and `SP_PARK_TIMEOUT_MS` are gone along with the parking
   they budgeted. A gate-wait budget is test policy: use a local constant
   (`const GATE_TIMEOUT: Duration = Duration::from_secs(10);`) and pass it to
@@ -396,9 +401,10 @@ The dispatch is per-thread; every worker that fires a hook must attach the
 sync point on its own thread. With the `tokio-async` feature,
 `TokioAsyncGate` lets an async test body wait on fires without parking the
 executor; a parked thread holds production locks, which is fatal on a
-`current_thread` runtime. Keep `every` closures non-blocking
-(`TokioAsyncGate::fire` is), and await milestones in the test body. For
-synchronous workers, `Gate` waits belong in the worker bodies after
+`current_thread` runtime. Keep dispatch closures non-blocking: `every` and
+fire-once callbacks both run inside the instrumented function, and
+`TokioAsyncGate::fire` is non-blocking. Await milestones in the test body.
+For synchronous workers, `Gate` waits belong in the worker bodies after
 `invoke!`, never inside a shared-mode dispatch closure.
 
 ### Keeping shadow-point out of production builds

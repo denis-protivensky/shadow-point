@@ -51,8 +51,10 @@ call-site map.
   happened inside the instrumented function, holding its production locks
   — the lock the head's thread could need to arrive, a mutual deadlock until
   the park timeout. Order workers with `Gate` waits in the worker bodies
-  after `invoke!`; `every` closures record traces and set gates, never wait.
-  A blocking wait inside a *private* step closure remains legitimate
+  after `invoke!`. No dispatch closure may wait in shared mode: `every` and
+  fire-once callbacks both run on the worker's stack inside the instrumented
+  function. They record traces and set gates only. A blocking wait inside a
+  *private* dispatch closure, including a step, remains legitimate
   choreography only when the thread that releases it needs nothing the
   blocked frame holds: the private dispatcher never waits on another
   thread, but the frame still owns the instrumented function's locks, and a
@@ -74,10 +76,11 @@ call-site map.
   registrations chain: `g.a(f).fires(2).b(g).fires(1)`.
 - Assertions and reclamation run in one place — `Owner<T>::drop` on the last
   `Arc<Owner<T>>` — for both modes, without `unsafe` (`#![forbid(unsafe_code)]`
-  stays). `State<T>` has no `Drop`; `Guard::drop` only restores TLS.
-  `drop(shared)` with a live guard gives no verdict and frees nothing; the
-  last owner may be a `Guard`. The raise-or-print-on-unwind rule and the
-  deliberate leak on a failing thread are unchanged.
+  stays). `State<T>` has no `Drop`; `Guard::drop` and `WorkerGuard::drop`
+  only restore TLS. `drop(shared)` with a live guard gives no verdict and
+  frees nothing; the last owner may be a `Guard` or `WorkerGuard`. The
+  raise-or-print-on-unwind rule and the deliberate leak on a failing thread
+  are unchanged.
 - Counters are a `Vec<AtomicUsize>` sized by the hook list; the `__SP_COUNT`
   associated constant and the `[T; N]: Default` (N ≤ 32) ceiling are gone.
   The diagnostics name table lives on as a private `__SP_NAMES` in the

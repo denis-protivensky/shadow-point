@@ -147,14 +147,16 @@ pub fn trace_enabled() -> bool {
 /// for a step to actually finish: set it at the end of the step and wait on
 /// it where the next action must not start. In shared mode order the
 /// workers with gates: waits belong in the worker bodies after `invoke!`,
-/// never inside `every` closures (a blocked dispatch blocks the worker
-/// inside the instrumented function, holding its production locks).
+/// never inside a dispatch closure (`every` or fire-once). A blocked
+/// dispatch blocks the worker inside the instrumented function, holding its
+/// production locks.
 ///
-/// Inside a hook or step closure use [`must_wait`](Self::must_wait), never
-/// [`wait`](Self::wait): a missed [`set`](Self::set) must fail with a
-/// diagnostic rather than hang the suite. [`wait`](Self::wait) belongs in
-/// the test body. `wait_timeout`/`must_wait` accept any duration, zero
-/// included: zero inspects the flag without waiting, and
+/// Inside a private dispatch closure that waits, use
+/// [`must_wait`](Self::must_wait), never [`wait`](Self::wait): a missed
+/// [`set`](Self::set) must fail with a diagnostic rather than hang the
+/// suite. [`wait`](Self::wait) belongs in the test body.
+/// `wait_timeout`/`must_wait` accept any duration, zero included: zero
+/// inspects the flag without waiting, and
 /// `must_wait(Duration::ZERO)` fails the test at once when the gate is
 /// unset. The budget is a hang detector, not a timing assumption: a correct
 /// test waits on an event its scenario guarantees, so load delays the wait
@@ -500,16 +502,20 @@ impl Drop for ExecSink {
 /// the lock and can deadlock the test; calling `sequence` from it
 /// self-deadlocks. The `every` and fire-once closures run outside the lock.
 ///
-/// In shared mode keep `every` closures non-blocking: they run inside the
-/// instrumented function, so a wait there blocks the worker while it holds
-/// production locks — the deadlock class the removed shared `sequence`
-/// created. Set gates and record traces in `every`; wait in the worker body
-/// after `invoke!`. A private step closure may wait: the private dispatcher
-/// never waits on another thread (out-of-order fires panic), so a gated
-/// freeze inside a step is deliberate choreography. The wait is safe only
-/// when the thread that releases it needs nothing the blocked frame holds —
-/// the frame still owns the instrumented function's locks; `must_wait` with
-/// a budget bounds a mistake to a failing test, it does not remove the class.
+/// Every closure that dispatch calls runs on the caller's stack inside the
+/// instrumented function: `every`, fire-once, and, in private mode, sequence
+/// steps. In shared mode none of them may wait. A blocked worker still holds
+/// the function's production locks, and another thread may need them to
+/// reach the release, the deadlock class the removed shared `sequence`
+/// created. Record traces and set gates in dispatch closures; wait in the
+/// worker body after `invoke!`.
+///
+/// In private mode a dispatch closure may wait: the private dispatcher never
+/// waits on another thread (out-of-order fires panic), so a gated freeze is
+/// deliberate choreography. The wait is safe only when the thread that
+/// releases it needs nothing the blocked frame holds. The frame still owns
+/// the instrumented function's locks; `must_wait` with a budget bounds a
+/// mistake to a failing test, it does not remove the class.
 ///
 /// # Reserved hook names
 ///
