@@ -171,6 +171,31 @@ fn shared_drop_asserts_a_missed_count() {
 }
 
 #[test]
+fn stacked_worker_guards_restore_the_outer_install() {
+    let count = Arc::new(AtomicU32::new(0));
+    let shared = ct::ct_sp::shared(());
+    shared.every(|e| {
+        let count = count.clone();
+        e.a(move |(), _| {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+    });
+    shared.fires(ct::ct_sp::a, 2);
+
+    // Both installs come from the same Shared on this thread. Dropping the
+    // inner guard must restore the outer install, not leave TLS empty: if it
+    // did, the second fire would be a no-op and the count would stay at 1.
+    let outer = shared.guard();
+    let inner = shared.guard();
+    shadow_point::invoke!(ct::ct_sp, a(0));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    drop(inner);
+    shadow_point::invoke!(ct::ct_sp, a(0));
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    drop(outer);
+}
+
+#[test]
 fn two_threads_same_hook_fires() {
     let log = mk_log();
     let shared = ct::ct_sp::shared(());

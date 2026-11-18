@@ -27,9 +27,10 @@ call-site map.
 - `define_sp!` now generates a **module**: `define_sp! { pub mod name { … } }`.
   The 0.4.0 generated names (`XSp`, `XSpGuard`, `XSharedSp`, `XSharedGuard`,
   `XSeqBuilder`, `EveryClosures`, `SpExpect`, `XHook`, `XSyncPoint`) are gone.
-  The user-facing surface is the `guard`/`shared` constructors, a clonable
-  `Shared<T>`, a hook-identifier constant per hook, and the `Hook` identifier
-  type; the builders (`Seq`, `When`, `Every`, `Expect`) and the `with_dyn`
+  The user-facing surface is the `guard`/`shared` constructors, the private
+  `Guard<T>` and attach-only `WorkerGuard<T>`, a clonable `Shared<T>`, a
+  hook-identifier constant per hook, and the `Hook` identifier type; the
+  builders (`Seq`, `When`, `Every`, `Expect`) and the `with_dyn`
   dispatch seam are `#[doc(hidden)]` internals, and the `Hooks` dispatch trait
   is private to the generated submodule (not re-exported).
   Several sync points can now share a file (distinct module names); the

@@ -552,6 +552,19 @@ impl Drop for ExecSink {
 ///     drop(g); // ERROR: `Guard<u32>` cannot be sent between threads
 /// });
 /// ```
+///
+/// The worker guard is `!Send` too:
+///
+/// ```compile_fail
+/// shadow_point::define_sp! {
+///     mod shared_send_probe { ping(v: u32), }
+/// }
+/// let shared = shared_send_probe::shared(0u32);
+/// let g = shared.guard();
+/// std::thread::spawn(move || {
+///     drop(g); // ERROR: `WorkerGuard<u32>` cannot be sent between threads
+/// });
+/// ```
 #[macro_export]
 macro_rules! define_sp {
     (
@@ -771,10 +784,9 @@ macro_rules! define_sp {
                     ///
                     /// The predicate runs under the sequence lock and must be
                     /// a pure check: a blocking predicate (a `Gate` wait, a
-                    /// channel recv) holds the lock against other firing
-                    /// threads in shared mode and can deadlock; calling
-                    /// `sequence` from it self-deadlocks. The step closure
-                    /// runs outside the lock.
+                    /// channel recv) holds the lock and can deadlock the
+                    /// test; calling `sequence` from it self-deadlocks. The
+                    /// step closure runs outside the lock.
                     pub fn when<P>(&mut self, pred: P) -> When<'_, T, P> {
                         When { seq: self, pred }
                     }
