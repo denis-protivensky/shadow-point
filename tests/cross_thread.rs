@@ -1,10 +1,12 @@
-//! Cross-thread (shared-mode) sync point tests.
+//! Cross-thread sync point tests.
 //!
-//! Each test creates a shared sync point (`shared`), drives the
-//! instrumented hooks from real `std::thread` workers, and asserts on the
-//! gate-ordered event trace, call-count aggregation, and the shared drop
-//! assertions. Shared mode observes: `every` records, gates order the
-//! worker bodies, the verdict runs after the joins.
+//! Most tests create a shared sync point (`shared`), drive the instrumented
+//! hooks from real `std::thread` workers, and assert on the gate-ordered
+//! event trace, call-count aggregation, and the shared drop assertions.
+//! Shared mode observes: `every` records, gates order the worker bodies, the
+//! verdict runs after the joins. One test covers the private-guard-per-worker
+//! pattern: a worker pins its own protocol with `sequence` while another
+//! thread races.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,7 +41,7 @@ fn order_across_threads_with_gates() {
     let b_done = Arc::new(Gate::new());
     let shared = ct::ct_sp::shared(());
     // `every` only records the trace and sets gates — never waits: a
-    // blocked dispatch would park the worker inside the instrumented
+    // blocked dispatch would block the worker inside the instrumented
     // function, holding its production locks.
     shared.every(|e| {
         e.a({
@@ -83,6 +85,59 @@ fn order_across_threads_with_gates() {
     t2.join().unwrap();
     drop(shared);
     assert_eq!(*log.lock().unwrap(), ["a", "b", "c"]);
+}
+
+/// The private-guard-per-worker pattern: the replacement for the removed
+/// shared `sequence` in a multithreaded test.
+///
+/// The victim worker installs its own private guard and pins its protocol
+/// (`a` then `b`) with `sequence`; the racer releases the victim's blocked
+/// step and fires `b` with no install on its thread. That fire must be a
+/// no-op: neither a second victim fire nor an out-of-order dispatch into the
+/// victim's sequence (its head is `b` while the victim sits inside `a`). The
+/// victim's `fires(a, 1)`/`fires(b, 1)` verdict catches a leak through either
+/// path — an observed racer fire would bump `b`'s count to 2.
+#[test]
+fn private_guard_on_a_worker_orders_its_own_protocol() {
+    let log = mk_log();
+    let in_step = Arc::new(Gate::new());
+    let release = Arc::new(Gate::new());
+
+    let log_a = log.clone();
+    let log_b = log.clone();
+    let in_step1 = in_step.clone();
+    let release1 = release.clone();
+    let victim = std::thread::spawn(move || {
+        let g = ct::ct_sp::guard(());
+        g.fires(ct::ct_sp::a, 1);
+        g.fires(ct::ct_sp::b, 1);
+        g.sequence(|s| {
+            s.a(move |(), _| {
+                log_a.lock().unwrap().push("a");
+                // A blocking wait inside a private step is legal
+                // choreography: the private dispatcher never waits on
+                // another thread, and the racer below needs nothing this
+                // frame holds.
+                in_step1.set();
+                release1.must_wait(GATE_TIMEOUT);
+            });
+            s.b(move |(), _| log_b.lock().unwrap().push("b"));
+        });
+        shadow_point::invoke!(ct::ct_sp, a(0));
+        shadow_point::invoke!(ct::ct_sp, b(0));
+    });
+
+    let racer = std::thread::spawn(move || {
+        in_step.must_wait(GATE_TIMEOUT);
+        // No install on this thread: the fire must vanish, not consume the
+        // victim's head `b` while the victim is still inside `a`.
+        shadow_point::invoke!(ct::ct_sp, b(0));
+        release.set();
+    });
+
+    victim.join().unwrap();
+    racer.join().unwrap();
+    assert_eq!(*log.lock().unwrap(), ["a", "b"]);
 }
 
 #[test]
