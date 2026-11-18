@@ -39,7 +39,7 @@ call-site map.
   `shared(value)` returns `Shared<T>` (`Clone`, `Send + Sync`), not
   `Arc<…SharedSp<T>>`; hand clones to workers.
 - The per-thread guards split by mode: `Guard<T>` is private-mode only and
-  keeps the full registration API (`Deref`, fire-once/`sequence`/`every`/
+  keeps `Deref` and the full registration API (fire-once/`sequence`/`every`/
   `fires`/`verify`); `shared.guard()` returns an attach-only `WorkerGuard<T>`
   (`Deref` + `Drop`) — it installs dispatch on the worker thread and holds
   the state alive, nothing more. Registration and `verify` live on the

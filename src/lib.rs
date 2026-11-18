@@ -1218,9 +1218,14 @@ macro_rules! define_sp {
                 /// asserts counts and sequence. `!Send`: drop it on the
                 /// thread that created it.
                 /// Nested guards of the same sync point save and restore the
-                /// TLS install, so drop them in reverse order: dropping an
-                /// outer guard first detaches the inner one, whose fires then
-                /// become no-ops and whose assertions fail.
+                /// TLS install, so drop them in reverse order. Dropping an
+                /// outer guard first detaches the inner one: the inner guard's
+                /// fires become no-ops, so any count it still expects fails
+                /// at its drop. The inner guard's drop then restores the
+                /// *outer* install, leaving the outer sync point attached
+                /// with no guard alive — its verdict runs only when that
+                /// install is replaced or the thread ends, beyond the
+                /// test's control.
                 #[clippy::has_significant_drop]
                 #[must_use]
                 pub struct Guard<T: Send + Sync + 'static> {
@@ -1328,8 +1333,9 @@ macro_rules! define_sp {
                     /// returning an attach-only worker guard that restores
                     /// the previous install on drop. Nested guards of the
                     /// same sync point must be dropped in reverse order:
-                    /// dropping an outer guard first clears the inner
-                    /// install, so its fires become no-ops.
+                    /// dropping an outer guard first detaches the inner one,
+                    /// whose fires become no-ops (see [`Guard`] for the
+                    /// full wrong-order consequence).
                     pub fn guard(&self) -> WorkerGuard<T> {
                         attach_worker(::std::sync::Arc::clone(&self.owner))
                     }

@@ -299,9 +299,9 @@ shared mode becomes observe-only (no cross-thread `sequence`, no parking).
   hook with one of these names is rejected with a `compile_error!`. Any other
   identifier is a legal hook name: the fixed fields and functions live apart
   from the generated ones in a private submodule, so names like `value`,
-  `state`, `new`, `hook`, `f`, `NAMES`, `__SP_NAMES`, `__sp_state` and
-  `__sp_value` do not collide. (Keywords such as `loop` are not identifiers;
-  a raw identifier like `r#type` works.)
+  `calls`, `expected`, `state`, `new`, `hook`, `f`, `NAMES`, `__SP_NAMES`,
+  `__sp_state` and `__sp_value` do not collide. (Keywords such as `loop`
+  are not identifiers; a raw identifier like `r#type` works.)
 - Ownership: assertions and reclamation run in one place, the last owner's
   drop, for both modes. `drop(shared)` while a worker guard is live gives no
   verdict and frees nothing; the verdict runs when the last guard leaves.

@@ -62,8 +62,9 @@ fn order_across_threads_with_gates() {
     shared.fires(ct::ct_sp::c, 1);
     // TLS is per-thread: each worker attaches its own guard from the Arc
     // clone before driving the hooks. The order a -> b -> c is the workers'
-    // choreography: each waits in its body, after `invoke!`, on the gate
-    // the previous step's closure set.
+    // choreography: the sets and waits both live in the worker bodies —
+    // t2 waits on `a_done` before firing b, t1 waits on `b_done` before
+    // firing c — while the `every` closures only record the trace.
     let s1 = shared.clone();
     let s2 = shared.clone();
     let a_done1 = a_done.clone();
