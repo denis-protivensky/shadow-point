@@ -126,6 +126,76 @@ The guard derefs to `&T`, so `guard.store(…)` and `guard.0` are the guarded
 value's own API. A nested fire of the same sync point on the same thread is
 suppressed: calling instrumented code inside a hook does not recurse.
 
+### 4. A shared test
+
+The shared sync point observes: `every` records and sets gates, `fires`
+counts the total, and every firing thread attaches with `shared.guard()`.
+
+```rust,no_run
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+shadow_point::define_sp! {
+    pub mod register_sp {
+        before_store(value: u32),
+        after_store(value: u32),
+    }
+}
+
+struct Register(AtomicU32);
+
+impl Register {
+    fn store(&self, value: u32) {
+        #[cfg(test)]
+        shadow_point::invoke!(register_sp, before_store(value));
+        self.0.store(value, Ordering::SeqCst);
+        #[cfg(test)]
+        shadow_point::invoke!(register_sp, after_store(value));
+    }
+}
+
+fn the_second_writer_waits_for_the_first() {
+    let shared = register_sp::shared(Register(AtomicU32::new(0)));
+    let one_stored = Arc::new(shadow_point::Gate::new());
+
+    // Dispatch closures record and set gates — they never wait.
+    shared.every(|e| {
+        let gate = one_stored.clone();
+        e.after_store(move |_, value| {
+            if value == 1 {
+                gate.set(); // writer one's store has happened
+            }
+        });
+    });
+    // In shared mode the count is the total across workers.
+    shared.fires(register_sp::before_store, 2);
+    shared.fires(register_sp::after_store, 2);
+
+    let s1 = shared.clone();
+    let t1 = std::thread::spawn(move || {
+        let _g = s1.guard(); // attach the firing thread
+        s1.store(1);
+    });
+    let s2 = shared.clone();
+    let t2 = std::thread::spawn(move || {
+        let _g = s2.guard();
+        // The wait lives in the worker body, outside dispatch, with a
+        // test-local budget.
+        one_stored.must_wait(Duration::from_secs(10));
+        s2.store(2);
+    });
+
+    t1.join().unwrap();
+    t2.join().unwrap();
+    assert_eq!(shared.0.load(Ordering::SeqCst), 2); // 1 before 2
+    shared.verify(); // same checks as drop, at the call site
+}
+```
+
+*Illustrative snippet, not intended for real code as written. The complete
+runnable file is `examples/register_shared.rs`.*
+
 ## The two install modes
 
 - `guard` (private). `register_sp::guard(value)` returns a `Guard<T>` on
@@ -172,20 +242,19 @@ Private does not mean single-test: dispatch is per-thread, so a
 multithreaded test can give each worker its own private guard and order that
 worker's protocol with `sequence`, while gates choreograph the workers
 against each other. Fires from threads without an install are no-ops. One
-worker's sequence never waits on another thread's hooks. The pattern:
+worker's sequence never waits on another thread's hooks. A blocking wait
+inside a private dispatch closure, including a step, is legitimate
+choreography only when the thread that releases it needs nothing the
+blocked frame holds — the frame still owns the instrumented function's
+locks. Use `must_wait` with a test-local budget: it bounds a mistake to a
+failing test, it does not remove the class. The pattern:
 
 - Victim protocol under contention: the victim worker installs a private
   guard and pins its own steps (`sequence`); the racers run uninstrumented
-  or with their own guards. A gate freezes the victim at the chosen step.
-  A blocking wait inside a private dispatch closure, including a step, is
-  legitimate choreography: the private dispatcher never waits on another
-  thread (out-of-order fires panic). Use `must_wait` with a budget, and only
-  when the thread that releases the gate needs nothing the blocked frame
-  holds. The frame still owns the instrumented function's locks, so a racer
-  that needs them deadlocks; the budget bounds that to a failing test, it
-  does not remove the class. The sequence catches intra-worker step
-  reorderings that counters miss; the racers' effects are asserted after the
-  joins.
+  or with their own guards. A gate freezes the victim at the chosen step,
+  and the private dispatcher never waits on another thread (out-of-order
+  fires panic). The sequence catches intra-worker step reorderings that
+  counters miss; the racers' effects are asserted after the joins.
 - Freeze-frame window: generalize the single-hook freeze to a whole path.
   `sequence([step_before(freeze), step_after_recovery(assert)])` orders the
   victim's entire journey through the interference window, not just one
@@ -197,10 +266,9 @@ worker's sequence never waits on another thread's hooks. The pattern:
   as plain production code. Shared mode would force an attach in every
   firing thread; private per-worker guards do not.
 
-In shared mode, no dispatch closure may block: `every` and fire-once
-callbacks both run on the worker's stack inside the instrumented function.
-A wait there holds production locks, the deadlock class the removed shared
-`sequence` created.
+In shared mode no dispatch closure may block — the reason, and the
+`Gate`-in-the-worker-body alternative, are in "The two install modes"
+above.
 
 ## Cheat sheet
 
@@ -219,15 +287,12 @@ A wait there holds production locks, the deadlock class the removed shared
 
 `<name>` is the hook name declared in `define_sp!`; `define_sp!` generates
 one registration method per hook, and the table covers the registration
-surface. `.fires(n)` asserts how many times the hook fires, not how many
-times the closure runs. A one-shot closure runs at most once, on the fire
-whose per-hook counter was 0 and whose sequence fell through to fire-once. A
-first fire consumed by a sequence entry or stopped by a failing predicate
-never runs the closure. An operation that retries (the CAS loop in the
-private example below) fires the hook again, so a correct trace can be two
-fires with one closure run — that is what `.fires(2)` pins. Without a chain,
-registration asserts exactly one fire; that default catches a missing fire
-*and* an extra one.
+surface. A first fire consumed by a sequence entry or stopped by a failing
+predicate never runs the closure. An operation that retries (the CAS loop
+in the private example below) fires the hook again, so a correct trace can
+be two fires with one closure run — that is what `.fires(2)` pins. Without
+a chain, registration asserts exactly one fire; that default catches a
+missing fire *and* an extra one.
 
 In shared mode the count is the total across the whole shared state, not
 the winner's or one worker's: a hook that fires once per worker needs

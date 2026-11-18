@@ -486,8 +486,8 @@ impl Drop for ExecSink {
 ///   `&Shared`).
 /// - ordered (private mode only): `g.sequence(|s| { s.a(f).b(g); })` —
 ///   entries consumed in order; a gated step is `s.when(pred).<hook>(f)`.
-///   Shared mode has no `sequence`: order workers with `Gate` waits in the
-///   worker bodies, after `invoke!`.
+///   Shared mode has no `sequence`: order workers with [`Gate`] waits in
+///   the worker bodies, after `invoke!`.
 /// - every fire: `g.every(|e| { e.a(f); })` — runs on every non-suppressed fire.
 /// - count only: `g.fires(<hook>, n)` — no closure.
 ///
@@ -514,8 +514,8 @@ impl Drop for ExecSink {
 /// waits on another thread (out-of-order fires panic), so a gated freeze is
 /// deliberate choreography. The wait is safe only when the thread that
 /// releases it needs nothing the blocked frame holds. The frame still owns
-/// the instrumented function's locks; `must_wait` with a budget bounds a
-/// mistake to a failing test, it does not remove the class.
+/// the instrumented function's locks; [`Gate::must_wait`] with a budget
+/// bounds a mistake to a failing test, it does not remove the class.
 ///
 /// # Reserved hook names
 ///
