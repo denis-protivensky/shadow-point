@@ -66,7 +66,7 @@ mod tests {
 
         let shared = register_sp::shared(Register::new(0));
         // `every` only records and sets gates — never waits: a blocked
-        // dispatch would park the writer inside `store`, holding whatever
+        // dispatch would block the writer inside `store`, holding whatever
         // production locks the instrumented function holds.
         shared.every(|e| {
             let log_before = log.clone();

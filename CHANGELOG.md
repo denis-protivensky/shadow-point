@@ -53,9 +53,13 @@ call-site map.
   the park timeout. Order workers with `Gate` waits in the worker bodies
   after `invoke!`; `every` closures record traces and set gates, never wait.
   A blocking wait inside a *private* step closure remains legitimate
-  choreography (the private dispatcher never waits on another thread), and
-  per-worker private guards with `sequence` are the documented pattern for
-  multithreaded tests that pin one worker's protocol.
+  choreography only when the thread that releases it needs nothing the
+  blocked frame holds: the private dispatcher never waits on another
+  thread, but the frame still owns the instrumented function's locks, and a
+  `must_wait` budget bounds a mistake to a failing test rather than
+  removing the deadlock class. Per-worker private guards with `sequence`
+  are the documented pattern for multithreaded tests that pin one worker's
+  protocol.
 - `invoke!` takes the module path (`invoke!(name, hook(args))`) and expands to
   a block expression, so it works in expression position (closure body, block
   tail, `let` initializer) in both test and production builds.

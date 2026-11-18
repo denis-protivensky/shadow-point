@@ -177,9 +177,12 @@ worker's sequence never waits on another thread's hooks. The pattern:
   or with their own guards. A gate freezes the victim at the chosen step.
   A blocking wait inside a private step closure is legitimate choreography:
   the private dispatcher never waits on another thread (out-of-order fires
-  panic), so use `must_wait` with a budget. The sequence catches
-  intra-worker step reorderings that counters miss; the racers' effects are
-  asserted after the joins.
+  panic). Use `must_wait` with a budget, and only when the thread that
+  releases the gate needs nothing the blocked frame holds — the frame still
+  owns the instrumented function's locks, so a racer that needs them
+  deadlocks; the budget bounds that to a failing test, it does not remove
+  the class. The sequence catches intra-worker step reorderings that
+  counters miss; the racers' effects are asserted after the joins.
 - Freeze-frame window: generalize the single-hook freeze to a whole path.
   `sequence([step_before(freeze), step_after_recovery(assert)])` orders the
   victim's entire journey through the interference window, not just one
@@ -191,8 +194,8 @@ worker's sequence never waits on another thread's hooks. The pattern:
   as plain production code. Shared mode would force an attach in every
   firing thread; private per-worker guards do not.
 
-In shared mode, `every` closures never block. A wait there parks the worker
-inside the instrumented function, holding production locks, the deadlock
+In shared mode, `every` closures never block. A wait there blocks the worker
+inside the instrumented function, holding production locks — the deadlock
 class the removed shared `sequence` created.
 
 ## Cheat sheet

@@ -145,10 +145,10 @@ pub fn trace_enabled() -> bool {
 /// A private `sequence` orders when entries are *consumed*; the step closure
 /// may still be running and may still hold production locks. A gate waits
 /// for a step to actually finish: set it at the end of the step and wait on
-/// it where the next action must not start. In shared mode gates are the
-/// only ordering tool: waits belong in the worker bodies after `invoke!`,
-/// never inside `every` closures (a blocked dispatch parks the worker inside
-/// the instrumented function, holding its production locks).
+/// it where the next action must not start. In shared mode order the
+/// workers with gates: waits belong in the worker bodies after `invoke!`,
+/// never inside `every` closures (a blocked dispatch blocks the worker
+/// inside the instrumented function, holding its production locks).
 ///
 /// Inside a hook or step closure use [`must_wait`](Self::must_wait), never
 /// [`wait`](Self::wait): a missed [`set`](Self::set) must fail with a
@@ -501,13 +501,15 @@ impl Drop for ExecSink {
 /// self-deadlocks. The `every` and fire-once closures run outside the lock.
 ///
 /// In shared mode keep `every` closures non-blocking: they run inside the
-/// instrumented function, so a wait there parks the worker while it holds
+/// instrumented function, so a wait there blocks the worker while it holds
 /// production locks — the deadlock class the removed shared `sequence`
 /// created. Set gates and record traces in `every`; wait in the worker body
 /// after `invoke!`. A private step closure may wait: the private dispatcher
 /// never waits on another thread (out-of-order fires panic), so a gated
-/// freeze inside a step is deliberate choreography — use `must_wait` with a
-/// budget so a missed release fails the test instead of hanging it.
+/// freeze inside a step is deliberate choreography. The wait is safe only
+/// when the thread that releases it needs nothing the blocked frame holds —
+/// the frame still owns the instrumented function's locks; `must_wait` with
+/// a budget bounds a mistake to a failing test, it does not remove the class.
 ///
 /// # Reserved hook names
 ///
@@ -530,10 +532,11 @@ impl Drop for ExecSink {
 ///
 /// # Threads
 ///
-/// Dispatch is per-thread: every worker that fires a hook must attach with
-/// `shared.guard()` on its own thread first. `Guard` and `WorkerGuard` are
-/// `!Send` — drop them on the thread that created them. See the README for
-/// the full ownership and panic/drop contract.
+/// Dispatch is per-thread: every worker that fires a hook must install the
+/// sync point on its own thread first — `shared.guard()` for a shared sync
+/// point, `guard(value)` for a per-worker private one. `Guard` and
+/// `WorkerGuard` are `!Send` — drop them on the thread that created them.
+/// See the README for the full ownership and panic/drop contract.
 ///
 /// Private mode is not single-*test*-only: a multithreaded test may give
 /// each worker its own private guard and order that worker's protocol with
