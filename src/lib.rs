@@ -102,7 +102,7 @@
 /// on fire milestones without parking a `current_thread` executor.
 /// `TokioAsyncGate::wait_at_least` has no timeout by design: await only a
 /// count the scenario is guaranteed to reach; a missed threshold hangs until
-/// the CI job timeout, unlike `Gate::must_wait` and sequence parking.
+/// the CI job timeout, unlike `Gate::must_wait`.
 #[macro_export]
 macro_rules! invoke {
     ($module:path, $func:ident ( $($args:expr),* $(,)? )) => {
@@ -142,19 +142,27 @@ pub fn trace_enabled() -> bool {
 ///
 /// # Completion, not just consumption
 ///
-/// `sequence` releases a waiter when its entry is popped; the step closure
+/// A private `sequence` orders when entries are *consumed*; the step closure
 /// may still be running and may still hold production locks. A gate waits
 /// for a step to actually finish: set it at the end of the step and wait on
-/// it where the next action must not start.
+/// it where the next action must not start. In shared mode order the
+/// workers with gates: waits belong in the worker bodies after `invoke!`,
+/// never inside a dispatch closure (`every` or fire-once). A blocked
+/// dispatch blocks the worker inside the instrumented function, holding its
+/// production locks.
 ///
-/// Inside a hook or step closure use [`must_wait`](Self::must_wait), never
-/// [`wait`](Self::wait): a missed [`set`](Self::set) must fail with a
-/// diagnostic rather than hang the suite. [`wait`](Self::wait) belongs in
-/// the test body. `wait_timeout`/`must_wait` accept any duration, zero
-/// included: zero inspects the flag without waiting, and
+/// Inside a private dispatch closure that waits, use
+/// [`must_wait`](Self::must_wait), never [`wait`](Self::wait): a missed
+/// [`set`](Self::set) must fail with a diagnostic rather than hang the
+/// suite. [`wait`](Self::wait) belongs in the test body.
+/// `wait_timeout`/`must_wait` accept any duration, zero included: zero
+/// inspects the flag without waiting, and
 /// `must_wait(Duration::ZERO)` fails the test at once when the gate is
-/// unset. Shared-mode parking uses [`park_timeout()`], which honors
-/// `SP_PARK_TIMEOUT_MS` and otherwise defaults to ten seconds.
+/// unset. The budget is a hang detector, not a timing assumption: a correct
+/// test waits on an event its scenario guarantees, so load delays the wait
+/// but never fails it — a timeout means a missing release, a test bug. Pick
+/// it per test (a local constant), generous enough to never fire on a
+/// correct run.
 ///
 /// The gate is panic-safe: a poisoned lock (a panicking waiter) is
 /// transparently recovered via [`into_inner`](std::sync::PoisonError::into_inner).
@@ -225,8 +233,8 @@ impl Gate {
 
     /// Block until the gate is set, panicking with a timeout diagnostic if
     /// `timeout` elapses first. Prefer over [`wait`](Self::wait) inside
-    /// sequence-step closures: a missed [`set`](Self::set) fails the test
-    /// with a message instead of hanging it.
+    /// private sequence-step closures: a missed [`set`](Self::set) fails the
+    /// test with a message instead of hanging it.
     ///
     /// # Panics
     ///
@@ -370,135 +378,6 @@ impl Drop for CurrentFire {
     }
 }
 
-// --- Timeouts ---
-
-/// The default park budget behind [`park_timeout()`]: ten seconds. How long
-/// a thread parks in shared mode while the sequence head is a different hook.
-/// Parking is a mutual-deadlock guard, not a synchronization mechanism:
-/// threads re-check the sequence after every wake and park only as long as
-/// the head still blocks them. A timeout therefore means the test's sequence
-/// can never advance (no thread will ever fire the head hook) — failing is
-/// better than hanging.
-const DEFAULT_PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// The "not resolved yet" marker in [`park_timeout`]'s cache. A millisecond
-/// count equal to or above it can never be published, so the resolver rejects
-/// it instead of returning an implausibly large timeout. `usize`, not `u64`:
-/// the cache must compile on targets without 64-bit atomics (e.g. `armv5te`),
-/// and on 32-bit the ceiling is ~49 days.
-const UNRESOLVED_PARK_TIMEOUT: usize = usize::MAX;
-
-/// The park timeout the shared-mode sequence actually uses: ten seconds by
-/// default unless `SP_PARK_TIMEOUT_MS` names a number of milliseconds.
-///
-/// A library that silently failed to match the environment
-/// would be a worse neighbor than one that reads it once. The env is read on
-/// the first call and cached in an atomic, so the park path pays a relaxed
-/// load per wake, not a `getenv` — and `unsafe` is not needed (the crate
-/// forbids it, and MSRV 1.65 has no `OnceLock`).
-///
-/// A value that does not parse, is empty, or does not fit the internal
-/// cache (`usize::MAX` milliseconds or more — ~49 days on a 32-bit target)
-/// is ignored with one printed note: a typo in a CI env should not
-/// silently change what the suite proves, and should not fail a run
-/// either. `0` is legal and means "do not wait": the zero wait returns
-/// already timed out, the head is re-checked, and the timeout diagnostic
-/// is raised at once — so a wrong choreography fails instantly instead of
-/// parking.
-///
-/// ```text
-/// SP_PARK_TIMEOUT_MS=200 cargo test
-/// ```
-pub fn park_timeout() -> std::time::Duration {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    // The resolved value in milliseconds, `UNRESOLVED_PARK_TIMEOUT` while
-    // unresolved. A sentinel in one atomic rather than `Once` + a cell: the
-    // cache is a single integer, two racers computing the same answer is
-    // benign, and MSRV 1.65 has neither `OnceLock` nor a safe way to need
-    // one here. The resolver never produces the sentinel, which is what
-    // makes the fixed point below sound. `usize` keeps the cache compilable
-    // on targets without 64-bit atomics; the resolver rejects a value that
-    // would not fit.
-    static CACHED: AtomicUsize = AtomicUsize::new(UNRESOLVED_PARK_TIMEOUT);
-    let cached = CACHED.load(Ordering::Relaxed);
-    if cached != UNRESOLVED_PARK_TIMEOUT {
-        return std::time::Duration::from_millis(cached as u64);
-    }
-    let resolved = usize::try_from(resolve_park_timeout(std::env::var("SP_PARK_TIMEOUT_MS")))
-        .expect("the resolver keeps the value below the sentinel");
-    // Publish the winner, or adopt the value the first writer settled on, so
-    // every thread in the process waits on one and the same timeout. Note the
-    // shape of `compare_exchange`'s Ok arm: it yields the PREVIOUS value,
-    // which on success is the unresolved sentinel — `unwrap_or_else` over it
-    // would hand back the sentinel as if it were a timeout in milliseconds
-    // (an absurdly long park, caught by the end-to-end test in
-    // `tests/park_timeout_env.rs`, not by the resolver's unit tests).
-    let winner = match CACHED.compare_exchange(
-        UNRESOLVED_PARK_TIMEOUT,
-        resolved,
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-    ) {
-        Ok(_) => resolved,
-        Err(current) => current,
-    };
-    std::time::Duration::from_millis(winner as u64)
-}
-
-/// The resolution rule, as a pure function of the env lookup: one value for
-/// the whole process (see `park_timeout`'s cache), which is also why the
-/// environment can only be tested in a separate binary.
-fn resolve_park_timeout(raw: Result<String, std::env::VarError>) -> u64 {
-    match raw {
-        Err(std::env::VarError::NotPresent) => default_park_timeout_ms(),
-        Err(_) => {
-            note(format_args!(
-                "SP_PARK_TIMEOUT_MS is not valid UTF-8, using the default {DEFAULT_PARK_TIMEOUT:?}"
-            ));
-            default_park_timeout_ms()
-        }
-        Ok(raw) => match raw.trim().parse::<u64>() {
-            // The sentinel is the cache's own marker: publishing it would
-            // both hand out an implausibly large timeout and leave the cache
-            // permanently unresolved. On 32-bit a value at or above
-            // `usize::MAX` would also fail to fit the cache, so the same
-            // guard refuses it on every target.
-            Ok(ms) if ms >= UNRESOLVED_PARK_TIMEOUT as u64 => {
-                note(format_args!(
-                    "SP_PARK_TIMEOUT_MS={ms} is too large to be a \
-timeout, using the default {DEFAULT_PARK_TIMEOUT:?}"
-                ));
-                default_park_timeout_ms()
-            }
-            Ok(ms) => ms,
-            Err(_) => {
-                note(format_args!(
-                    "SP_PARK_TIMEOUT_MS={raw:?} is not a number of milliseconds, \
-using the default {DEFAULT_PARK_TIMEOUT:?}"
-                ));
-                default_park_timeout_ms()
-            }
-        },
-    }
-}
-
-/// The default park budget in the milliseconds the cache stores. The constant
-/// is ten seconds, so the conversion cannot fail; `try_from` keeps the cast
-/// out of the code (and off clippy's truncation lint).
-fn default_park_timeout_ms() -> u64 {
-    u64::try_from(DEFAULT_PARK_TIMEOUT.as_millis())
-        .expect("the default park budget, ten seconds in ms, fits in u64")
-}
-
-/// One diagnostic line on stderr, best-effort. `eprintln!` panics when the
-/// write fails, and a warning about a misconfigured env must not fail the
-/// run it is warning about — the same reason the unwind path writes through
-/// `writeln!` and ignores the result.
-fn note(msg: std::fmt::Arguments<'_>) {
-    use std::io::Write as _;
-    let _ = writeln!(std::io::stderr(), "shadow-point: {msg}");
-}
-
 // See CURRENT_FIRE: inline `const {}` blocks are experimental until 1.79.
 thread_local! {
     // Addresses of `__Sp` instances currently dispatching a hook on this
@@ -553,10 +432,10 @@ impl Drop for ExecSink {
 /// Generate a sync-point module from a hook list.
 ///
 /// `define_sp! { $vis mod $name { hook(args), ... } }` emits a module with
-/// fixed names: two constructors (`guard`, `shared`), one `Guard` type for
-/// both modes, a clonable `Shared`, a hook-identifier constant per hook,
-/// and the hidden dispatch machinery. Several sync points with distinct
-/// module names can share a file directly.
+/// fixed names: two constructors (`guard`, `shared`), a private-mode `Guard`,
+/// a clonable `Shared` with an attach-only `WorkerGuard`, a hook-identifier
+/// constant per hook, and the hidden dispatch machinery. Several sync
+/// points with distinct module names can share a file directly.
 ///
 /// # Surface
 ///
@@ -565,7 +444,8 @@ impl Drop for ExecSink {
 /// | `guard(value)` | private mode: install on this thread, returns `Guard<T>` |
 /// | `shared(value)` | shared mode: returns `Shared<T>` (`Clone`, `Send + Sync`) |
 /// | `Guard<T>` | `Deref`, fire-once/`sequence`/`every`/`fires`/`verify`, `!Send` |
-/// | `Shared<T>` | `Deref`, `guard()` to attach a worker thread, same registration |
+/// | `Shared<T>` | `Deref`, fire-once/`every`/`fires`/`verify`, `guard()` to attach a worker |
+/// | `WorkerGuard<T>` | `Deref` + `Drop` only: the worker-thread attach, `!Send` |
 /// | `Hook` | hook-identifier type; one constant per hook (`<hook>: Hook`) |
 ///
 /// # Example
@@ -604,8 +484,10 @@ impl Drop for ExecSink {
 ///   sequence fell through to fire-once. Chain `.fires(n)` for a different
 ///   count; both `fires` forms return the registration handle (`&Guard` or
 ///   `&Shared`).
-/// - ordered: `g.sequence(|s| { s.a(f).b(g); })` — entries consumed in order;
-///   a gated step is `s.when(pred).<hook>(f)`.
+/// - ordered (private mode only): `g.sequence(|s| { s.a(f).b(g); })` —
+///   entries consumed in order; a gated step is `s.when(pred).<hook>(f)`.
+///   Shared mode has no `sequence`: order workers with [`Gate`] waits in
+///   the worker bodies, after `invoke!`.
 /// - every fire: `g.every(|e| { e.a(f); })` — runs on every non-suppressed fire.
 /// - count only: `g.fires(<hook>, n)` — no closure.
 ///
@@ -617,9 +499,23 @@ impl Drop for ExecSink {
 ///
 /// A `when` predicate is evaluated **under the sequence lock**: it must be a
 /// pure check. A predicate that blocks (a `Gate` wait, a channel recv) holds
-/// the lock against every other firing thread in shared mode and can
-/// deadlock; calling `sequence` from it self-deadlocks. The `every` and
-/// fire-once closures run outside the lock.
+/// the lock and can deadlock the test; calling `sequence` from it
+/// self-deadlocks. The `every` and fire-once closures run outside the lock.
+///
+/// Every closure that dispatch calls runs on the caller's stack inside the
+/// instrumented function: `every`, fire-once, and, in private mode, sequence
+/// steps. In shared mode none of them may wait. A blocked worker still holds
+/// the function's production locks, and another thread may need them to
+/// reach the release, the deadlock class the removed shared `sequence`
+/// created. Record traces and set gates in dispatch closures; wait in the
+/// worker body after `invoke!`.
+///
+/// In private mode a dispatch closure may wait: the private dispatcher never
+/// waits on another thread (out-of-order fires panic), so a gated freeze is
+/// deliberate choreography. The wait is safe only when the thread that
+/// releases it needs nothing the blocked frame holds. The frame still owns
+/// the instrumented function's locks; [`Gate::must_wait`] with a budget
+/// bounds a mistake to a failing test, it does not remove the class.
 ///
 /// # Reserved hook names
 ///
@@ -642,10 +538,17 @@ impl Drop for ExecSink {
 ///
 /// # Threads
 ///
-/// Dispatch is per-thread: every worker that fires a hook must attach with
-/// `shared.guard()` on its own thread first. `Guard` is `!Send` — drop it on
-/// the thread that created it. See the README for the full ownership and
-/// panic/drop contract.
+/// Dispatch is per-thread: every worker that fires a hook must install the
+/// sync point on its own thread first — `shared.guard()` for a shared sync
+/// point, `guard(value)` for a per-worker private one. `Guard` and
+/// `WorkerGuard` are `!Send` — drop them on the thread that created them.
+/// See the README for the full ownership and panic/drop contract.
+///
+/// Private mode is not single-*test*-only: a multithreaded test may give
+/// each worker its own private guard and order that worker's protocol with
+/// `sequence`, while gates choreograph the workers against each other.
+/// Fires from threads without an install are no-ops, so one worker's
+/// sequence never waits on another thread.
 ///
 /// Moving a guard across threads is a compile error, not a documented trap:
 ///
@@ -658,6 +561,19 @@ impl Drop for ExecSink {
 ///     drop(g); // ERROR: `Guard<u32>` cannot be sent between threads
 /// });
 /// ```
+///
+/// The worker guard is `!Send` too:
+///
+/// ```compile_fail
+/// shadow_point::define_sp! {
+///     mod shared_send_probe { ping(v: u32), }
+/// }
+/// let shared = shared_send_probe::shared(0u32);
+/// let g = shared.guard();
+/// std::thread::spawn(move || {
+///     drop(g); // ERROR: `WorkerGuard<u32>` cannot be sent between threads
+/// });
+/// ```
 #[macro_export]
 macro_rules! define_sp {
     (
@@ -668,7 +584,8 @@ macro_rules! define_sp {
     ) => {
         #[doc = concat!(
             "Sync point `", stringify!($name), "`: generated by `define_sp!`. \
-             Constructors `guard`/`shared`, one `Guard` type, a hook constant \
+             Constructors `guard`/`shared`, a private `Guard`, a clonable \
+             `Shared` with an attach-only `WorkerGuard`, a hook constant \
              per declared hook. See the crate README for the full contract."
         )]
         #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
@@ -876,10 +793,9 @@ macro_rules! define_sp {
                     ///
                     /// The predicate runs under the sequence lock and must be
                     /// a pure check: a blocking predicate (a `Gate` wait, a
-                    /// channel recv) holds the lock against other firing
-                    /// threads in shared mode and can deadlock; calling
-                    /// `sequence` from it self-deadlocks. The step closure
-                    /// runs outside the lock.
+                    /// channel recv) holds the lock and can deadlock the
+                    /// test; calling `sequence` from it self-deadlocks. The
+                    /// step closure runs outside the lock.
                     pub fn when<P>(&mut self, pred: P) -> When<'_, T, P> {
                         When { seq: self, pred }
                     }
@@ -923,7 +839,6 @@ macro_rules! define_sp {
                     __sp_sequence: ::std::sync::Mutex<
                         ::std::collections::VecDeque<SeqAction<T>>
                     >,
-                    __sp_sequence_cv: ::std::sync::Condvar,
                     __sp_shared: bool,
                     __sp_installed_at: &'static std::panic::Location<'static>,
                     __sp_calls: ::std::vec::Vec<::std::sync::atomic::AtomicUsize>,
@@ -955,7 +870,6 @@ macro_rules! define_sp {
                             __sp_sequence: ::std::sync::Mutex::new(
                                 ::std::collections::VecDeque::new()
                             ),
-                            __sp_sequence_cv: ::std::sync::Condvar::new(),
                             __sp_shared: shared,
                             __sp_installed_at: installed_at,
                             __sp_calls: (0..n)
@@ -1023,6 +937,14 @@ macro_rules! define_sp {
                 fn build_sequence<T: Send + Sync + 'static>(
                     st: &State<T>, f: impl FnOnce(&mut Seq<T>),
                 ) {
+                    // Sequences are private-mode only: `Shared` has no
+                    // `sequence` and `WorkerGuard` no registration, so this
+                    // is unreachable for shared state by type. The assert
+                    // guards the private seam itself.
+                    assert!(
+                        !st.__sp_fixed.__sp_shared,
+                        "shadow-point: sequence is private-mode only"
+                    );
                     let mut builder = Seq {
                         seq: ::std::collections::VecDeque::new(),
                     };
@@ -1179,65 +1101,43 @@ macro_rules! define_sp {
                                     .__sp_fixed.__sp_sequence
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                let mut timed_out_last = false;
-                                loop {
-                                    match seq.front() {
-                                        None => break (false, None),
-                                        Some(front) if front.matches(h) => {
-                                            let pass = match front {
-                                                SeqAction::$method(Some(pred), _) => {
-                                                    pred($($arg),*)
-                                                }
-                                                SeqAction::$method(None, _) => true,
-                                                // front.matches(h) guarantees this variant.
-                                                _ => unreachable!(
-                                                    "shadow-point: sequence head matched a \
-                                                     different hook variant"
-                                                ),
-                                            };
-                                            if pass {
-                                                let entry = seq.pop_front();
-                                                st.__sp_fixed.__sp_sequence_cv.notify_all();
-                                                break (true, entry);
+                                match seq.front() {
+                                    None => (false, None),
+                                    Some(front) if front.matches(h) => {
+                                        let pass = match front {
+                                            SeqAction::$method(Some(pred), _) => {
+                                                pred($($arg),*)
                                             }
-                                            break (true, None);
+                                            SeqAction::$method(None, _) => true,
+                                            // front.matches(h) guarantees this variant.
+                                            _ => unreachable!(
+                                                "shadow-point: sequence head matched a \
+                                                 different hook variant"
+                                            ),
+                                        };
+                                        if pass {
+                                            (true, seq.pop_front())
+                                        } else {
+                                            (true, None)
                                         }
-                                        Some(front) => {
-                                            let has_more =
-                                                seq.iter().any(|e| e.matches(h));
-                                            if !has_more {
-                                                break (false, None);
-                                            }
-                                            if st.__sp_fixed.__sp_shared {
-                                                if timed_out_last {
-                                                    panic!(
-                                                        "shadow-point: sequence park \
-                                                         timeout ({:?}): thread waiting \
-                                                         for `{}`, head is `{}` \
-                                                         (installed at {})",
-                                                        $crate::park_timeout(),
-                                                        __sp_name(h),
-                                                        front.name(),
-                                                        st.__sp_fixed.__sp_installed_at,
-                                                    );
-                                                }
-                                                let (g, w) = st
-                                                    .__sp_fixed.__sp_sequence_cv
-                                                    .wait_timeout(
-                                                        seq,
-                                                        $crate::park_timeout(),
-                                                    )
-                                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                                seq = g;
-                                                timed_out_last = w.timed_out();
-                                                continue;
-                                            }
+                                    }
+                                    Some(front) => {
+                                        let has_more =
+                                            seq.iter().any(|e| e.matches(h));
+                                        if !has_more {
+                                            (false, None)
+                                        } else {
+                                            // Private mode only: shared state never
+                                            // holds sequence entries (no registration
+                                            // path), so an out-of-order fire is a
+                                            // one-thread ordering violation — panic,
+                                            // never park.
                                             panic!(
                                                 "sync point ordering violation: \
                                                  expected `{}` next but `{}` fired",
                                                 front.name(),
                                                 __sp_name(h)
-                                            );
+                                            )
                                         }
                                     }
                                 }
@@ -1313,13 +1213,19 @@ macro_rules! define_sp {
 
                 // ── Guard ────────────────────────────────────────────
 
-                /// The sync-point guard for both private and shared mode.
-                /// Derefs to the guarded value; drop asserts counts and
-                /// sequence. `!Send`: drop it on the thread that created it.
+                /// The private-mode sync-point guard. Derefs to the guarded
+                /// value; drop restores the TLS install and the last owner
+                /// asserts counts and sequence. `!Send`: drop it on the
+                /// thread that created it.
                 /// Nested guards of the same sync point save and restore the
-                /// TLS install, so drop them in reverse order: dropping an
-                /// outer guard first detaches the inner one, whose fires then
-                /// become no-ops and whose assertions fail.
+                /// TLS install, so drop them in reverse order. Dropping an
+                /// outer guard first detaches the inner one: the inner guard's
+                /// fires become no-ops, so any count it still expects fails
+                /// at its drop. The inner guard's drop then restores the
+                /// *outer* install, leaving the outer sync point attached
+                /// with no guard alive — its verdict runs only when that
+                /// install is replaced or the thread ends, beyond the
+                /// test's control.
                 #[clippy::has_significant_drop]
                 #[must_use]
                 pub struct Guard<T: Send + Sync + 'static> {
@@ -1395,7 +1301,11 @@ macro_rules! define_sp {
 
                 /// A sync point shared across threads. `Clone` gives each
                 /// worker its own handle; `guard()` attaches the calling
-                /// thread.
+                /// thread. Registration (`every`, `fires`, fire-once) and
+                /// `verify` live here, on the shared handle — the worker
+                /// guard is attach-only. There is no cross-thread
+                /// `sequence`: order workers with `Gate`
+                /// waits in the worker bodies, outside dispatch.
                 #[clippy::has_significant_drop]
                 #[must_use]
                 pub struct Shared<T: Send + Sync + 'static> {
@@ -1420,12 +1330,14 @@ macro_rules! define_sp {
 
                 impl<T: Send + Sync + 'static> Shared<T> {
                     /// Attach this sync point to the calling thread,
-                    /// returning a guard that restores the previous install
-                    /// on drop. Nested guards of the same sync point must be
-                    /// dropped in reverse order: dropping an outer guard first
-                    /// clears the inner install, so its fires become no-ops.
-                    pub fn guard(&self) -> Guard<T> {
-                        attach(::std::sync::Arc::clone(&self.owner))
+                    /// returning an attach-only worker guard that restores
+                    /// the previous install on drop. Nested guards of the
+                    /// same sync point must be dropped in reverse order:
+                    /// dropping an outer guard first detaches the inner one,
+                    /// whose fires become no-ops (see [`Guard`] for the
+                    /// full wrong-order consequence).
+                    pub fn guard(&self) -> WorkerGuard<T> {
+                        attach_worker(::std::sync::Arc::clone(&self.owner))
                     }
 
                     $(
@@ -1439,11 +1351,6 @@ macro_rules! define_sp {
                             Expect::new(self, shared_state(self), Hook::$method)
                         }
                     )+
-
-                    /// Register an ordered sequence of hook fires across threads.
-                    pub fn sequence(&self, f: impl FnOnce(&mut Seq<T>)) {
-                        build_sequence(shared_state(self), f);
-                    }
 
                     /// Register closures that fire on every invocation.
                     pub fn every(&self, f: impl FnOnce(&mut Every<T>)) {
@@ -1474,20 +1381,71 @@ macro_rules! define_sp {
                     }
                 }
 
+                // ── WorkerGuard (shared-mode attach) ─────────────────
+
+                /// RAII TLS install of a shared sync point: attach-only.
+                /// `Deref` reaches the guarded value; `Drop` restores the
+                /// previous install. Holds a strong handle, so the shared
+                /// state and its drop assertions outlive every worker that
+                /// installed it. Registration (`every`, `fires`, fire-once)
+                /// and `verify` live on [`Shared`]; there is no `sequence`
+                /// here — cross-thread order comes from `Gate`
+                /// waits in the worker bodies. `!Send`: drop it on the
+                /// thread that created it.
+                #[clippy::has_significant_drop]
+                #[must_use]
+                pub struct WorkerGuard<T: Send + Sync + 'static> {
+                    owner: ::std::sync::Arc<Owner<T>>,
+                    old: Option<::std::sync::Arc<dyn Hooks>>,
+                    _not_send: ::std::marker::PhantomData<*const ()>,
+                }
+
+                impl<T: Send + Sync + 'static> std::ops::Deref for WorkerGuard<T> {
+                    type Target = T;
+                    fn deref(&self) -> &T {
+                        &owner_state(&self.owner).__sp_fixed.__sp_value
+                    }
+                }
+
+                impl<T: Send + Sync + 'static> Drop for WorkerGuard<T> {
+                    fn drop(&mut self) {
+                        // Restore TLS first, with the borrow dropped before
+                        // the Arc<Owner> field releases — the assertion (in
+                        // Owner::drop, on the last Arc) then runs after every
+                        // TLS install is gone.
+                        TL.with(|c| {
+                            *(c.borrow_mut()) = self.old.take()
+                        });
+                    }
+                }
+
                 // ── TLS attach (shared by both constructors) ─────────
 
-                fn attach<T: Send + Sync + 'static>(
-                    owner: ::std::sync::Arc<Owner<T>>,
-                ) -> Guard<T> {
+                fn install_tls<T: Send + Sync + 'static>(
+                    owner: &::std::sync::Arc<Owner<T>>,
+                ) -> Option<::std::sync::Arc<dyn Hooks>> {
                     // `.clone()` at the binding, not `Arc::clone`: the
                     // unsizing coercion to `Arc<dyn Hooks>` happens at the
                     // binding.
                     let handle: ::std::sync::Arc<dyn Hooks> = owner.clone();
-                    let old = TL.with(|c| {
+                    TL.with(|c| {
                         let mut slot = c.borrow_mut();
                         slot.replace(handle)
-                    });
+                    })
+                }
+
+                fn attach<T: Send + Sync + 'static>(
+                    owner: ::std::sync::Arc<Owner<T>>,
+                ) -> Guard<T> {
+                    let old = install_tls(&owner);
                     Guard { owner, old, _not_send: ::std::marker::PhantomData }
+                }
+
+                fn attach_worker<T: Send + Sync + 'static>(
+                    owner: ::std::sync::Arc<Owner<T>>,
+                ) -> WorkerGuard<T> {
+                    let old = install_tls(&owner);
+                    WorkerGuard { owner, old, _not_send: ::std::marker::PhantomData }
                 }
 
                 // Constructors live here, not in the public module: the
@@ -1518,7 +1476,7 @@ macro_rules! define_sp {
             // ── Public surface (re-exports + constructors) ───────────
 
             #[doc(inline)]
-            pub use __sp_impl::{guard, shared, Guard, Shared};
+            pub use __sp_impl::{guard, shared, Guard, Shared, WorkerGuard};
             #[doc(hidden)]
             pub use __sp_impl::{with_dyn, Every, Expect, Seq, When};
         }
@@ -1540,111 +1498,5 @@ pub mod sp_docs {
             before_probe(key: &u32),
             after_probe(len: usize),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[test]
-    fn park_timeout_defaults_to_the_constant() {
-        assert_eq!(
-            Duration::from_millis(resolve_park_timeout(Err(std::env::VarError::NotPresent))),
-            DEFAULT_PARK_TIMEOUT
-        );
-    }
-
-    #[test]
-    fn park_timeout_takes_the_env_value() {
-        assert_eq!(resolve_park_timeout(Ok("250".into())), 250);
-        assert_eq!(resolve_park_timeout(Ok(" 250 ".into())), 250);
-        assert_eq!(resolve_park_timeout(Ok("0".into())), 0);
-    }
-
-    /// The cached accessor, pinned separately from the resolution rule: the
-    /// value that comes out of `park_timeout` is what a park waits on, and
-    /// the first version of the cache returned its own "unresolved" sentinel
-    /// as a timeout (~584 million years). The pure resolver cannot see that
-    /// bug; only a test on the cached path can.
-    ///
-    /// The bound mirrors the env this process started with, so a legitimate
-    /// `SP_PARK_TIMEOUT_MS` on the runner is honored, not flagged — the same
-    /// rule `the_cache_honors_what_the_process_started_with` pins from the
-    /// other side. Only a value the resolver could not have produced (the
-    /// sentinel, wrapped, or not a number of milliseconds this process
-    /// parsed) is a cache bug.
-    #[test]
-    fn park_timeout_never_returns_the_unresolved_sentinel() {
-        let expected = match std::env::var("SP_PARK_TIMEOUT_MS") {
-            Ok(raw) => match raw.trim().parse::<u64>() {
-                Ok(ms) if ms < UNRESOLVED_PARK_TIMEOUT as u64 => Duration::from_millis(ms),
-                // The sentinel is refused, so the cache must hold the default.
-                _ => DEFAULT_PARK_TIMEOUT,
-            },
-            Err(_) => DEFAULT_PARK_TIMEOUT,
-        };
-        let t = park_timeout();
-        assert_eq!(
-            t, expected,
-            "the cache resolved to something the env does not describe"
-        );
-        assert_eq!(park_timeout(), t, "resolved once, and stable");
-    }
-
-    /// The same sentinel, reached through the front door instead of through
-    /// the cache: an env value equal to the marker must not be published as
-    /// a timeout (the cache would then never resolve at all).
-    #[test]
-    fn a_value_colliding_with_the_unresolved_sentinel_falls_back() {
-        assert_eq!(
-            Duration::from_millis(resolve_park_timeout(
-                Ok(UNRESOLVED_PARK_TIMEOUT.to_string())
-            )),
-            DEFAULT_PARK_TIMEOUT,
-            "the cache's marker is never a timeout"
-        );
-    }
-
-    /// The cache's boundary is exclusive, and the value just below it is
-    /// still a legal timeout. The upper half is reachable only where
-    /// `usize` is narrower than `u64` (the 32-bit `test32` CI job); on a
-    /// 64-bit host `checked_add` returns `None` and only the lower half
-    /// runs. This is the test that distinguishes `>=` from `==` at the
-    /// boundary: the exact-sentinel test above cannot.
-    #[test]
-    fn the_cache_boundary_is_exclusive() {
-        let below = UNRESOLVED_PARK_TIMEOUT - 1;
-        assert_eq!(
-            resolve_park_timeout(Ok(below.to_string())),
-            below as u64,
-            "the value just below the cache's capacity must be accepted"
-        );
-        if let Some(above) = (UNRESOLVED_PARK_TIMEOUT as u64).checked_add(1) {
-            assert_eq!(
-                Duration::from_millis(resolve_park_timeout(Ok(above.to_string()))),
-                DEFAULT_PARK_TIMEOUT,
-                "a value above the cache's capacity must not be published"
-            );
-        }
-    }
-
-    #[test]
-    fn a_value_that_does_not_parse_falls_back_to_the_default() {
-        // A typo in a CI env must not silently change what the suite proves.
-        for bad in ["", "abc", "-5", "10.5", "1_000"] {
-            assert_eq!(
-                Duration::from_millis(resolve_park_timeout(Ok(bad.into()))),
-                DEFAULT_PARK_TIMEOUT,
-                "{bad:?} is not a number of milliseconds"
-            );
-        }
-        assert_eq!(
-            Duration::from_millis(resolve_park_timeout(Err(std::env::VarError::NotUnicode(
-                "not utf8".into()
-            )))),
-            DEFAULT_PARK_TIMEOUT
-        );
     }
 }
