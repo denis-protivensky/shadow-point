@@ -102,101 +102,68 @@ The guard derefs to `&T`: `guard.store(…)` and `guard.0` are the guarded
 value's own API. A nested fire of the same sync point on the same thread
 is suppressed — instrumented code inside a hook does not recurse.
 
-### 4. A shared test
-
-```rust,ignore
-use std::sync::Arc;
-use std::time::Duration;
-
-impl Register {
-    fn store(&self, value: u32) {
-        self.0.store(value, Ordering::SeqCst);
-        #[cfg(test)]
-        shadow_point::invoke!(register_sp, after_store(value));
-    }
-}
-
-fn the_second_writer_waits_for_the_first() {
-    let shared = register_sp::shared(Register(AtomicU32::new(0)));
-    let one_stored = Arc::new(shadow_point::Gate::new());
-
-    // Dispatch closures record and set gates — they never wait.
-    shared.every(|e| {
-        let gate = one_stored.clone();
-        e.after_store(move |_, value| {
-            if value == 1 {
-                gate.set(); // writer one's store has happened
-            }
-        });
-    });
-    shared.fires(register_sp::after_store, 2); // total across workers
-
-    let s1 = shared.clone();
-    let t1 = std::thread::spawn(move || {
-        let _g = s1.guard(); // attach the firing thread
-        s1.store(1);
-    });
-    let s2 = shared.clone();
-    let t2 = std::thread::spawn(move || {
-        let _g = s2.guard();
-        // The wait lives in the worker body, with a test-local budget.
-        one_stored.must_wait(Duration::from_secs(10));
-        s2.store(2);
-    });
-    t1.join().unwrap();
-    t2.join().unwrap();
-    assert_eq!(shared.0.load(Ordering::SeqCst), 2); // 1 before 2
-    shared.verify(); // same checks as drop, at the call site
-}
-```
-
-*Illustrative snippet, not intended for real code as written: it reuses
-`Register` from step 2 and declares `after_store(value: u32)` alongside
-`before_store`. The complete runnable file is `examples/register_shared.rs`.*
+The shared-mode equivalent is the runnable `examples/register_shared.rs`
+(next section).
 
 ## The two install modes
 
-- `guard` (private). `register_sp::guard(value)` returns a `Guard<T>` on
-  one thread; hooks see only that thread's fires, and assertions run at
-  the last owner's drop. Concurrency without parallelism: the operation
-  under test and the interferer alternate at the hook. A fire from any
-  other thread is a no-op; an out-of-order fire panics if a later sequence
-  entry still expects that hook.
-- `shared` (shared). `register_sp::shared(value)` returns a clonable
-  `Shared<T>` (`Clone`, `Send + Sync`). Every firing thread calls
-  `shared.guard()` first: the attach-only `WorkerGuard<T>` installs
-  dispatch on that thread and keeps the state alive (`Deref` + `Drop`
-  only). Register on `Shared` with `every`, `fires`, the per-hook methods,
-  and `verify`. Shared mode observes; it does not schedule: dispatch
-  closures run inside the instrumented function, so none may wait — they
-  record traces and set gates, and worker bodies order themselves with
-  `Gate` waits (`must_wait`, a test-local budget) after `invoke!`.
-  Assertions run at the last owner's drop, after the workers are joined.
+The quick start above is the private mode: one `Guard<T>` on one thread,
+where the operation under test and the interferer alternate at the hook —
+concurrency without parallelism. An out-of-order fire panics if a later
+sequence entry still expects that hook.
 
-`Guard` and `WorkerGuard` are `!Send`: drop them on the thread that created
-them. Moving one across threads is a compile error, not a runtime trap.
+There is also shared mode for real threads. `register_sp::shared(value)`
+returns a clonable `Shared<T>` (`Clone`, `Send + Sync`); every firing thread
+calls `shared.guard()` first, and the attach-only `WorkerGuard<T>` (`Deref`
++ `Drop` only) installs dispatch on that thread and keeps the state alive.
+Register on the `Shared` handle with `every`, `fires`, the per-hook methods,
+and `verify`. Shared mode observes; it does not schedule: dispatch closures
+run inside the instrumented function, so none may wait — they record traces
+and set gates, and worker bodies order themselves with `Gate` waits
+(`must_wait`, a test-local budget) after `invoke!`.
 
-Pick the mode by what the test asserts:
+Both modes assert at the last owner's drop — in shared mode, after the
+workers are joined. `Guard` and `WorkerGuard` are `!Send`: drop them on the
+thread that created them; moving one across threads is a compile error,
+not a runtime trap.
 
-| The test asserts | Use |
-|---|---|
-| the order of steps on one thread | a private guard on that thread |
-| each worker's local contract | one private guard inside each worker |
-| the cross-thread trace or total counts | one shared sync point and a `guard()` on every firing thread |
+Pick the mode by what the test asserts: the order of steps on one thread,
+or each worker's own local contract, calls for a private guard — one per
+worker in the latter case. The cross-thread trace or total counts call for
+one shared sync point with a `guard()` on every firing thread. The common
+mistake is installing a guard on the test thread while hooks fire on
+workers: dispatch is per-thread, so those fires are no-ops — only the
+victim needs instrumentation.
 
-The common mistake is to install a guard on the test thread while hooks
-fire on workers: those fires disappear.
+### Examples
+
+Two runnable examples sit in `examples/`; both are test targets, one per
+mode:
+
+- `examples/register_private.rs` — an `AtomicU32` register with a `store`
+  and a CAS-loop `increment`. The hook shadows the rival store; the CAS
+  retries once, so the hook fires twice while the one-shot closure runs once
+  (`.fires(2)`).
+- `examples/register_shared.rs` — a register through `shared`; two writer
+  threads, `every` records the trace and a `Gate` proves that one writer's
+  store completed before the other proceeds.
+
+```sh
+cargo test --example register_private
+cargo test --example register_shared
+```
+
+`cargo test` alone does not run example tests; use `--examples` or
+`--all-targets` in CI.
 
 ### Private guards in a multithreaded test
 
-Dispatch is per-thread: give each worker its own private guard, pin its
-protocol with `sequence`, and let gates choreograph the workers; fires
-from uninstalled threads are no-ops, so only the victim needs
-instrumentation. A blocking wait inside a private dispatch closure is
-legitimate only when the releasing thread needs nothing the blocked frame
-holds (the frame owns the instrumented function's locks); `must_wait`
-with a test-local budget bounds a mistake to a failing test. Pinned
-pattern: `private_guard_on_a_worker_orders_its_own_protocol` in
+Give each worker its own private guard, pin its protocol with `sequence`,
+and let gates choreograph the workers. A blocking wait inside a private
+dispatch closure is legitimate only when the releasing thread needs nothing
+the blocked frame holds (the frame owns the instrumented function's locks);
+`must_wait` with a test-local budget bounds a mistake to a failing test.
+Pinned pattern: `private_guard_on_a_worker_orders_its_own_protocol` in
 `tests/cross_thread.rs`; wait rule: `define_sp!` rustdoc.
 
 ## Cheat sheet
@@ -248,9 +215,10 @@ map is in the CHANGELOG.
   `Deref` + `Drop`). `Guard<T>` keeps `sequence`; both guard types are
   `!Send`.
 - Shared `sequence` and parking are gone (parking inside dispatch could
-  deadlock on the production locks the parked frame holds). The
-  replacement recipe is in "The two install modes" above. `park_timeout()`
-  and `SP_PARK_TIMEOUT_MS` are gone with it — a gate-wait budget is test
+  deadlock on the production locks the parked frame holds). Gates in the
+  worker bodies are the replacement — see `examples/register_shared.rs`
+  and "The two install modes" above. `park_timeout()` and
+  `SP_PARK_TIMEOUT_MS` are gone with it — a gate-wait budget is test
   policy: a local `Duration` constant passed to `must_wait`/`wait_timeout`.
 - `invoke!(RegisterSp, before_store(v))` →
   `invoke!(register_sp, before_store(v))`; it is now a block expression
@@ -274,26 +242,6 @@ map is in the CHANGELOG.
 
 Registration calls now live on `Shared`: `shared.guard().<name>(f)` →
 `shared.<name>(f)`, and likewise for `every`, `fires`, and `verify`.
-
-## Examples
-
-Two runnable examples sit in `examples/`; both are test targets:
-
-- `examples/register_private.rs` — an `AtomicU32` register with a `store`
-  and a CAS-loop `increment`. The hook shadows the rival store; the CAS
-  retries once, so the hook fires twice while the one-shot closure runs once
-  (`.fires(2)`).
-- `examples/register_shared.rs` — a register through `shared`; two writer
-  threads, `every` records the trace and a `Gate` proves that one writer's
-  store completed before the other proceeds.
-
-```sh
-cargo test --example register_private
-cargo test --example register_shared
-```
-
-`cargo test` alone does not run example tests; use `--examples` or
-`--all-targets` in CI.
 
 ## FAQ
 
