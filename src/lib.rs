@@ -145,9 +145,8 @@ pub fn trace_enabled() -> bool {
 /// A private `sequence` orders when entries are *consumed*; the step closure
 /// may still be running and may still hold production locks. A gate waits
 /// for a step to actually finish: set it at the end of the step and wait on
-/// it where the next action must not start. In shared mode order the
-/// workers with gates: waits belong in the worker bodies after `invoke!`,
-/// never inside a dispatch closure (`every` or fire-once). A blocked
+/// it where the next action must not start. Waits belong in the worker body
+/// after `invoke!`, or in a private dispatch closure with a budget; a blocked
 /// dispatch blocks the worker inside the instrumented function, holding its
 /// production locks.
 ///
@@ -432,8 +431,7 @@ impl Drop for ExecSink {
 /// Generate a sync-point module from a hook list.
 ///
 /// `define_sp! { $vis mod $name { hook(args), ... } }` emits a module with
-/// fixed names: two constructors (`guard`, `shared`), a private-mode `Guard`,
-/// a clonable `Shared` with an attach-only `WorkerGuard`, a hook-identifier
+/// fixed names: one constructor (`guard`), a private `Guard`, a hook-identifier
 /// constant per hook, and the hidden dispatch machinery. Several sync
 /// points with distinct module names can share a file directly.
 ///
@@ -441,11 +439,8 @@ impl Drop for ExecSink {
 ///
 /// | Item | Role |
 /// |---|---|
-/// | `guard(value)` | private mode: install on this thread, returns `Guard<T>` |
-/// | `shared(value)` | shared mode: returns `Shared<T>` (`Clone`, `Send + Sync`) |
+/// | `guard(value)` | install on this thread, returns `Guard<T>` |
 /// | `Guard<T>` | `Deref`, fire-once/`sequence`/`every`/`fires`/`verify`, `!Send` |
-/// | `Shared<T>` | `Deref`, fire-once/`every`/`fires`/`verify`, `guard()` to attach a worker |
-/// | `WorkerGuard<T>` | `Deref` + `Drop` only: the worker-thread attach, `!Send` |
 /// | `Hook` | hook-identifier type; one constant per hook (`<hook>: Hook`) |
 ///
 /// # Example
@@ -482,12 +477,11 @@ impl Drop for ExecSink {
 /// - one-shot: `g.<hook>(f)` — the hook must fire exactly once; the closure
 ///   runs at most once, on the fire whose per-hook counter was 0 and whose
 ///   sequence fell through to fire-once. Chain `.fires(n)` for a different
-///   count; both `fires` forms return the registration handle (`&Guard` or
-///   `&Shared`).
-/// - ordered (private mode only): `g.sequence(|s| { s.a(f).b(g); })` —
+///   count; both `fires` forms return the registration handle (`&Guard`).
+/// - ordered: `g.sequence(|s| { s.a(f).b(g); })` —
 ///   entries consumed in order; a gated step is `s.when(pred).<hook>(f)`.
-///   Shared mode has no `sequence`: order workers with [`Gate`] waits in
-///   the worker bodies, after `invoke!`.
+///   Cross-thread order comes from [`Gate`] waits in the worker bodies,
+///   after `invoke!`; a worker's `sequence` orders that worker's own protocol.
 /// - every fire: `g.every(|e| { e.a(f); })` — runs on every non-suppressed fire.
 /// - count only: `g.fires(<hook>, n)` — no closure.
 ///
@@ -503,26 +497,21 @@ impl Drop for ExecSink {
 /// self-deadlocks. The `every` and fire-once closures run outside the lock.
 ///
 /// Every closure that dispatch calls runs on the caller's stack inside the
-/// instrumented function: `every`, fire-once, and, in private mode, sequence
-/// steps. In shared mode none of them may wait. A blocked worker still holds
-/// the function's production locks, and another thread may need them to
-/// reach the release, the deadlock class the removed shared `sequence`
-/// created. Record traces and set gates in dispatch closures; wait in the
-/// worker body after `invoke!`.
-///
-/// In private mode a dispatch closure may wait: the private dispatcher never
+/// instrumented function: `every`, fire-once, and sequence steps. A blocking
+/// wait inside a dispatch closure is legal choreography: the dispatcher never
 /// waits on another thread (out-of-order fires panic), so a gated freeze is
-/// deliberate choreography. The wait is safe only when the thread that
-/// releases it needs nothing the blocked frame holds. The frame still owns
-/// the instrumented function's locks; [`Gate::must_wait`] with a budget
-/// bounds a mistake to a failing test, it does not remove the class.
+/// deliberate. The wait is safe only when the thread that releases it needs
+/// nothing the blocked frame holds. The frame still owns the instrumented
+/// function's locks; [`Gate::must_wait`] with a budget bounds a mistake to a
+/// failing test, it does not remove the class. Record traces and set gates in
+/// dispatch closures; wait in the worker body after `invoke!` or in a private
+/// step with a local budget.
 ///
 /// # Reserved hook names
 ///
-/// `sequence`, `every`, `fires`, `verify`, `guard`, `shared`, `with_dyn`,
-/// `when`, and `clone` collide with the fixed public surface (`clone` would
-/// shadow the generated `Clone` impl on `Shared`); `define_sp!` rejects them
-/// with a `compile_error!` naming the hook. Any other identifier — including
+/// `sequence`, `every`, `fires`, `verify`, `guard`, `with_dyn`, and `when`
+/// collide with the fixed public surface; `define_sp!` rejects them with a
+/// `compile_error!` naming the hook. Any other identifier — including
 /// `value`, `calls`, `expected`, `state`, `new`, `hook`, `f`, `NAMES`,
 /// `__SP_NAMES`, `__sp_state`, `__sp_value` — is legal: fixed fields and
 /// functions live apart from the generated ones in a private submodule and
@@ -539,16 +528,14 @@ impl Drop for ExecSink {
 /// # Threads
 ///
 /// Dispatch is per-thread: every worker that fires a hook must install the
-/// sync point on its own thread first — `shared.guard()` for a shared sync
-/// point, `guard(value)` for a per-worker private one. `Guard` and
-/// `WorkerGuard` are `!Send` — drop them on the thread that created them.
-/// See the README for the full ownership and panic/drop contract.
+/// sync point on its own thread first — `guard(value)` per worker. `Guard`
+/// is `!Send` — drop it on the thread that created it. See the README for
+/// the full ownership and panic/drop contract.
 ///
-/// Private mode is not single-*test*-only: a multithreaded test may give
-/// each worker its own private guard and order that worker's protocol with
-/// `sequence`, while gates choreograph the workers against each other.
-/// Fires from threads without an install are no-ops, so one worker's
-/// sequence never waits on another thread.
+/// A multithreaded test gives each worker its own private guard and orders
+/// that worker's protocol with `sequence`, while [`Gate`] choreographs the
+/// workers against each other. Fires from threads without an install are
+/// no-ops, so one worker's sequence never waits on another thread.
 ///
 /// Moving a guard across threads is a compile error, not a documented trap:
 ///
@@ -561,19 +548,6 @@ impl Drop for ExecSink {
 ///     drop(g); // ERROR: `Guard<u32>` cannot be sent between threads
 /// });
 /// ```
-///
-/// The worker guard is `!Send` too:
-///
-/// ```compile_fail
-/// shadow_point::define_sp! {
-///     mod shared_send_probe { ping(v: u32), }
-/// }
-/// let shared = shared_send_probe::shared(0u32);
-/// let g = shared.guard();
-/// std::thread::spawn(move || {
-///     drop(g); // ERROR: `WorkerGuard<u32>` cannot be sent between threads
-/// });
-/// ```
 #[macro_export]
 macro_rules! define_sp {
     (
@@ -584,8 +558,7 @@ macro_rules! define_sp {
     ) => {
         #[doc = concat!(
             "Sync point `", stringify!($name), "`: generated by `define_sp!`. \
-             Constructors `guard`/`shared`, a private `Guard`, a clonable \
-             `Shared` with an attach-only `WorkerGuard`, a hook constant \
+             Constructor `guard`, a private `Guard`, a hook constant \
              per declared hook. See the crate README for the full contract."
         )]
         #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
@@ -594,13 +567,12 @@ macro_rules! define_sp {
             //
             // A local macro (not exported): reject hook names that collide with
             // the fixed public surface — the registration methods
-            // (sequence/every/fires/verify), the module constructors
-            // (guard/shared), the dispatch fn (with_dyn), the gated-step
-            // constructor (when), and `clone` (shadows the generated `Clone`
-            // impl on `Shared`). All fixed machinery lives in a private
-            // submodule, with the generated per-hook fields and functions kept
-            // apart from its own fields and functions, so no other identifier
-            // can collide (D26; 9 arms).
+            // (sequence/every/fires/verify), the module constructor (guard),
+            // the dispatch fn (with_dyn), and the gated-step constructor
+            // (when). All fixed machinery lives in a private submodule, with
+            // the generated per-hook fields and functions kept apart from its
+            // own fields and functions, so no other identifier can collide
+            // (D26; 7 arms).
             const _: () = {
                 macro_rules! __sp_reject {
                     (@reject $n:literal, $w:literal) => {
@@ -618,14 +590,10 @@ macro_rules! define_sp {
                         "it collides with the generated `verify` method"); };
                     (guard) => { __sp_reject!(@reject "guard",
                         "it collides with the module constructor `guard` in the value namespace"); };
-                    (shared) => { __sp_reject!(@reject "shared",
-                        "it collides with the module constructor `shared` in the value namespace"); };
                     (with_dyn) => { __sp_reject!(@reject "with_dyn",
                         "it collides with the module dispatch fn `with_dyn` in the value namespace"); };
                     (when) => { __sp_reject!(@reject "when",
                         "it collides with the gated-step constructor `Seq::when`"); };
-                    (clone) => { __sp_reject!(@reject "clone",
-                        "it collides with the generated `Clone` impl on `Shared` (a hook named `clone` would shadow `Shared::clone`)"); };
                     ($other:ident) => {};
                 }
                 $( __sp_reject!($method); )+
@@ -839,7 +807,6 @@ macro_rules! define_sp {
                     __sp_sequence: ::std::sync::Mutex<
                         ::std::collections::VecDeque<SeqAction<T>>
                     >,
-                    __sp_shared: bool,
                     __sp_installed_at: &'static std::panic::Location<'static>,
                     __sp_calls: ::std::vec::Vec<::std::sync::atomic::AtomicUsize>,
                     __sp_expected: ::std::sync::Mutex<::std::vec::Vec<Option<usize>>>,
@@ -857,7 +824,6 @@ macro_rules! define_sp {
 
                 fn new_state<T: Send + Sync + 'static>(
                     value: T,
-                    shared: bool,
                     installed_at: &'static std::panic::Location<'static>,
                 ) -> State<T> {
                     let n = [$( stringify!($method) ),+].len();
@@ -870,7 +836,6 @@ macro_rules! define_sp {
                             __sp_sequence: ::std::sync::Mutex::new(
                                 ::std::collections::VecDeque::new()
                             ),
-                            __sp_shared: shared,
                             __sp_installed_at: installed_at,
                             __sp_calls: (0..n)
                                 .map(|_| ::std::sync::atomic::AtomicUsize::new(0))
@@ -937,14 +902,6 @@ macro_rules! define_sp {
                 fn build_sequence<T: Send + Sync + 'static>(
                     st: &State<T>, f: impl FnOnce(&mut Seq<T>),
                 ) {
-                    // Sequences are private-mode only: `Shared` has no
-                    // `sequence` and `WorkerGuard` no registration, so this
-                    // is unreachable for shared state by type. The assert
-                    // guards the private seam itself.
-                    assert!(
-                        !st.__sp_fixed.__sp_shared,
-                        "shadow-point: sequence is private-mode only"
-                    );
                     let mut builder = Seq {
                         seq: ::std::collections::VecDeque::new(),
                     };
@@ -997,7 +954,6 @@ macro_rules! define_sp {
                         return;
                     }
                     let unwinding = std::thread::panicking();
-                    let shared = st.__sp_fixed.__sp_shared;
                     let seq = st
                         .__sp_fixed.__sp_sequence
                         .lock()
@@ -1005,14 +961,13 @@ macro_rules! define_sp {
                     if !seq.is_empty() {
                         let message = format!(
                             "sync point sequence not fully consumed: \
-                             {} entr{} remaining [{}] ({}installed at {})",
+                             {} entr{} remaining [{}] (installed at {})",
                             seq.len(),
                             if seq.len() == 1 { "y" } else { "ies" },
                             seq.iter()
                                 .map(|e| e.name())
                                 .collect::<Vec<_>>()
                                 .join(", "),
-                            if shared { "shared, " } else { "" },
                             st.__sp_fixed.__sp_installed_at,
                         );
                         drop(seq);
@@ -1033,9 +988,8 @@ macro_rules! define_sp {
                         }
                         let message = format!(
                             "sync point hook `{}` fired {actual} \
-                             time(s), expected {expected} ({}installed at {})",
+                             time(s), expected {expected} (installed at {})",
                             __SP_NAMES[i],
-                            if shared { "shared, " } else { "" },
                             st.__sp_fixed.__sp_installed_at,
                         );
                         report_mismatch(st, unwinding, &message, || {
@@ -1127,11 +1081,11 @@ macro_rules! define_sp {
                                         if !has_more {
                                             (false, None)
                                         } else {
-                                            // Private mode only: shared state never
-                                            // holds sequence entries (no registration
-                                            // path), so an out-of-order fire is a
-                                            // one-thread ordering violation — panic,
-                                            // never park.
+                                            // One mode: each private guard
+                                            // owns its own sequence, so an
+                                            // out-of-order fire is a
+                                            // one-thread ordering violation —
+                                            // panic, never park.
                                             panic!(
                                                 "sync point ordering violation: \
                                                  expected `{}` next but `{}` fired",
@@ -1297,129 +1251,7 @@ macro_rules! define_sp {
                     }
                 }
 
-                // ── Shared ───────────────────────────────────────────
-
-                /// A sync point shared across threads. `Clone` gives each
-                /// worker its own handle; `guard()` attaches the calling
-                /// thread. Registration (`every`, `fires`, fire-once) and
-                /// `verify` live here, on the shared handle — the worker
-                /// guard is attach-only. There is no cross-thread
-                /// `sequence`: order workers with `Gate`
-                /// waits in the worker bodies, outside dispatch.
-                #[clippy::has_significant_drop]
-                #[must_use]
-                pub struct Shared<T: Send + Sync + 'static> {
-                    owner: ::std::sync::Arc<Owner<T>>,
-                }
-
-                impl<T: Send + Sync + 'static> Clone for Shared<T> {
-                    fn clone(&self) -> Self {
-                        Self { owner: ::std::sync::Arc::clone(&self.owner) }
-                    }
-                }
-
-                fn shared_from_owner<T: Send + Sync + 'static>(
-                    owner: ::std::sync::Arc<Owner<T>>,
-                ) -> Shared<T> {
-                    Shared { owner }
-                }
-
-                fn shared_state<T: Send + Sync + 'static>(s: &Shared<T>) -> &State<T> {
-                    owner_state(&s.owner)
-                }
-
-                impl<T: Send + Sync + 'static> Shared<T> {
-                    /// Attach this sync point to the calling thread,
-                    /// returning an attach-only worker guard that restores
-                    /// the previous install on drop. Nested guards of the
-                    /// same sync point must be dropped in reverse order:
-                    /// dropping an outer guard first detaches the inner one,
-                    /// whose fires become no-ops (see [`Guard`] for the
-                    /// full wrong-order consequence).
-                    pub fn guard(&self) -> WorkerGuard<T> {
-                        attach_worker(::std::sync::Arc::clone(&self.owner))
-                    }
-
-                    $(
-                        /// Register a fire-once closure for this hook; chain
-                        /// `.fires(n)` for a different count.
-                        pub fn $method(
-                            &self,
-                            f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
-                        ) -> Expect<'_, T, Self> {
-                            __sp_hooks::$method(shared_state(self), f);
-                            Expect::new(self, shared_state(self), Hook::$method)
-                        }
-                    )+
-
-                    /// Register closures that fire on every invocation.
-                    pub fn every(&self, f: impl FnOnce(&mut Every<T>)) {
-                        set_every(shared_state(self), f);
-                    }
-
-                    /// Assert that `hook` fires exactly `n` times in total.
-                    pub fn fires(&self, hook: Hook, n: usize) -> &Self {
-                        set_expected(shared_state(self), hook, n);
-                        self
-                    }
-
-                    /// Run the drop assertions now (after joining workers).
-                    ///
-                    /// On failure the state is marked reported: drop then
-                    /// skips the remaining assertions and the guarded value's
-                    /// destructor, so this call owns the diagnostic.
-                    #[track_caller]
-                    pub fn verify(&self) {
-                        assert_fires(shared_state(self), false);
-                    }
-                }
-
-                impl<T: Send + Sync + 'static> std::ops::Deref for Shared<T> {
-                    type Target = T;
-                    fn deref(&self) -> &T {
-                        &shared_state(self).__sp_fixed.__sp_value
-                    }
-                }
-
-                // ── WorkerGuard (shared-mode attach) ─────────────────
-
-                /// RAII TLS install of a shared sync point: attach-only.
-                /// `Deref` reaches the guarded value; `Drop` restores the
-                /// previous install. Holds a strong handle, so the shared
-                /// state and its drop assertions outlive every worker that
-                /// installed it. Registration (`every`, `fires`, fire-once)
-                /// and `verify` live on [`Shared`]; there is no `sequence`
-                /// here — cross-thread order comes from `Gate`
-                /// waits in the worker bodies. `!Send`: drop it on the
-                /// thread that created it.
-                #[clippy::has_significant_drop]
-                #[must_use]
-                pub struct WorkerGuard<T: Send + Sync + 'static> {
-                    owner: ::std::sync::Arc<Owner<T>>,
-                    old: Option<::std::sync::Arc<dyn Hooks>>,
-                    _not_send: ::std::marker::PhantomData<*const ()>,
-                }
-
-                impl<T: Send + Sync + 'static> std::ops::Deref for WorkerGuard<T> {
-                    type Target = T;
-                    fn deref(&self) -> &T {
-                        &owner_state(&self.owner).__sp_fixed.__sp_value
-                    }
-                }
-
-                impl<T: Send + Sync + 'static> Drop for WorkerGuard<T> {
-                    fn drop(&mut self) {
-                        // Restore TLS first, with the borrow dropped before
-                        // the Arc<Owner> field releases — the assertion (in
-                        // Owner::drop, on the last Arc) then runs after every
-                        // TLS install is gone.
-                        TL.with(|c| {
-                            *(c.borrow_mut()) = self.old.take()
-                        });
-                    }
-                }
-
-                // ── TLS attach (shared by both constructors) ─────────
+                // ── TLS attach ───────────────────────────────────────
 
                 fn install_tls<T: Send + Sync + 'static>(
                     owner: &::std::sync::Arc<Owner<T>>,
@@ -1441,13 +1273,6 @@ macro_rules! define_sp {
                     Guard { owner, old, _not_send: ::std::marker::PhantomData }
                 }
 
-                fn attach_worker<T: Send + Sync + 'static>(
-                    owner: ::std::sync::Arc<Owner<T>>,
-                ) -> WorkerGuard<T> {
-                    let old = install_tls(&owner);
-                    WorkerGuard { owner, old, _not_send: ::std::marker::PhantomData }
-                }
-
                 // Constructors live here, not in the public module: the
                 // parameter `value` would otherwise collide with a hook
                 // constant named `value` in the module's value namespace.
@@ -1455,28 +1280,16 @@ macro_rules! define_sp {
                 #[track_caller]
                 pub fn guard<T: Send + Sync + 'static>(value: T) -> Guard<T> {
                     let owner = ::std::sync::Arc::new(new_owner(::std::sync::Arc::new(
-                        new_state(value, false, std::panic::Location::caller()),
+                        new_state(value, std::panic::Location::caller()),
                     )));
                     attach(owner)
-                }
-
-                /// Create a sync point shared across threads.
-                #[track_caller]
-                pub fn shared<T: Send + Sync + 'static>(value: T) -> Shared<T> {
-                    shared_from_owner(::std::sync::Arc::new(new_owner(
-                        ::std::sync::Arc::new(new_state(
-                            value,
-                            true,
-                            std::panic::Location::caller(),
-                        )),
-                    )))
                 }
             }
 
             // ── Public surface (re-exports + constructors) ───────────
 
             #[doc(inline)]
-            pub use __sp_impl::{guard, shared, Guard, Shared, WorkerGuard};
+            pub use __sp_impl::{guard, Guard};
             #[doc(hidden)]
             pub use __sp_impl::{with_dyn, Every, Expect, Seq, When};
         }

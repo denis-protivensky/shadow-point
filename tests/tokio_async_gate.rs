@@ -33,18 +33,17 @@ fn current_thread_body_waits_on_future_fires() {
     let rt = Builder::new_current_thread().build().unwrap();
     let gate = TokioAsyncGate::new();
     let seen = std::sync::Arc::new(AtomicU32::new(0));
-    let shared = ag::ag_sp::shared(());
-    let g = gate.clone();
+    let g = ag::ag_sp::guard(());
+    let fire = gate.clone();
     let s = seen.clone();
-    shared.every(|e| {
+    g.every(|e| {
         e.a(move |(), _| {
-            g.fire();
+            fire.fire();
             s.fetch_add(1, Ordering::SeqCst);
         });
     });
-    let bound = shared.clone();
+    g.fires(ag::ag_sp::a, 2);
     rt.block_on(async move {
-        let _guard = bound.guard();
         gate.wait_at_least(0).await; // n == 0 returns immediately
         let waiting = gate.wait_at_least(2);
         // `spawn`, not `join!`: keeps the `macros` feature (and its
@@ -58,12 +57,12 @@ fn current_thread_body_waits_on_future_fires() {
         firing.await.unwrap();
         assert_eq!(gate.count(), 2);
     });
-    drop(shared);
+    drop(g);
     assert_eq!(seen.load(Ordering::SeqCst), 2);
 }
 
-/// Worker side runs on a blocking thread (per-thread guard + `install_shared`,
-/// the only sound install for off-runtime threads), test body waits async.
+/// Worker side runs on a blocking thread (a per-thread private guard, the
+/// only sound install for off-runtime threads), test body waits async.
 /// The sleep makes both fires land BEFORE the waiter's first poll, so this
 /// deterministically covers the fire-before-`enable()` window: the count
 /// check after `enable()` must see the landed fires and return without
@@ -74,14 +73,14 @@ fn current_thread_body_waits_on_future_fires() {
 fn spawn_blocking_worker_fires_async_waiter() {
     let rt = Builder::new_current_thread().build().unwrap();
     let gate = TokioAsyncGate::new();
-    let shared = ag::ag_sp::shared(());
-    let g = gate.clone();
-    shared.every(|e| {
-        e.b(move |(), _| g.fire());
-    });
-    let worker_shared = shared.clone();
+    let fire = gate.clone();
     let worker = rt.spawn_blocking(move || {
-        let _guard = worker_shared.guard();
+        let guard = ag::ag_sp::guard(());
+        guard.every(|e| {
+            let fire = fire.clone();
+            e.b(move |(), _| fire.fire());
+        });
+        guard.fires(ag::ag_sp::b, 2);
         shadow_point::invoke!(ag::ag_sp, b(0));
         shadow_point::invoke!(ag::ag_sp, b(1));
     });
@@ -90,6 +89,5 @@ fn spawn_blocking_worker_fires_async_waiter() {
         gate.wait_at_least(2).await;
         worker.await.unwrap();
     });
-    drop(shared);
     assert_eq!(gate.count(), 2);
 }

@@ -343,19 +343,6 @@ fn failed_verify_owns_the_unreached_mismatch() {
     );
 }
 
-#[test]
-fn shared_last_arc_assertion_does_not_abort_while_unwinding() {
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let shared = single::single_sp::shared(());
-        shared.fires(single::single_sp::a, 1); // never fired: verdict at the last Arc
-        let _inst = shared.guard();
-        // Unwind drops `_inst` (one Arc clone) and then `shared` — the
-        // last reference — so the shared assertion fires mid-unwinding.
-        panic!("the test's own failure");
-    }));
-    assert!(outcome.is_err(), "the scenario failed as designed");
-}
-
 /// The clean-exit path keeps its teeth: a test that ends with an
 /// unconsumed sequence still fails, on a thread that is not unwinding.
 /// Pinned beside the unwind tests because both readings of `panicking()`
@@ -1068,7 +1055,7 @@ fn invoke_is_an_expression() {
 /// in `__sp_hooks` — so a hook may carry any of those names. This sync point
 /// declares one hook per fixed internal name (fields, free functions, types,
 /// the name table); compiling it is half the assertion, firing every hook
-/// through `invoke!` and verifying the counts is the other half. The 9
+/// through `invoke!` and verifying the counts is the other half. The 7
 /// reserved public names are pinned by `ci/reserved-name` instead.
 mod free_names {
     shadow_point::define_sp! {
@@ -1080,7 +1067,6 @@ mod free_names {
             fixed(),
             __sp_every(),
             __sp_sequence(),
-            __sp_shared(),
             __sp_installed_at(),
             __sp_calls(),
             __sp_expected(),
@@ -1090,11 +1076,8 @@ mod free_names {
             new_owner(),
             owner_state(),
             guard_state(),
-            shared_state(),
-            shared_from_owner(),
             install_tls(),
             attach(),
-            attach_worker(),
             bump_call(),
             set_expected(),
             set_expected_if_unset(),
@@ -1111,8 +1094,6 @@ mod free_names {
             StateFixed(),
             Owner(),
             Guard(),
-            Shared(),
-            WorkerGuard(),
             Hooks(),
             Default(),
             TL(),
@@ -1154,7 +1135,6 @@ fn machinery_names_are_legal_hook_names() {
         fixed,
         __sp_every,
         __sp_sequence,
-        __sp_shared,
         __sp_installed_at,
         __sp_calls,
         __sp_expected,
@@ -1163,11 +1143,8 @@ fn machinery_names_are_legal_hook_names() {
         new_owner,
         owner_state,
         guard_state,
-        shared_state,
-        shared_from_owner,
         install_tls,
         attach,
-        attach_worker,
         bump_call,
         set_expected,
         set_expected_if_unset,
@@ -1182,8 +1159,6 @@ fn machinery_names_are_legal_hook_names() {
         StateFixed,
         Owner,
         Guard,
-        Shared,
-        WorkerGuard,
         Hooks,
         Default,
         TL,
@@ -1200,6 +1175,6 @@ fn machinery_names_are_legal_hook_names() {
         calls,
         expected,
     );
-    assert_eq!(fires.get(), 49, "every machinery-named hook dispatched");
+    assert_eq!(fires.get(), 43, "every machinery-named hook dispatched");
     g.verify();
 }

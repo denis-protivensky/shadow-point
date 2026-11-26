@@ -12,16 +12,13 @@ linearization point: the instant it takes effect. Its closure runs the
 competing operation right there, on the same value. One test, one trace,
 the same result every run.
 
-The private mode gets that determinism by giving up parallelism, not
-concurrency: two logical actors, the operation under test and the interferer,
-alternate at the hook on one real thread. That is also why the instrumented
-type must use *interior mutability*: hooks receive `&T`, never `&mut T`, and
-both actors mutate through shared references. The shared mode adds real
-threads: workers race for real while the sync point observes. `every`
-records the trace and `fires` counts; `Gate` rendezvous in worker bodies pin
-the chosen interleaving down.
-
-In production, hooks compile to nothing.
+The guard is private to the thread that installs it. On one thread the
+operation under test and the interferer alternate at the hook — concurrency
+without parallelism; on several threads every firing worker installs its
+own guard and `Gate` rendezvous in the worker bodies pin the chosen order.
+Hooks receive `&T`, never `&mut T`, so the instrumented type must use
+interior mutability: both actors mutate through shared references. In
+production, hooks compile to nothing.
 
 ## Quick start
 
@@ -47,14 +44,15 @@ shadow_point::define_sp! {
 }
 ```
 
-`mod register_sp` generates a module with fixed names: the constructors
-`guard`/`shared`, the guard types, a hook constant per hook, and the
+`mod register_sp` generates a module with fixed names: the `guard`
+constructor, the private `Guard` type, a hook constant per hook, and the
 registration builders (full surface: `define_sp!` rustdoc). Distinct module
-names can share a file.
+names can share a file. A guard is thread-local; there is no central handle
+to install, clone, or share.
 
 ### 2. Fire at the linearization point
 
-```rust,no_run
+```rust,ignore
 use std::sync::atomic::{AtomicU32, Ordering};
 struct Register(AtomicU32);
 
@@ -96,75 +94,61 @@ fn the_hook_runs_before_the_store() {
 ```
 
 *Illustrative snippet, not intended for real code as written: it continues
-steps 1–2. The complete runnable file is `examples/register_private.rs`.*
+steps 1–2. The complete runnable files are in `examples/`.*
 
 The guard derefs to `&T`: `guard.store(…)` and `guard.0` are the guarded
 value's own API. A nested fire of the same sync point on the same thread
 is suppressed — instrumented code inside a hook does not recurse.
 
-The shared-mode equivalent is the runnable `examples/register_shared.rs`
-(next section).
+## Using it across threads
 
-## The two install modes
+A guard is private to the thread that installs it: a guard on the test
+thread does not see worker fires, and dispatch is per-thread. Give every
+firing worker its own `register_sp::guard(value)` on the worker thread,
+register what that worker expects, then fire.
 
-The quick start above is the private mode: one `Guard<T>` on one thread,
-where the operation under test and the interferer alternate at the hook —
-concurrency without parallelism. An out-of-order fire panics if a later
-sequence entry still expects that hook.
+For a production object shared by threads, guard an `Arc<T>` clone in each
+worker: the `Arc` is the same object; each guard owns that worker's
+instrumentation. `every` records the worker's trace, `fires` counts its
+fires, `sequence` pins that worker's own protocol. Gates live in the worker
+bodies after `invoke!`; a dispatch closure (`every`, fire-once) records and
+sets gates, never waits — a blocked dispatch would hold the instrumented
+function's production locks. A blocking wait inside a private dispatch
+closure (a `sequence` step) is legal only when the thread that releases it
+needs nothing the blocked frame holds; `must_wait` with a test-local budget
+bounds a mistake to a failing test rather than removing the deadlock class.
 
-There is also shared mode for real threads. `register_sp::shared(value)`
-returns a clonable `Shared<T>` (`Clone`, `Send + Sync`); every firing thread
-calls `shared.guard()` first, and the attach-only `WorkerGuard<T>` (`Deref` +
-`Drop` only) installs dispatch on that thread and keeps the state alive.
-Register on the `Shared` handle with `every`, `fires`, the per-hook methods,
-and `verify`. Shared mode observes; it does not schedule: dispatch closures
-run inside the instrumented function, so none may wait — they record traces
-and set gates, and worker bodies order themselves with `Gate` waits
-(`must_wait`, a test-local budget) after `invoke!`.
+The lost-update pin is the canonical shape: the victim reads, the hook
+freezes it, the racer writes and releases, the victim's stale write clobbers
+the racer. One test, two threads, a `Gate`; the final value pins the race
+(`lost_update_is_pinned_by_a_frozen_private_step` in
+`tests/cross_thread.rs`).
 
-Both modes assert at the last owner's drop — in shared mode, after the
-workers are joined. `Guard` and `WorkerGuard` are `!Send`: drop them on the
-thread that created them; moving one across threads is a compile error,
-not a runtime trap.
+A guard is `!Send`: drop it on the thread that created it; moving one
+across threads is a compile error, not a runtime trap. Nested guards of one
+sync point drop in reverse order; dropping an outer guard first detaches
+the inner one, whose fires become no-ops.
 
-Pick the mode by what the test asserts: the order of steps on one thread,
-or each worker's own local contract, calls for a private guard — one per
-worker in the latter case. The cross-thread trace or total counts call for
-one shared sync point with a `guard()` on every firing thread. The common
-mistake is installing a guard on the test thread while hooks fire on
-workers: dispatch is per-thread, so those fires are no-ops — only the
-victim needs instrumentation.
+## Examples
 
-### Examples
-
-Two runnable examples sit in `examples/`; both are test targets, one per
-mode:
+Two runnable examples sit in `examples/`:
 
 - `examples/register_private.rs` — an `AtomicU32` register with a `store`
   and a CAS-loop `increment`. The hook shadows the rival store; the CAS
   retries once, so the hook fires twice while the one-shot closure runs once
   (`.fires(2)`).
-- `examples/register_shared.rs` — a register through `shared`; two writer
-  threads, `every` records the trace and a `Gate` proves that one writer's
-  store completed before the other proceeds.
+- `examples/register_writers.rs` — two writers share one `Arc<Register>`;
+  each thread installs its own private guard, `every` records the trace,
+  and a `Gate` proves that one writer's store completed before the other
+  proceeds.
 
 ```sh
 cargo test --example register_private
-cargo test --example register_shared
+cargo test --example register_writers
 ```
 
 `cargo test` alone does not run example tests; use `--examples` or
 `--all-targets` in CI.
-
-### Private guards in a multithreaded test
-
-Give each worker its own private guard, pin its protocol with `sequence`,
-and let gates choreograph the workers. A blocking wait inside a private
-dispatch closure is legitimate only when the releasing thread needs nothing
-the blocked frame holds (the frame owns the instrumented function's locks);
-`must_wait` with a test-local budget bounds a mistake to a failing test.
-Pinned pattern: `private_guard_on_a_worker_orders_its_own_protocol` in
-`tests/cross_thread.rs`; wait rule: `define_sp!` rustdoc.
 
 ## Cheat sheet
 
@@ -176,9 +160,8 @@ Pinned pattern: `private_guard_on_a_worker_orders_its_own_protocol` in
 | count only | `guard.fires(register_sp::a, n)` |
 | assert now | `guard.verify()` — same checks as drop, at the call site |
 | every fire | `guard.every(\|e\| { e.<name>(f); })` |
-| ordered (private only) | `guard.sequence(\|s\| { s.a(f).b(g); })` |
+| ordered (per worker) | `guard.sequence(\|s\| { s.a(f).b(g); })` |
 | conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires the first time `pred` passes. `pred` runs under the sequence lock: keep it a pure check (a blocking predicate can deadlock the test) |
-| shared | `register_sp::shared(value)`, then `shared.guard()` per firing thread (attach-only `WorkerGuard`); register on the `Shared` handle |
 | cross-thread order | `Gate` in the worker bodies after `invoke!`; dispatch closures (`every`, fire-once) record traces and set gates, never wait |
 
 `<name>` is a hook declared in `define_sp!`. `.fires(n)` counts hook fires,
@@ -188,9 +171,8 @@ operation (the CAS loop in the private example) can fire twice with one
 closure run — `.fires(2)` pins that. Without a chain, registration asserts
 exactly one fire: a missing fire *and* an extra one both fail.
 
-In shared mode the count is the total across the whole shared state, not
-one worker's: a hook that fires once per worker needs `.fires(workers)`. A
-second fire-once registration replaces the closure without resetting the
+Counts are per guard: each worker's guard sees only its own thread's fires.
+A second fire-once registration replaces the closure without resetting the
 count; an explicit `.fires(n)` or `fires(hook, n)` wins in either order.
 
 Every sequence entry is mandatory: an entry left unconsumed at drop fails
@@ -201,25 +183,28 @@ to allow "may or may not fire", split the test. There is no `optional`.
 
 0.5.0 is a breaking release: the namespace and the types change, the 0.4.0
 deprecations are removed, and the `paste` dependency is dropped. Counting
-semantics are unchanged; shared mode becomes observe-only. The full name
-map is in the CHANGELOG.
+semantics are unchanged; there is one install mode, the private `Guard`.
+The full name map is in the CHANGELOG.
 
 - Declaration: `define_sp! { pub prefix Register { … } }` →
   `define_sp! { pub mod register_sp { … } }`. The generated type names are
-  gone; the surface is `guard`, `shared`, `Guard`, `Shared`, `WorkerGuard`,
-  `Hook`, and a hook constant per hook.
-- Constructors: `RegisterSp::install_guard(v)` → `register_sp::guard(v)`;
-  `RegisterSp::install_shared(v)` → `register_sp::shared(v)` — `Shared<T>`
-  is `Clone`, hand clones to workers, no `Arc` in the signature;
-  `shared.install()` → `shared.guard()` (attach-only `WorkerGuard<T>`,
-  `Deref` + `Drop`). `Guard<T>` keeps `sequence`; both guard types are
-  `!Send`.
+  gone; the surface is `guard`, `Guard`, `Hook`, and a hook constant per
+  hook.
+- Constructors: `RegisterSp::install_guard(v)` → `register_sp::guard(v)`.
+  `install_shared`/`shared(v)`/`Shared<T>`/`WorkerGuard<T>`/`shared.guard()`
+  are removed: give every firing thread its own private guard (see "Using
+  it across threads"). The old guard types were `!Send`; the new
+  `Guard<T>` is `!Send`.
+- Shared-mode users: the old `Shared` handle's `every`/`fires`/`verify`
+  registrations become per-worker registrations on each guard; counts are
+  per guard, not a total across the shared state; `sequence` is per guard.
+  There is no central registration to move.
 - Shared `sequence` and parking are gone (parking inside dispatch could
   deadlock on the production locks the parked frame holds). Gates in the
-  worker bodies are the replacement — see `examples/register_shared.rs`
-  and "The two install modes" above. `park_timeout()` and
-  `SP_PARK_TIMEOUT_MS` are gone with it — a gate-wait budget is test
-  policy: a local `Duration` constant passed to `must_wait`/`wait_timeout`.
+  worker bodies are the replacement — see `examples/register_writers.rs`
+  and "Using it across threads". `park_timeout()` and `SP_PARK_TIMEOUT_MS`
+  are gone with it — a gate-wait budget is test policy: a local `Duration`
+  constant passed to `must_wait`/`wait_timeout`.
 - `invoke!(RegisterSp, before_store(v))` →
   `invoke!(register_sp, before_store(v))`; it is now a block expression
   (works as a closure body / block tail / `let` initializer). Hook
@@ -232,16 +217,13 @@ map is in the CHANGELOG.
 - Hook arguments must be `Copy` (rejected at the declaration now); declare
   a reference or raw pointer when the call site keeps the value. Reserved
   hook names are the fixed surface (`sequence`, `every`, `fires`, `verify`,
-  `guard`, `shared`, `with_dyn`, `when`, `clone`); any other identifier is
-  legal. Details: `define_sp!` rustdoc, "Hook arguments" / "Reserved hook
-  names".
+  `guard`, `with_dyn`, `when`); `shared` and `clone` are no longer
+  reserved. Details: `define_sp!` rustdoc, "Hook arguments" / "Reserved
+  hook names".
 - Ownership: assertions and reclamation run at the last owner's drop;
   nested guards of one sync point drop in reverse order (dropping an outer
   guard first detaches the inner one, whose fires become no-ops). See
   "Reclamation and ownership" below.
-
-Registration calls now live on `Shared`: `shared.guard().<name>(f)` →
-`shared.<name>(f)`, and likewise for `every`, `fires`, and `verify`.
 
 ## FAQ
 
@@ -267,7 +249,7 @@ running the competing operation before injecting. Outside those tests
 `FAILPOINTS`/`fail::cfg`) use `fail`; hook dispatch is compiled only under
 `cfg(test)`. Give the hook a test-only flag and check it at the site:
 
-```rust,no_run
+```rust,ignore
 struct Full;
 
 fn alloc(capacity: usize) -> Result<(), Full> {
@@ -284,11 +266,11 @@ fn alloc(capacity: usize) -> Result<(), Full> {
 }
 ```
 
-The flag is per call, so `Cell` is enough in private and shared mode; the
-hook writes it, the site decides what to return. Register with `every` when
-the site may fire more than once, or when the flag should depend on the
-call's arguments. Under `[dev-dependencies]`, wrap the block in a seam
-macro (see `invoke!`'s "Dev-dependency seam").
+The flag is per call; `Cell` is enough because the firing thread's guard is
+private to it. The hook writes the flag, the site decides what to return.
+Register with `every` when the site may fire more than once, or when the
+flag should depend on the call's arguments. Under `[dev-dependencies]`,
+wrap the block in a seam macro (see `invoke!`'s "Dev-dependency seam").
 
 ### Why not Miri/TSan or a simulator?
 
@@ -298,13 +280,13 @@ production API alone and scripts one chosen interleaving inside them.
 
 ### Tokio and thread-locals
 
-The dispatch is per-thread; every firing worker attaches the sync point on
-its own thread. With the `tokio-async` feature, `TokioAsyncGate` lets an
-async test body wait on fires without parking the executor — parking holds
-production locks, fatal on a `current_thread` runtime. Dispatch closures
-stay non-blocking (`TokioAsyncGate::fire` is); await milestones in the test
-body. Synchronous workers wait on `Gate` in the worker body after
-`invoke!`, never inside a shared-mode dispatch closure.
+The dispatch is per-thread; every firing worker installs its own private
+guard on its own thread. With the `tokio-async` feature, `TokioAsyncGate`
+lets an async test body wait on fires without parking the executor —
+parking holds production locks, fatal on a `current_thread` runtime.
+Dispatch closures stay non-blocking (`TokioAsyncGate::fire` is); await
+milestones in the test body. Synchronous workers wait on `Gate` in the
+worker body after `invoke!`, never inside a dispatch closure.
 
 ### Keeping shadow-point out of production builds
 
@@ -322,19 +304,18 @@ form does not transfer to a consumer's `src/` under `[dev-dependencies]`.
 
 ### Reclamation and ownership
 
-`guard`/`shared` own the state through an `Arc`; the last owner releases it,
-and the guarded value's `Drop` runs there, after the sync-point assertions.
-Both modes share one assertion point: `drop(shared)` while a guard is live
-gives no verdict, and the last owner may be a guard, not the `Shared`
-handle. A failed `verify()` owns the diagnostic: drop then skips the
-remaining assertions and the value's destructor. On a thread that is
-already unwinding the state is deliberately leaked, so a panicking
-destructor cannot abort the test binary. Captures of an `every` closure or
-an unfired fire-once are freed with the state; a fire-once that did fire is
-dropped when its slot is taken. A destructor assertion inside `T::drop`
-runs at the last-owner drop, so a scenario that abandoned entries can fail
-there — a finding, not a regression. `Weak` and flag shapes still control
-the destructor's moment.
+`guard` owns the state through an `Arc`; the last owner releases it, and
+the guarded value's `Drop` runs there, after the sync-point assertions.
+`drop(guard)` while an inner guard is live gives no verdict, and the last
+owner may be the inner guard. A failed `verify()` owns the diagnostic:
+drop then skips the remaining assertions and the value's destructor. On a
+thread that is already unwinding the state is deliberately leaked, so a
+panicking destructor cannot abort the test binary. Captures of an `every`
+closure or an unfired fire-once are freed with the state; a fire-once that
+did fire is dropped when its slot is taken. A destructor assertion inside
+`T::drop` runs at the last-owner drop, so a scenario that abandoned
+entries can fail there — a finding, not a regression. `Weak` and flag
+shapes still control the destructor's moment.
 
 The guarded type must be `Send + Sync + 'static` and mutate through `&self`.
 Hooks are side-effect only: they cannot change what the instrumented

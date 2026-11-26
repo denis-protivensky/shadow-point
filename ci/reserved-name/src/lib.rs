@@ -4,9 +4,9 @@
 //! expansion also produces duplicate definitions. The CI job checks that the
 //! friendly messages are present, not merely that this crate fails.
 //!
-//! Covers the 0.5.0 reserved list (D26): the 9 fixed public names
-//! (registration methods, module constructors, dispatch fn, gated-step
-//! constructor, and `clone`). Plain names like `value`/`state`/`new`/`f`/
+//! Covers the 0.5.0 reserved list (D26): the 7 fixed public names
+//! (registration methods, module constructor, dispatch fn, and gated-step
+//! constructor). Plain names like `value`/`state`/`new`/`f`/`clone`/
 //! `NAMES`/`__SP_NAMES`/`__sp_state`/`__sp_value` are legal hook names (the
 //! fixed fields and functions live apart from the generated ones in a
 //! private submodule) and are NOT listed here.
@@ -18,9 +18,7 @@ shadow_point::define_sp! {
         fires(),
         verify(),
         guard(),
-        shared(),
         with_dyn(),
         when(),
-        clone(),
     }
 }

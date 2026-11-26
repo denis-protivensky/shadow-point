@@ -74,7 +74,7 @@ jobs:
             echo "::error::reserved-name fixture compiled"
             exit 1
           fi
-          for name in sequence every fires verify guard shared with_dyn when clone; do
+          for name in sequence every fires verify guard with_dyn when; do
             grep -F "\`$name\` is a reserved hook name" reserved-name.err
           done
 
