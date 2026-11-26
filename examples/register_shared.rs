@@ -1,10 +1,10 @@
 //! Shared-mode example: one sync point across two writer threads.
 //!
-//! T1 stores 1 and its `after_store` closure sets a `Gate`; T2 waits on that
-//! gate before storing 2. The `sequence` orders T1's before/after steps, and
-//! the `every` closures record T2's fires. The final log and value are
-//! deterministic: 1 is stored before 2, and the gate proves T1's `after_store`
-//! closure (with the store already done) ran before T2 proceeded.
+//! The shared sync point observes: `every` closures record both writers'
+//! fires and set a `Gate` when T1's store has happened; T2 waits on that
+//! gate in its worker body, outside dispatch, before storing 2. The final
+//! log and value are deterministic: 1 is stored before 2, and the gate
+//! proves T1's store completed before T2 proceeded.
 //!
 //! Run with:
 //!
@@ -49,8 +49,13 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shadow_point::{park_timeout, Gate};
+    use shadow_point::Gate;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// The wait budget for this example's choreography — a test-local
+    /// policy, generous enough for a loaded machine.
+    const GATE_TIMEOUT: Duration = Duration::from_secs(10);
 
     type Log = Arc<Mutex<Vec<&'static str>>>;
 
@@ -60,35 +65,31 @@ mod tests {
         let stored = Arc::new(Gate::new());
 
         let shared = register_sp::shared(Register::new(0));
-        shared.sequence(|s| {
-            s.before_store({
-                let log = log.clone();
-                move |_, _| log.lock().unwrap().push("before 1")
+        // `every` only records and sets gates — never waits: a blocked
+        // dispatch would block the writer inside `store`, holding whatever
+        // production locks the instrumented function holds.
+        shared.every(|e| {
+            let log_before = log.clone();
+            e.before_store(move |_, value| {
+                log_before
+                    .lock()
+                    .unwrap()
+                    .push(if value == 1 { "before 1" } else { "before 2" });
             });
-            s.after_store({
-                let (log, stored) = (log.clone(), stored.clone());
-                move |_, _| {
-                    log.lock().unwrap().push("after 1");
+            let (log_after, stored) = (log.clone(), stored.clone());
+            e.after_store(move |_, value| {
+                log_after
+                    .lock()
+                    .unwrap()
+                    .push(if value == 1 { "after 1" } else { "after 2" });
+                if value == 1 {
                     // T1's store has happened; release T2.
                     stored.set();
                 }
             });
         });
-        shared.every(|e| {
-            let log_before = log.clone();
-            // `every` runs for both writers; record only T2's fires.
-            e.before_store(move |_, value| {
-                if value == 2 {
-                    log_before.lock().unwrap().push("before 2");
-                }
-            });
-            let log_after = log.clone();
-            e.after_store(move |_, value| {
-                if value == 2 {
-                    log_after.lock().unwrap().push("after 2");
-                }
-            });
-        });
+        shared.fires(register_sp::before_store, 2);
+        shared.fires(register_sp::after_store, 2);
 
         let s1 = shared.clone();
         let t1 = std::thread::spawn(move || {
@@ -98,9 +99,10 @@ mod tests {
         let s2 = shared.clone();
         let t2 = std::thread::spawn(move || {
             let _g = s2.guard();
-            // Completion, not just consumption: T1 sets the gate from inside
-            // its after_store closure, so its 1 is already in the register.
-            stored.must_wait(park_timeout());
+            // Completion, not just consumption: the gate is set from T1's
+            // after_store closure, so its 1 is already in the register.
+            // The wait lives here, in the worker body — not in dispatch.
+            stored.must_wait(GATE_TIMEOUT);
             s2.store(2);
         });
 
@@ -113,8 +115,8 @@ mod tests {
         );
         assert_eq!(shared.0.load(Ordering::SeqCst), 2);
 
-        // The last `Arc` drop runs the shared assertions; every sequence
-        // entry was consumed.
+        // The last `Arc` drop runs the shared assertions: both hooks fired
+        // exactly twice, once per writer.
         drop(shared);
     }
 }
