@@ -114,8 +114,8 @@ sequence entry still expects that hook.
 
 There is also shared mode for real threads. `register_sp::shared(value)`
 returns a clonable `Shared<T>` (`Clone`, `Send + Sync`); every firing thread
-calls `shared.guard()` first, and the attach-only `WorkerGuard<T>` (`Deref`
-+ `Drop` only) installs dispatch on that thread and keeps the state alive.
+calls `shared.guard()` first, and the attach-only `WorkerGuard<T>` (`Deref` +
+`Drop` only) installs dispatch on that thread and keeps the state alive.
 Register on the `Shared` handle with `every`, `fires`, the per-hook methods,
 and `verify`. Shared mode observes; it does not schedule: dispatch closures
 run inside the instrumented function, so none may wait — they record traces
