@@ -73,9 +73,9 @@ mod tests {
                 let g = register_sp::guard(register.clone());
                 g.fires(register_sp::before_store, 1);
                 g.fires(register_sp::after_store, 1);
-                // `every` only records and sets gates — never waits: a
-                // blocked dispatch would block the writer inside `store`,
-                // holding whatever production locks the instrumented
+                // `every` records and sets gates; a wait here is only the
+                // deliberate freeze, with a budget: a blocked dispatch
+                // holds whatever production locks the instrumented
                 // function holds.
                 g.every(|e| {
                     let log_before = log.clone();

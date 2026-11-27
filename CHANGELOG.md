@@ -21,7 +21,8 @@ Breaking release: the namespace and types change, the 0.4.0 deprecations are
 removed, and the `paste` dependency is dropped. Counting semantics are
 unchanged from 0.4.0 — names, types, and ownership move — and there is one
 install mode, the private `Guard`. See the README "Migrating from 0.4.x"
-for the full call-site map.
+for the call-site map; the `Copy` and reserved-name details are in the
+`define_sp!` rustdoc.
 
 ### Changed
 - `define_sp!` now generates a **module**: `define_sp! { pub mod name { … } }`.
@@ -41,19 +42,19 @@ for the full call-site map.
   error. A multithreaded test gives each firing worker its own `guard`; each
   guard's registrations and counts are that worker's own. For a production
   object shared by threads, guard an `Arc<T>` clone per worker.
-- **One guard per firing thread; no central shared handle.** `Shared`,
-  `WorkerGuard`, `shared()`, and the attach path are removed: an
-  observe-only shared handle had no force of its own, and a central
-  `sequence` parked a worker inside the instrumented function, holding its
-  production locks — the lock the head's thread could need to arrive, a
-  mutual deadlock until the park timeout. Multithreaded tests give each
-  worker its own private guard; `Gate` waits in the worker bodies after
-  `invoke!` order the threads. Dispatch closures run on the worker's stack
-  inside the instrumented function, holding its locks: they record traces
-  and set gates. A deliberate freeze — a private dispatch wait with a
-  local budget — is legitimate choreography only when the thread that
-  releases it needs nothing the blocked frame holds; the budget bounds a
-  mistake to a failing test rather than removing the deadlock class.
+- **One guard per firing thread; no central shared handle.** `Shared<T>`
+  with its full registration (`sequence`, `every`, `fires`, `verify`),
+  `shared()`, and the attach path are removed: a central `sequence` parked
+  a worker inside the instrumented function, holding its production locks
+  — the lock the head's thread could need to arrive, a mutual deadlock
+  until the park timeout. Multithreaded tests give each worker its own
+  private guard; `Gate` waits in the worker bodies after `invoke!` order
+  the threads. Dispatch closures run on the worker's stack inside the
+  instrumented function, holding its locks: they record traces and set
+  gates. A deliberate freeze — a private dispatch wait with a local
+  budget — is legitimate choreography only when the thread that releases
+  it needs nothing the blocked frame holds; the budget bounds a mistake
+  to a failing test rather than removing the deadlock class.
 - `invoke!` takes the module path (`invoke!(name, hook(args))`) and expands to
   a block expression, so it works in expression position (closure body, block
   tail, `let` initializer) in both test and production builds.
@@ -94,13 +95,12 @@ for the full call-site map.
   `current_fire()` reports (0.4.0 printed `index + 1`).
 
 ### Removed
-- The shared observer mode: `Shared<T>`, `WorkerGuard<T>`, `shared(value)`,
-  `install_shared`, `shared.guard()`, the `attach` path, and the
-  registration methods on the `Shared` handle (`shared.<hook>(f)`,
-  `shared.every`, `shared.fires`, `shared.verify`). Migration: one private
-  `guard` per firing thread; `sequence` per worker; gates for cross-thread
-  order.
-- `Shared::sequence`, the shared-park dispatch arm, the sequence condvar,
+- The shared mode: `Shared<T>` with its full registration (`sequence`,
+  `every`, `fires`, `verify`), `shared(value)`/`install_shared`, and the
+  attach path (0.4.x `shared.install()` / `SharedGuard`; the 0.5.0
+  module's `shared.guard()`). Migration: one private `guard` per firing
+  thread; `sequence` per worker; gates for cross-thread order.
+- The shared-park dispatch arm, the sequence condvar,
   `park_timeout()`, `SP_PARK_TIMEOUT_MS`, and the timeout cache/resolver with
   their tests (`tests/park_timeout_env.rs`, the resolver unit tests, the
   32-bit `test32` CI job that existed for the cache boundary). The parking

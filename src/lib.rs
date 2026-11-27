@@ -1,8 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 // The crate dogfoods the lint its consumers are subject to. `define_sp!`
-// emits public items (trait, hook methods, entry struct, hook enum,
-// builders), and a consumer that keeps `#![deny(missing_docs)]` fails its
+// emits public items (trait, guard, hook methods/constants, builders), and
+// a consumer that keeps `#![deny(missing_docs)]` fails its
 // *test* build on any of them that carries no doc comment — production
 // builds are clean because the caller gates the macro with `#[cfg(test)]`,
 // so only a test build sees the generated items. `missing_docs` is inert
@@ -14,7 +14,7 @@
 
 /// Invoke the currently installed sync-point hook.
 ///
-/// Takes the generated entry point and a plain `hook(args…)` call; dispatch
+/// Takes the sync-point module path and a plain `hook(args…)` call; dispatch
 /// prepends the guarded `&T`, so it is not written at the call site. It
 /// expands to a block expression (`{ #[cfg(test)] { … } }`): a real dispatch
 /// under `#[cfg(test)]`, an empty block otherwise. It works as a statement
@@ -52,7 +52,7 @@
 /// ```
 ///
 /// Call sites then drop the crate path entirely:
-/// `sp_invoke!(MyModuleSp, before_insert(&key))`. In production the seam
+/// `sp_invoke!(map_sp, before_insert(&key))`. In production the seam
 /// expands to a stripped statement, so the crate is never resolved; in
 /// tests it dispatches. Gating each call site with its own `#[cfg(test)]`
 /// also works and needs no seam file, but the attribute is then repeated
@@ -83,7 +83,7 @@
 ///         };
 ///     }
 ///
-///     sp_inject!(MapSp, before_alloc_node(capacity), { return Err(Full); });
+///     sp_inject!(map_sp, before_alloc_node(capacity), { return Err(Full); });
 ///     Ok(())
 /// }
 /// ```
@@ -332,9 +332,10 @@ impl TokioAsyncGate {
 pub struct FireInfo {
     /// Name of the hook being dispatched.
     pub hook: &'static str,
-    /// Zero-based index of this fire on this hook (global across
-    /// threads). The closure runs on the firing thread, so
-    /// `std::thread::current()` is the thread info — no fields for it.
+    /// Zero-based index of this fire on this hook, counted per guard (and
+    /// therefore per firing thread). The closure runs on the firing
+    /// thread, so `std::thread::current()` is the thread info — no fields
+    /// for it.
     pub index: usize,
 }
 
@@ -379,7 +380,7 @@ impl Drop for CurrentFire {
 
 // See CURRENT_FIRE: inline `const {}` blocks are experimental until 1.79.
 thread_local! {
-    // Addresses of `__Sp` instances currently dispatching a hook on this
+    // Addresses of `State<T>` instances currently dispatching a hook on this
     // thread. Per-thread: a genuinely concurrent fire from another thread is
     // never suppressed, and `contains` still gives per-sync-point re-entry
     // suppression that survives transitive nesting (A -> B -> A).

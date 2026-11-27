@@ -104,7 +104,7 @@ is suppressed — instrumented code inside a hook does not recurse.
 
 A guard is private to the thread that installs it: a guard on the test
 thread does not see worker fires. For a production object shared by
-threads, the recipe is one worker per firing thread:
+threads, the recipe is one guard per firing thread:
 
 1. Share the value as `Arc<T>`.
 2. Inside the worker, install `register_sp::guard(arc.clone())`. `Guard` is
@@ -244,10 +244,13 @@ semantics are unchanged; there is one install mode, the private `Guard`.
   gone; the surface is `guard`, `Guard`, `Hook`, and a hook constant per
   hook.
 - Constructors: `RegisterSp::install_guard(v)` → `register_sp::guard(v)`.
-  `install_shared`/`shared(v)`/`Shared<T>`/`WorkerGuard<T>`/`shared.guard()`
-  are removed: give every firing thread its own private guard (see "Using
-  it across threads"). The old guard types were `!Send`; the new
-  `Guard<T>` is `!Send`.
+  The shared mode is gone: `install_shared`/`shared(v)`/`Shared<T>`, the
+  0.4.x attach `shared.install()` (returning `SharedGuard`), and the
+  0.5.0 module name `shared.guard()` have no replacement — give every
+  firing thread its own private guard (see "Using it across threads").
+  The 0.4.x guards were `Send`: moving one across threads compiled and was
+  a silent runtime trap. The new `Guard<T>` is `!Send` (0.5.0): moving one
+  is a compile error.
 - Shared-mode users: the old `Shared` handle's `every`/`fires`/`verify`
   registrations become per-worker registrations on each guard; counts are
   per guard, not a total across the shared state; `sequence` is per guard.
@@ -359,9 +362,11 @@ form does not transfer to a consumer's `src/` under `[dev-dependencies]`.
 `guard` owns the state through an `Arc`; the last owner releases it, and
 the guarded value's `Drop` runs there, after the sync-point assertions.
 Nested guards of one sync point drop in reverse order; dropping an outer
-guard first detaches the inner one, whose fires become no-ops. `drop(guard)`
-while an inner guard is live gives no verdict, and the last owner may be
-the inner guard. A failed `verify()` owns the diagnostic:
+guard first detaches the inner one, whose fires become no-ops. The inner
+guard's drop then restores the outer install with no guard alive, so the
+outer's verdict lands outside the test's control (see the `Guard` rustdoc).
+`drop(guard)` while an inner guard is live gives no verdict, and the last
+owner may be the inner guard. A failed `verify()` owns the diagnostic:
 drop then skips the remaining assertions and the value's destructor. On a
 thread that is already unwinding the state is deliberately leaked, so a
 panicking destructor cannot abort the test binary. Captures of an `every`
