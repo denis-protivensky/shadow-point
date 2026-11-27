@@ -98,8 +98,9 @@ fn the_hook_runs_before_the_store() {
 steps 1–2. The complete runnable files are in `examples/`.*
 
 The guard derefs to `&T`: `guard.store(…)` and `guard.0` are the guarded
-value's own API. A nested fire of the same sync point on the same thread
-is suppressed — instrumented code inside a hook does not recurse.
+value's own API. A fire nested inside a hook on the same installed guard is
+suppressed — instrumented code inside a hook does not recurse; a new guard
+of the same module is a separate install and is not suppressed.
 
 ## Cheat sheet
 
@@ -128,6 +129,8 @@ both fail.
 Counts are per guard: each worker's guard sees only its own thread's fires.
 A second fire-once registration replaces the closure without resetting the
 count; an explicit `.fires(n)` or `fires(hook, n)` wins in either order.
+A second `sequence` replaces the whole queue; a second `every` replaces the
+whole registration.
 
 Every sequence entry is mandatory: an entry left unconsumed at drop fails
 the assertion. To assert "this branch must not fire", use `fires(hook, 0)`;
@@ -150,27 +153,8 @@ threads, the recipe is one guard per firing thread:
    you want observed, `must_wait(budget)` before the fire that must come
    later. The budget is test policy — a local `Duration` constant.
 
-```rust,no_run
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-
-shadow_point::define_sp! {
-    pub(crate) mod register_sp {
-        before_store(value: u32),
-    }
-}
-
-struct Register(AtomicU32);
-
-impl Register {
-    fn store(&self, value: u32) {
-        shadow_point::invoke!(register_sp, before_store(value));
-        self.0.store(value, Ordering::SeqCst);
-    }
-}
-
+```rust,ignore
+// `Register` and `register_sp` come from the quick start.
 let register = Arc::new(Register(AtomicU32::new(0)));
 let stored_1 = Arc::new(shadow_point::Gate::new());
 
@@ -181,12 +165,11 @@ let t1 = thread::spawn({
         let guard = register_sp::guard(register);
         guard.before_store(|_, value| assert_eq!(value, 1)); // this worker's fire
         guard.store(1);
-        stored_1.set(); // the gate lives in the worker body, after the fire
+        stored_1.set(); // after the fire you want observed
     }
 });
 
-// Writer 2: the gate wait lives in its worker body; a dispatch wait is
-// only the deliberate freeze (described below), with a budget.
+// Writer 2: wait in the worker body, not in a dispatch closure.
 let t2 = thread::spawn({
     let register = register.clone();
     move || {
@@ -202,7 +185,9 @@ t2.join().unwrap();
 assert_eq!(register.0.load(Ordering::SeqCst), 2);
 ```
 
-*`#[cfg(test)]` gates omitted (quick start, steps 1–2); runnable version:
+*`Register` and `register_sp` are the quick-start declarations;
+`#[cfg(test)]` gates omitted. The full example, with a second hook, `every`
+traces, and the gate set inside dispatch, is
 `examples/register_writers.rs`.*
 
 Dispatch closures (`every`, fire-once, `sequence` steps) run on the firing
@@ -381,10 +366,10 @@ binary. Captures of an `every` closure or an unfired fire-once are freed
 with the state; a fire-once that did fire is dropped when its slot is
 taken. A destructor assertion inside `T::drop` runs at the last-owner
 drop. A scenario that abandoned entries fails at the sequence assertion
-before that — a finding, not a regression. `Weak` and flag shapes still
-control the destructor's moment.
+before that — a finding, not a regression.
 
-The guarded type must be `Send + Sync + 'static` and mutate through `&self`.
+The guarded type must be `'static` and mutate through `&self`; it need not
+be `Send`/`Sync`, because the guard never leaves its thread.
 Hooks are side-effect only: they cannot change what the instrumented
 function returns. One hook per `invoke!` site: a fire is identified by hook
 name alone, so two sites sharing a name are indistinguishable to `sequence`

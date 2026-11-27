@@ -39,10 +39,15 @@ reserved-name details are in the `define_sp!` rustdoc.
 - `install_guard` → `guard`. `Guard<T>` is the only guard type: it is
   private to the thread that installs it, keeps `Deref` and the full
   registration API (fire-once/`sequence`/`every`/`fires`/`verify`), and is
-  `!Send` (`PhantomData<*const ()>`): moving one across threads is a compile
-  error. A multithreaded test gives each firing worker its own `guard`; each
-  guard's registrations and counts are that worker's own. For a production
-  object shared by threads, guard an `Arc<T>` clone per worker.
+  `!Send` (`Rc` inside): moving one across threads is a compile error. A
+  multithreaded test gives each firing worker its own `guard`; each guard's
+  registrations and counts are that worker's own. For a production object
+  shared by threads, guard an `Arc<T>` clone per worker.
+- The private guard needs only `T: 'static`: the state and the dispatch
+  closures never leave the installing thread, so fire-once/`sequence`
+  closures and `when` predicates no longer require `Send`, and `every` no
+  longer requires `Send + Sync`. `Rc`/`RefCell` state and captures are
+  legal; a captured borrow still fails the `'static` bound.
 - **One guard per firing thread; no central shared handle.** `Shared<T>`
   with its full registration (`sequence`, `every`, `fires`, `verify`),
   `shared()`, and the attach path are removed: a central `sequence` parked
@@ -82,9 +87,10 @@ reserved-name details are in the `define_sp!` rustdoc.
   const check spans the declared type) instead of failing inside the
   expansion. Arguments must be `Copy`; declare a reference or raw pointer
   when the call site keeps the value.
-- The reserved-hook-name list is rebuilt for the module surface (7 arms):
-  the fixed public names (`sequence`, `every`, `fires`, `verify`, `guard`,
-  `with_dyn`, `when`). `shared` and `clone` are no longer reserved: there is
+- The reserved-hook-name list is rebuilt for the module surface (7 names,
+  plain and raw): the fixed public names (`sequence`, `every`, `fires`,
+  `verify`, `guard`, `with_dyn`, `when`) get the diagnostic as themselves
+  and as `r#sequence`-style raw identifiers. `shared` and `clone` are no longer reserved: there is
   no `Shared` type and no generated `Clone` impl to shadow. All fixed
   machinery lives in a private submodule; fixed fields sit in `StateFixed`
   and the generated per-hook fields in `StateRegs`, both unnamed fields of

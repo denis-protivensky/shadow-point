@@ -6,7 +6,7 @@
 #![cfg(feature = "tokio-async")]
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::sync::mpsc;
 
 use shadow_point::TokioAsyncGate;
 use tokio::runtime::Builder;
@@ -63,17 +63,18 @@ fn current_thread_body_waits_on_future_fires() {
 
 /// Worker side runs on a blocking thread (a per-thread private guard, the
 /// only sound install for off-runtime threads), test body waits async.
-/// The sleep makes both fires land BEFORE the waiter's first poll, so this
-/// deterministically covers the fire-before-`enable()` window: the count
-/// check after `enable()` must see the landed fires and return without
-/// awaiting. The opposite window — waking an already-enabled waiter — is
-/// covered deterministically by the first test (single-thread cooperative
-/// polling: the waiter enables before the firing future runs).
+/// The channel handshake makes both fires land BEFORE the waiter's first
+/// poll, so this deterministically covers the fire-before-`enable()` window:
+/// the count check after `enable()` must see the landed fires and return
+/// without awaiting. The opposite window — waking an already-enabled waiter
+/// — is covered deterministically by the first test (single-thread
+/// cooperative polling: the waiter enables before the firing future runs).
 #[test]
 fn spawn_blocking_worker_fires_async_waiter() {
     let rt = Builder::new_current_thread().build().unwrap();
     let gate = TokioAsyncGate::new();
     let fire = gate.clone();
+    let (fired, worker_fired) = mpsc::channel();
     let worker = rt.spawn_blocking(move || {
         let guard = ag::ag_sp::guard(());
         guard.every(|e| {
@@ -83,8 +84,10 @@ fn spawn_blocking_worker_fires_async_waiter() {
         guard.fires(ag::ag_sp::b, 2);
         shadow_point::invoke!(ag::ag_sp, b(0));
         shadow_point::invoke!(ag::ag_sp, b(1));
+        // Both increments happen-before this send.
+        fired.send(()).unwrap();
     });
-    std::thread::sleep(Duration::from_millis(50));
+    worker_fired.recv().unwrap();
     rt.block_on(async {
         gate.wait_at_least(2).await;
         worker.await.unwrap();

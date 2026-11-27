@@ -1190,3 +1190,37 @@ fn machinery_names_are_legal_hook_names() {
     assert_eq!(fires.get(), 43, "every machinery-named hook dispatched");
     g.verify();
 }
+
+/// The guard never leaves its thread, so neither `T` nor the dispatch
+/// closures need `Send`/`Sync`: `Rc`/`RefCell` state and captures compile
+/// and run. (The compile-fail doctest still pins `Guard: !Send`.)
+#[test]
+fn non_send_state_and_dispatch_captures_are_legal() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let hits = Rc::new(RefCell::new([0u32; 3]));
+    let g = single::single_sp::guard(Rc::new(RefCell::new(0u32)));
+
+    let once = hits.clone();
+    g.a(move |value, _| {
+        assert_eq!(*value.borrow(), 0);
+        once.borrow_mut()[0] += 1;
+    });
+
+    let every = hits.clone();
+    g.every(move |e| {
+        e.a(move |_, _| every.borrow_mut()[1] += 1);
+    });
+
+    let seq = hits.clone();
+    g.sequence(move |s| {
+        s.b(move |_, _| seq.borrow_mut()[2] += 1);
+    });
+
+    g.fires(single::single_sp::b, 1);
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, b(0));
+    g.verify();
+    assert_eq!(*hits.borrow(), [1, 1, 1]);
+}
