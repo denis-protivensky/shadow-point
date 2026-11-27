@@ -74,8 +74,11 @@ jobs:
             echo "::error::reserved-name fixture compiled"
             exit 1
           fi
+          # The fixture declares each name plain and raw; both must get the
+          # friendly message (otherwise the raw form falls back to a raw
+          # duplicate-definition error).
           for name in sequence every fires verify guard with_dyn when; do
-            grep -F "\`$name\` is a reserved hook name" reserved-name.err
+            test "$(grep -cF "\`$name\` is a reserved hook name" reserved-name.err)" -eq 2
           done
 
   docs:
