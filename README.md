@@ -100,7 +100,36 @@ The guard derefs to `&T`: `guard.store(…)` and `guard.0` are the guarded
 value's own API. A nested fire of the same sync point on the same thread
 is suppressed — instrumented code inside a hook does not recurse.
 
-## Using it across threads
+## Cheat sheet
+
+| Need | Current API |
+|---|---|
+| one-shot (exactly one) | `guard.<name>(f)` — the hook must fire exactly once; the closure runs at most once, on the first fire the sequence does not claim (counting rule below) |
+| one-shot, other count | `guard.<name>(f).fires(n)` — `n` is the hook's fire count; the closure still runs at most once |
+| chained registration | `guard.a(f).fires(2).b(g).fires(1)` — both `fires` forms return the guard |
+| count only | `guard.fires(register_sp::a, n)` |
+| assert now | `guard.verify()` — same checks as drop, at the call site |
+| every fire | `guard.every(\|e\| { e.<name>(f); })` |
+| ordered (per worker) | `guard.sequence(\|s\| { s.a(f).b(g); })` |
+| conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires the first time `pred` passes. `pred` runs under the sequence lock: keep it a pure check (a blocking predicate can deadlock the test) |
+| cross-thread order | `Gate` in the worker bodies after `invoke!`; dispatch closures record and set gates — a wait there is only the deliberate freeze (see "Using guards across threads"), always with a budget |
+
+`<name>` is a hook declared in `define_sp!`. `.fires(n)` counts hook fires,
+not closure runs: a fire consumed by a sequence entry or stopped by a
+failing predicate never runs the fire-once closure, so a retrying
+operation (the CAS loop in the private example) can fire twice with one
+closure run — `.fires(2)` pins that. Without a chain, registration asserts
+exactly one fire: a missing fire *and* an extra one both fail.
+
+Counts are per guard: each worker's guard sees only its own thread's fires.
+A second fire-once registration replaces the closure without resetting the
+count; an explicit `.fires(n)` or `fires(hook, n)` wins in either order.
+
+Every sequence entry is mandatory: an entry left unconsumed at drop fails
+the assertion. To assert "this branch must not fire", use `fires(hook, 0)`;
+to allow "may or may not fire", split the test. There is no `optional`.
+
+## Using guards across threads
 
 A guard is private to the thread that installs it: a guard on the test
 thread does not see worker fires. For a production object shared by
@@ -169,10 +198,6 @@ t2.join().unwrap();
 assert_eq!(register.0.load(Ordering::SeqCst), 2);
 ```
 
-*Illustrative, not run: as in `examples/`, the `#[cfg(test)]` gates are
-omitted; `invoke!` dispatches only under `cfg(test)`, so a doctest never
-fires. Runnable version: `examples/register_writers.rs`.*
-
 Dispatch closures (`every`, fire-once, `sequence` steps) run on the firing
 stack, inside the instrumented function, holding its locks: normally they
 record and set gates only. The deliberate exception is the freeze — the
@@ -204,35 +229,6 @@ cargo test --example register_writers
 `cargo test` alone does not run example tests; use `--examples` or
 `--all-targets` in CI.
 
-## Cheat sheet
-
-| Need | Current API |
-|---|---|
-| one-shot (exactly one) | `guard.<name>(f)` — the hook must fire exactly once; the closure runs at most once, on the first fire the sequence does not claim (counting rule below) |
-| one-shot, other count | `guard.<name>(f).fires(n)` — `n` is the hook's fire count; the closure still runs at most once |
-| chained registration | `guard.a(f).fires(2).b(g).fires(1)` — both `fires` forms return the guard |
-| count only | `guard.fires(register_sp::a, n)` |
-| assert now | `guard.verify()` — same checks as drop, at the call site |
-| every fire | `guard.every(\|e\| { e.<name>(f); })` |
-| ordered (per worker) | `guard.sequence(\|s\| { s.a(f).b(g); })` |
-| conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires the first time `pred` passes. `pred` runs under the sequence lock: keep it a pure check (a blocking predicate can deadlock the test) |
-| cross-thread order | `Gate` in the worker bodies after `invoke!`; dispatch closures record and set gates — a wait there is only the deliberate freeze (see "Using it across threads"), always with a budget |
-
-`<name>` is a hook declared in `define_sp!`. `.fires(n)` counts hook fires,
-not closure runs: a fire consumed by a sequence entry or stopped by a
-failing predicate never runs the fire-once closure, so a retrying
-operation (the CAS loop in the private example) can fire twice with one
-closure run — `.fires(2)` pins that. Without a chain, registration asserts
-exactly one fire: a missing fire *and* an extra one both fail.
-
-Counts are per guard: each worker's guard sees only its own thread's fires.
-A second fire-once registration replaces the closure without resetting the
-count; an explicit `.fires(n)` or `fires(hook, n)` wins in either order.
-
-Every sequence entry is mandatory: an entry left unconsumed at drop fails
-the assertion. To assert "this branch must not fire", use `fires(hook, 0)`;
-to allow "may or may not fire", split the test. There is no `optional`.
-
 ## Migrating from 0.4.x
 
 0.5.0 is a breaking release: the namespace and the types change, the 0.4.0
@@ -247,7 +243,7 @@ semantics are unchanged; there is one install mode, the private `Guard`.
   The shared mode is gone: `install_shared`/`shared(v)`/`Shared<T>`, the
   0.4.x attach `shared.install()` (returning `SharedGuard`), and the
   0.5.0 module name `shared.guard()` have no replacement — give every
-  firing thread its own private guard (see "Using it across threads").
+  firing thread its own private guard (see "Using guards across threads").
   The 0.4.x guards were `Send`: moving one across threads compiled and was
   a silent runtime trap. The new `Guard<T>` is `!Send` (0.5.0): moving one
   is a compile error.
@@ -258,7 +254,7 @@ semantics are unchanged; there is one install mode, the private `Guard`.
 - Shared `sequence` and parking are gone (parking inside dispatch could
   deadlock on the production locks the parked frame holds). Gates in the
   worker bodies are the replacement — see `examples/register_writers.rs`
-  and "Using it across threads". `park_timeout()` and `SP_PARK_TIMEOUT_MS`
+  and "Using guards across threads". `park_timeout()` and `SP_PARK_TIMEOUT_MS`
   are gone with it — a gate-wait budget is test policy: a local `Duration`
   constant passed to `must_wait`/`wait_timeout`.
 - `invoke!(RegisterSp, before_store(v))` →
@@ -341,7 +337,7 @@ parking holds production locks, fatal on a `current_thread` runtime.
 Dispatch closures stay non-blocking (`TokioAsyncGate::fire` is); await
 milestones in the test body. Synchronous workers wait on `Gate` in the
 worker body after `invoke!`; a dispatch closure waits only as the
-deliberate freeze described in "Using it across threads", with a budget.
+deliberate freeze described in "Using guards across threads", with a budget.
 
 ### Keeping shadow-point out of production builds
 
