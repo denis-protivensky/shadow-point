@@ -328,7 +328,7 @@ impl TokioAsyncGate {
 ///
 /// Returned by [`current_fire`] while a hook closure runs (fire-once, a
 /// sequence step, or an `every` closure); `None` outside of any dispatch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct FireInfo {
     /// Name of the hook being dispatched.
     pub hook: &'static str,
@@ -514,10 +514,11 @@ impl Drop for ExecSink {
 /// collide with the fixed public surface; `define_sp!` rejects them with a
 /// `compile_error!` naming the hook. Any other identifier — including
 /// `value`, `calls`, `expected`, `state`, `new`, `hook`, `f`, `NAMES`,
-/// `__SP_NAMES`, `__sp_state`, `__sp_value` — is legal: fixed fields and
-/// functions live apart from the generated ones in a private submodule and
-/// cannot collide with a hook name. (Keywords such as `loop` are not
-/// identifiers; a raw identifier like `r#type` works.)
+/// `__SP_NAMES`, `__sp_state`, `__sp_value`, `__sp_fixed` — is legal:
+/// fixed fields and functions live apart from the generated ones in a
+/// private submodule, and the fixed and per-hook fields sit in separate
+/// structs, so none of them can collide with a hook name. (Keywords such as
+/// `loop` are not identifiers; a raw identifier like `r#type` works.)
 ///
 /// # Hook arguments
 ///
@@ -606,7 +607,7 @@ macro_rules! define_sp {
             /// declared hook. The type of the module's hook constants and
             /// the argument of `fires`.
             #[repr(usize)]
-            #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
             #[allow(non_camel_case_types)]
             pub enum Hook {
                 $(
@@ -799,9 +800,10 @@ macro_rules! define_sp {
 
                 // ── State ────────────────────────────────────────────
 
-                // Fixed fields live in their own struct: a hook generates a
-                // field on `State`, so sharing a struct with fixed fields
-                // would make every fixed name a reserved hook name.
+                // Fixed fields and generated per-hook fields live in two
+                // structs wrapped by a tuple: no named field is shared
+                // between the fixed machinery and a hook's own field name,
+                // so every identifier is legal as a hook name (D26).
                 struct StateFixed<T: Send + Sync + 'static> {
                     __sp_value: T,
                     __sp_every: ::std::sync::Mutex<Every<T>>,
@@ -814,8 +816,7 @@ macro_rules! define_sp {
                     __sp_reported: ::std::sync::atomic::AtomicBool,
                 }
 
-                struct State<T: Send + Sync + 'static> {
-                    __sp_fixed: StateFixed<T>,
+                struct StateRegs<T: Send + Sync + 'static> {
                     $(
                         $method: ::std::sync::Mutex<
                             Option<Box<dyn FnOnce(&T $( , $arg_ty)*) + Send>>
@@ -823,13 +824,15 @@ macro_rules! define_sp {
                     )+
                 }
 
+                struct State<T: Send + Sync + 'static>(StateFixed<T>, StateRegs<T>);
+
                 fn new_state<T: Send + Sync + 'static>(
                     value: T,
                     installed_at: &'static std::panic::Location<'static>,
                 ) -> State<T> {
                     let n = [$( stringify!($method) ),+].len();
-                    State {
-                        __sp_fixed: StateFixed {
+                    State(
+                        StateFixed {
                             __sp_value: value,
                             __sp_every: ::std::sync::Mutex::new(Every {
                                 $( $method: None, )+
@@ -846,8 +849,8 @@ macro_rules! define_sp {
                             ),
                             __sp_reported: ::std::sync::atomic::AtomicBool::new(false),
                         },
-                        $( $method: ::std::sync::Mutex::new(None), )+
-                    }
+                        StateRegs { $( $method: ::std::sync::Mutex::new(None), )+ },
+                    )
                 }
 
                 // Generated per-hook functions live in their own module: a
@@ -861,7 +864,7 @@ macro_rules! define_sp {
                             st: &State<T>,
                             f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
                         ) {
-                            *st.$method.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            *st.1.$method.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(Box::new(f));
                             super::set_expected_if_unset(st, Hook::$method, 1);
                         }
@@ -873,7 +876,7 @@ macro_rules! define_sp {
                 fn bump_call<T: Send + Sync + 'static>(
                     st: &State<T>, h: Hook,
                 ) -> usize {
-                    st.__sp_fixed.__sp_calls[h as usize].fetch_add(
+                    st.0.__sp_calls[h as usize].fetch_add(
                         1, ::std::sync::atomic::Ordering::SeqCst,
                     )
                 }
@@ -881,7 +884,7 @@ macro_rules! define_sp {
                 fn set_expected<T: Send + Sync + 'static>(
                     st: &State<T>, h: Hook, n: usize,
                 ) {
-                    st.__sp_fixed.__sp_expected
+                    st.0.__sp_expected
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         [h as usize] = Some(n);
@@ -891,7 +894,7 @@ macro_rules! define_sp {
                     st: &State<T>, h: Hook, n: usize,
                 ) {
                     let mut expected = st
-                        .__sp_fixed.__sp_expected
+                        .0.__sp_expected
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let slot = &mut expected[h as usize];
@@ -907,7 +910,7 @@ macro_rules! define_sp {
                         seq: ::std::collections::VecDeque::new(),
                     };
                     f(&mut builder);
-                    *st.__sp_fixed.__sp_sequence.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    *st.0.__sp_sequence.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
                         builder.seq;
                 }
 
@@ -916,7 +919,7 @@ macro_rules! define_sp {
                 ) {
                     let mut every = Every { $( $method: None, )+ };
                     f(&mut every);
-                    *st.__sp_fixed.__sp_every.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = every;
+                    *st.0.__sp_every.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = every;
                 }
 
                 fn report_while_unwinding(message: &str) {
@@ -937,7 +940,7 @@ macro_rules! define_sp {
                     message: &str,
                     raise: impl FnOnce(),
                 ) {
-                    st.__sp_fixed.__sp_reported.store(true, ::std::sync::atomic::Ordering::SeqCst);
+                    st.0.__sp_reported.store(true, ::std::sync::atomic::Ordering::SeqCst);
                     if unwinding {
                         report_while_unwinding(message);
                     } else {
@@ -950,13 +953,13 @@ macro_rules! define_sp {
                     st: &State<T>, from_drop: bool,
                 ) {
                     if from_drop
-                        && st.__sp_fixed.__sp_reported.load(::std::sync::atomic::Ordering::SeqCst)
+                        && st.0.__sp_reported.load(::std::sync::atomic::Ordering::SeqCst)
                     {
                         return;
                     }
                     let unwinding = std::thread::panicking();
                     let seq = st
-                        .__sp_fixed.__sp_sequence
+                        .0.__sp_sequence
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if !seq.is_empty() {
@@ -969,7 +972,7 @@ macro_rules! define_sp {
                                 .map(|e| e.name())
                                 .collect::<Vec<_>>()
                                 .join(", "),
-                            st.__sp_fixed.__sp_installed_at,
+                            st.0.__sp_installed_at,
                         );
                         drop(seq);
                         report_mismatch(st, unwinding, &message, || panic!("{message}"));
@@ -977,12 +980,12 @@ macro_rules! define_sp {
                         drop(seq);
                     }
                     let expected = st
-                        .__sp_fixed.__sp_expected
+                        .0.__sp_expected
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     for (i, expected) in expected.iter().enumerate() {
                         let Some(expected) = expected else { continue };
-                        let actual = st.__sp_fixed.__sp_calls[i]
+                        let actual = st.0.__sp_calls[i]
                             .load(::std::sync::atomic::Ordering::SeqCst);
                         if actual == *expected {
                             continue;
@@ -991,7 +994,7 @@ macro_rules! define_sp {
                             "sync point hook `{}` fired {actual} \
                              time(s), expected {expected} (installed at {})",
                             __SP_NAMES[i],
-                            st.__sp_fixed.__sp_installed_at,
+                            st.0.__sp_installed_at,
                         );
                         report_mismatch(st, unwinding, &message, || {
                             assert_eq!(actual, *expected, "{message}");
@@ -1041,17 +1044,17 @@ macro_rules! define_sp {
                             });
                             let every = {
                                 let guard = st
-                                    .__sp_fixed.__sp_every
+                                    .0.__sp_every
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                                 guard.$method.clone()
                             };
                             if let Some(f) = every {
-                                f(&st.__sp_fixed.__sp_value $( , $arg)*);
+                                f(&st.0.__sp_value $( , $arg)*);
                             }
                             let (head_expects, consumed) = {
                                 let mut seq = st
-                                    .__sp_fixed.__sp_sequence
+                                    .0.__sp_sequence
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                                 match seq.front() {
@@ -1080,11 +1083,10 @@ macro_rules! define_sp {
                                         if !has_more {
                                             (false, None)
                                         } else {
-                                            // One mode: each private guard
-                                            // owns its own sequence, so an
-                                            // out-of-order fire is a
-                                            // one-thread ordering violation —
-                                            // panic, never park.
+                                            // A guard owns its own
+                                            // sequence, so an out-of-order
+                                            // fire is a one-thread ordering
+                                            // violation — panic, never park.
                                             panic!(
                                                 "sync point ordering violation: \
                                                  expected `{}` next but `{}` fired",
@@ -1097,7 +1099,7 @@ macro_rules! define_sp {
                             };
                             match consumed {
                                 Some(SeqAction::$method(_, f)) => {
-                                    f(&st.__sp_fixed.__sp_value $( , $arg)*);
+                                    f(&st.0.__sp_value $( , $arg)*);
                                 }
                                 Some(_) => unreachable!(
                                     "shadow-point: consumed a non-matching sequence entry"
@@ -1106,13 +1108,14 @@ macro_rules! define_sp {
                                     if idx == 0 && !head_expects {
                                         let fire_once = {
                                             let mut slot = st
+                                                .1
                                                 .$method
                                                 .lock()
                                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                                             slot.take()
                                         };
                                         if let Some(f) = fire_once {
-                                            f(&st.__sp_fixed.__sp_value $( , $arg)*);
+                                            f(&st.0.__sp_value $( , $arg)*);
                                         }
                                     }
                                 }
@@ -1165,7 +1168,7 @@ macro_rules! define_sp {
 
                 // ── Guard ────────────────────────────────────────────
 
-                /// The private-mode sync-point guard. Derefs to the guarded
+                /// The sync-point guard. Derefs to the guarded
                 /// value; drop restores the TLS install and the last owner
                 /// asserts counts and sequence. `!Send`: drop it on the
                 /// thread that created it.
@@ -1234,7 +1237,7 @@ macro_rules! define_sp {
                 impl<T: Send + Sync + 'static> std::ops::Deref for Guard<T> {
                     type Target = T;
                     fn deref(&self) -> &T {
-                        &guard_state(self).__sp_fixed.__sp_value
+                        &guard_state(self).0.__sp_value
                     }
                 }
 

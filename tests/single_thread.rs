@@ -134,14 +134,14 @@ fn sequence_head_consumes_the_first_fire_and_blocks_fire_once() {
 }
 
 #[test]
-fn mismatched_head_with_later_match_panics_in_private_mode() {
+fn mismatched_head_with_later_match_panics() {
     let g = single::single_sp::guard(());
     g.sequence(|s| {
         s.a(|(), _| {});
         s.b(|(), _| {});
     });
-    // Private mode never skips the head on a mismatched fire: a later
-    // matching entry still means ordering violation.
+    // The sequence never skips the head on a mismatched fire: a later
+    // matching entry still means an ordering violation.
     let r = std::panic::catch_unwind(|| shadow_point::invoke!(single::single_sp, b(1)));
     assert!(
         r.is_err(),
@@ -1062,20 +1062,21 @@ fn invoke_is_an_expression() {
 }
 
 /// D26: hook names that mirror fixed machinery names stay legal. The fixed
-/// fields live in `StateFixed` behind `State::__sp_fixed`, the fixed free
-/// functions sit in `__sp_impl`, and the generated per-hook functions live
-/// in `__sp_hooks` — so a hook may carry any of those names. This sync point
-/// declares one hook per fixed internal name (fields, free functions, types,
-/// the name table); compiling it is half the assertion, firing every hook
-/// through `invoke!` and verifying the counts is the other half. The 7
-/// reserved public names are pinned by `ci/reserved-name` instead.
+/// fields live in `StateFixed`, the generated per-hook fields in `StateRegs`
+/// (both unnamed fields of `State`), the fixed free functions sit in
+/// `__sp_impl`, and the generated per-hook functions live in `__sp_hooks` —
+/// so a hook may carry any of those names. This sync point declares one hook
+/// per fixed internal name (fields, free functions, types, the name table);
+/// compiling it is half the assertion, firing every hook through `invoke!`
+/// and verifying the counts is the other half. The 7 reserved public names
+/// are pinned by `ci/reserved-name` instead.
 mod free_names {
     shadow_point::define_sp! {
         pub mod free_sp {
-            // StateFixed fields + the State wrapper's unprefixed twin.
-            // (__sp_fixed itself shares State with the per-hook fields and
-            // is not a free name; `fixed` is.)
+            // StateFixed fields and the State wrapper's own names — every
+            // one of them is a legal hook name now.
             __sp_value(),
+            __sp_fixed(),
             fixed(),
             __sp_every(),
             __sp_sequence(),
@@ -1102,6 +1103,7 @@ mod free_names {
             // fixed types and modules (type namespace vs hook constants)
             State(),
             StateFixed(),
+            StateRegs(),
             Owner(),
             Guard(),
             Hooks(),
@@ -1142,6 +1144,7 @@ fn machinery_names_are_legal_hook_names() {
     }
     register_and_fire!(
         __sp_value,
+        __sp_fixed,
         fixed,
         __sp_every,
         __sp_sequence,
@@ -1165,6 +1168,7 @@ fn machinery_names_are_legal_hook_names() {
         __sp_name,
         State,
         StateFixed,
+        StateRegs,
         Owner,
         Guard,
         Hooks,
@@ -1183,6 +1187,6 @@ fn machinery_names_are_legal_hook_names() {
         calls,
         expected,
     );
-    assert_eq!(fires.get(), 41, "every machinery-named hook dispatched");
+    assert_eq!(fires.get(), 43, "every machinery-named hook dispatched");
     g.verify();
 }

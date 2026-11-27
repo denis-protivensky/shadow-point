@@ -18,11 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.0] - Unreleased
 
 Breaking release: the namespace and types change, the 0.4.0 deprecations are
-removed, and the `paste` dependency is dropped. Counting semantics are
-unchanged from 0.4.0 — names, types, and ownership move — and there is one
-install mode, the private `Guard`. See the README "Migrating from 0.4.x"
-for the call-site map; the `Copy` and reserved-name details are in the
-`define_sp!` rustdoc.
+removed, and the `paste` dependency is dropped. For a private guard,
+counting semantics are unchanged from 0.4.0 — names, types, and ownership
+move — and there is one install mode, the private `Guard`; shared-mode
+counts, previously totals across the shared state, become per guard. See
+the README "Migrating from 0.4.x" for the call-site map; the `Copy` and
+reserved-name details are in the `define_sp!` rustdoc.
 
 ### Changed
 - `define_sp!` now generates a **module**: `define_sp! { pub mod name { … } }`.
@@ -48,10 +49,10 @@ for the call-site map; the `Copy` and reserved-name details are in the
   a worker inside the instrumented function, holding its production locks
   — the lock the head's thread could need to arrive, a mutual deadlock
   until the park timeout. Multithreaded tests give each worker its own
-  private guard; `Gate` waits in the worker bodies after `invoke!` order
-  the threads. Dispatch closures run on the worker's stack inside the
-  instrumented function, holding its locks: they record traces and set
-  gates. A deliberate freeze — a private dispatch wait with a local
+  private guard; cross-thread order comes from `Gate` waits in the worker
+  bodies after `invoke!`. Dispatch closures run on the worker's stack
+  inside the instrumented function, holding its locks: they record traces
+  and set gates. A deliberate freeze — a private dispatch wait with a local
   budget — is legitimate choreography only when the thread that releases
   it needs nothing the blocked frame holds; the budget bounds a mistake
   to a failing test rather than removing the deadlock class.
@@ -85,12 +86,12 @@ for the call-site map; the `Copy` and reserved-name details are in the
   the fixed public names (`sequence`, `every`, `fires`, `verify`, `guard`,
   `with_dyn`, `when`). `shared` and `clone` are no longer reserved: there is
   no `Shared` type and no generated `Clone` impl to shadow. All fixed
-  machinery lives in a private submodule,
-  with fixed fields/functions kept apart from the generated per-hook ones,
-  so any other identifier (`value`, `state`, `new`, `hook`, `f`, `NAMES`,
-  `__SP_NAMES`, `__sp_state`, `__sp_value`, …) is a legal hook name; the
-  reserved names are rejected with a friendly `compile_error!` rather than a
-  raw duplicate-definition error.
+  machinery lives in a private submodule; fixed fields sit in `StateFixed`
+  and the generated per-hook fields in `StateRegs`, both unnamed fields of
+  `State`, so any other identifier (`value`, `state`, `new`, `hook`, `f`,
+  `NAMES`, `__SP_NAMES`, `__sp_state`, `__sp_value`, `__sp_fixed`, …) is a
+  legal hook name; the reserved names are rejected with a friendly
+  `compile_error!` rather than a raw duplicate-definition error.
 - `SP_TRACE` prints the zero-based call index, the same value
   `current_fire()` reports (0.4.0 printed `index + 1`).
 

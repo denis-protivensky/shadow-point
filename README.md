@@ -15,7 +15,7 @@ the same result every run.
 The guard is private to the thread that installs it. On one thread the
 operation under test and the interferer alternate at the hook — concurrency
 without parallelism; on several threads every firing worker installs its
-own guard and `Gate` rendezvous in the worker bodies pin the chosen order.
+own guard and gates in worker bodies pin the chosen order.
 Hooks receive `&T`, never `&mut T`, so the instrumented type must use
 interior mutability: both actors mutate through shared references.
 
@@ -53,7 +53,7 @@ install, clone, or share.
 
 ### 2. Fire at the linearization point
 
-```rust,ignore
+```rust,no_run
 use std::sync::atomic::{AtomicU32, Ordering};
 struct Register(AtomicU32);
 
@@ -105,22 +105,25 @@ is suppressed — instrumented code inside a hook does not recurse.
 
 | Need | Current API |
 |---|---|
-| one-shot (exactly one) | `guard.<name>(f)` — the hook must fire exactly once; the closure runs at most once, on the first fire the sequence does not claim (counting rule below) |
+| one-shot (exactly one) | `guard.<name>(f)` — the hook must fire exactly once; the closure runs at most once, on the hook's first fire and only if no sequence entry expects it (counting rule below) |
 | one-shot, other count | `guard.<name>(f).fires(n)` — `n` is the hook's fire count; the closure still runs at most once |
 | chained registration | `guard.a(f).fires(2).b(g).fires(1)` — both `fires` forms return the guard |
 | count only | `guard.fires(register_sp::a, n)` |
 | assert now | `guard.verify()` — same checks as drop, at the call site |
 | every fire | `guard.every(\|e\| { e.<name>(f); })` |
-| ordered (per worker) | `guard.sequence(\|s\| { s.a(f).b(g); })` |
+| ordered (per worker) | `guard.sequence(\|s\| { s.a(f).b(g); })` — a fire of a hook that a later pending step expects, while an earlier step is unfired, panics; a hook with no pending entry falls through |
 | conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires the first time `pred` passes. `pred` runs under the sequence lock: keep it a pure check (a blocking predicate can deadlock the test) |
 | cross-thread order | `Gate` in the worker bodies after `invoke!`; dispatch closures record and set gates — a wait there is only the deliberate freeze (see "Using guards across threads"), always with a budget |
 
 `<name>` is a hook declared in `define_sp!`. `.fires(n)` counts hook fires,
-not closure runs: a fire consumed by a sequence entry or stopped by a
-failing predicate never runs the fire-once closure, so a retrying
-operation (the CAS loop in the private example) can fire twice with one
-closure run — `.fires(2)` pins that. Without a chain, registration asserts
-exactly one fire: a missing fire *and* an extra one both fail.
+not closure runs: the fire-once closure runs only on the hook's first
+fire, and only when no sequence entry expects it. If an entry consumes
+that fire, or a failing predicate leaves the entry at the head, the closure
+never runs — a later fire cannot recover it. The counter still counts
+every fire: a retrying operation (the CAS loop in the private example) can
+fire twice with one closure run — `.fires(2)` pins that. Without a chain,
+registration asserts exactly one fire: a missing fire *and* an extra one
+both fail.
 
 Counts are per guard: each worker's guard sees only its own thread's fires.
 A second fire-once registration replaces the closure without resetting the
@@ -199,7 +202,7 @@ t2.join().unwrap();
 assert_eq!(register.0.load(Ordering::SeqCst), 2);
 ```
 
-*`#[cfg(test)]` gates omitted (quick start, step 2); runnable version:
+*`#[cfg(test)]` gates omitted (quick start, steps 1–2); runnable version:
 `examples/register_writers.rs`.*
 
 Dispatch closures (`every`, fire-once, `sequence` steps) run on the firing
@@ -236,8 +239,10 @@ cargo test --example register_writers
 ## Migrating from 0.4.x
 
 0.5.0 is a breaking release: the namespace and the types change, the 0.4.0
-deprecations are removed, and the `paste` dependency is dropped. Counting
-semantics are unchanged; there is one install mode, the private `Guard`.
+deprecations are removed, and the `paste` dependency is dropped. For a
+private guard, counting semantics are unchanged; there is one install mode,
+the private `Guard`. Shared-mode counts were totals across the shared state;
+they become per guard (see "Shared-mode users" below).
 
 - Declaration: `define_sp! { pub prefix Register { … } }` →
   `define_sp! { pub mod register_sp { … } }`. The generated type names are
@@ -337,11 +342,13 @@ production API alone and scripts one chosen interleaving inside them.
 The dispatch is per-thread; every firing worker installs its own private
 guard on its own thread. With the `tokio-async` feature, `TokioAsyncGate`
 lets an async test body wait on fires without parking the executor —
-parking holds production locks, fatal on a `current_thread` runtime.
-Dispatch closures stay non-blocking (`TokioAsyncGate::fire` is); await
-milestones in the test body. Synchronous workers wait on `Gate` in the
-worker body after `invoke!`; a dispatch closure waits only as the
-deliberate freeze described in "Using guards across threads", with a budget.
+parking holds production locks, fatal on a `current_thread` runtime. On an
+executor, a dispatch closure may call only `TokioAsyncGate::fire`, which
+does not block; await milestones in the test body. `Gate` parks the OS
+thread: wait on it in a synchronous worker body after `invoke!`, or in a
+`spawn_blocking` body — never on the executor. A dispatch closure may wait
+only as the deliberate freeze described in "Using guards across threads",
+with a budget; on an async runtime keep that body off the executor.
 
 ### Keeping shadow-point out of production builds
 
@@ -370,12 +377,12 @@ owner may be the inner guard. A failed `verify()` owns the diagnostic:
 drop then skips the remaining assertions and, on the unwind path, the
 value's destructor. On a thread that is already unwinding the state is
 deliberately leaked, so a panicking destructor cannot abort the test
-binary. Captures of an `every`
-closure or an unfired fire-once are freed with the state; a fire-once that
-did fire is dropped when its slot is taken. A destructor assertion inside
-`T::drop` runs at the last-owner drop, so a scenario that abandoned
-entries can fail there — a finding, not a regression. `Weak` and flag
-shapes still control the destructor's moment.
+binary. Captures of an `every` closure or an unfired fire-once are freed
+with the state; a fire-once that did fire is dropped when its slot is
+taken. A destructor assertion inside `T::drop` runs at the last-owner
+drop. A scenario that abandoned entries fails at the sequence assertion
+before that — a finding, not a regression. `Weak` and flag shapes still
+control the destructor's moment.
 
 The guarded type must be `Send + Sync + 'static` and mutate through `&self`.
 Hooks are side-effect only: they cannot change what the instrumented
