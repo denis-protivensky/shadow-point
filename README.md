@@ -103,31 +103,85 @@ is suppressed — instrumented code inside a hook does not recurse.
 ## Using it across threads
 
 A guard is private to the thread that installs it: a guard on the test
-thread does not see worker fires, and dispatch is per-thread. Give every
-firing worker its own `register_sp::guard(value)` on the worker thread,
-register what that worker expects, then fire.
+thread does not see worker fires. For a production object shared by
+threads, the recipe is one worker per firing thread:
 
-For a production object shared by threads, guard an `Arc<T>` clone in each
-worker: the `Arc` is the same object; each guard owns that worker's
-instrumentation. `every` records the worker's trace, `fires` counts its
-fires, `sequence` pins that worker's own protocol. Gates live in the worker
-bodies after `invoke!`; a dispatch closure (`every`, fire-once) records and
-sets gates, never waits — a blocked dispatch would hold the instrumented
-function's production locks. A blocking wait inside a private dispatch
-closure (a `sequence` step) is legal only when the thread that releases it
-needs nothing the blocked frame holds; `must_wait` with a test-local budget
-bounds a mistake to a failing test rather than removing the deadlock class.
+1. Share the value as `Arc<T>`.
+2. Inside the worker, install `register_sp::guard(arc.clone())`. `Guard` is
+   `!Send`: it is created and dropped on the thread that fires; moving one
+   across threads is a compile error, not a runtime trap.
+3. Register on that guard what *this* worker's fires must do — `every`
+   records the trace, `.fires(n)` counts, `sequence` pins the worker's own
+   protocol. Counts are per guard: a worker's guard sees only its own fires.
+4. Order the workers with `Gate` in the worker bodies: `set` after the fire
+   you want observed, `must_wait(budget)` before the fire that must come
+   later. The budget is test policy — a local `Duration` constant.
 
-The lost-update pin is the canonical shape: the victim reads, the hook
-freezes it, the racer writes and releases, the victim's stale write clobbers
-the racer. One test, two threads, a `Gate`; the final value pins the race
-(`lost_update_is_pinned_by_a_frozen_private_step` in
-`tests/cross_thread.rs`).
+```rust,no_run
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
-A guard is `!Send`: drop it on the thread that created it; moving one
-across threads is a compile error, not a runtime trap. Nested guards of one
-sync point drop in reverse order; dropping an outer guard first detaches
-the inner one, whose fires become no-ops.
+shadow_point::define_sp! {
+    pub(crate) mod register_sp {
+        before_store(value: u32),
+    }
+}
+
+struct Register(AtomicU32);
+
+impl Register {
+    fn store(&self, value: u32) {
+        shadow_point::invoke!(register_sp, before_store(value));
+        self.0.store(value, Ordering::SeqCst);
+    }
+}
+
+let register = Arc::new(Register(AtomicU32::new(0)));
+let stored_1 = Arc::new(shadow_point::Gate::new());
+
+// Writer 1: the guard is created and dropped on its own thread.
+let t1 = thread::spawn({
+    let (register, stored_1) = (register.clone(), stored_1.clone());
+    move || {
+        let guard = register_sp::guard(register);
+        guard.before_store(|_, value| assert_eq!(value, 1)); // this worker's fire
+        guard.store(1);
+        stored_1.set(); // the gate lives in the worker body, after the fire
+    }
+});
+
+// Writer 2: the gate wait lives in its worker body; a dispatch wait is
+// only the deliberate freeze below, with a budget.
+let t2 = thread::spawn({
+    let register = register.clone();
+    move || {
+        stored_1.must_wait(Duration::from_secs(10)); // a test-local budget
+        let guard = register_sp::guard(register);
+        guard.before_store(|_, value| assert_eq!(value, 2));
+        guard.store(2);
+    }
+});
+
+t1.join().unwrap();
+t2.join().unwrap();
+assert_eq!(register.0.load(Ordering::SeqCst), 2);
+```
+
+*Illustrative, not run: as in `examples/`, the `#[cfg(test)]` gates are
+omitted; `invoke!` dispatches only under `cfg(test)`, so a doctest never
+fires. Runnable version: `examples/register_writers.rs`.*
+
+Dispatch closures (`every`, fire-once, `sequence` steps) run on the firing
+stack, inside the instrumented function, holding its locks: normally they
+record and set gates only. The deliberate exception is the freeze — the
+lost-update pin, where the victim's own hook *waits* between its read and
+its stale write (`lost_update_is_pinned_by_a_frozen_private_step` in
+`tests/cross_thread.rs`). Freeze only when the thread that releases the
+gate needs nothing the blocked frame holds, and only with a budget
+(`Gate::must_wait`): the budget turns a mistake into a failing test; it
+does not remove the deadlock class.
 
 ## Examples
 
@@ -162,7 +216,7 @@ cargo test --example register_writers
 | every fire | `guard.every(\|e\| { e.<name>(f); })` |
 | ordered (per worker) | `guard.sequence(\|s\| { s.a(f).b(g); })` |
 | conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires the first time `pred` passes. `pred` runs under the sequence lock: keep it a pure check (a blocking predicate can deadlock the test) |
-| cross-thread order | `Gate` in the worker bodies after `invoke!`; dispatch closures (`every`, fire-once) record traces and set gates, never wait |
+| cross-thread order | `Gate` in the worker bodies after `invoke!`; dispatch closures record and set gates — a wait there is only the deliberate freeze (see "Using it across threads"), always with a budget |
 
 `<name>` is a hook declared in `define_sp!`. `.fires(n)` counts hook fires,
 not closure runs: a fire consumed by a sequence entry or stopped by a
@@ -184,7 +238,6 @@ to allow "may or may not fire", split the test. There is no `optional`.
 0.5.0 is a breaking release: the namespace and the types change, the 0.4.0
 deprecations are removed, and the `paste` dependency is dropped. Counting
 semantics are unchanged; there is one install mode, the private `Guard`.
-The full name map is in the CHANGELOG.
 
 - Declaration: `define_sp! { pub prefix Register { … } }` →
   `define_sp! { pub mod register_sp { … } }`. The generated type names are
@@ -220,9 +273,7 @@ The full name map is in the CHANGELOG.
   `guard`, `with_dyn`, `when`); `shared` and `clone` are no longer
   reserved. Details: `define_sp!` rustdoc, "Hook arguments" / "Reserved
   hook names".
-- Ownership: assertions and reclamation run at the last owner's drop;
-  nested guards of one sync point drop in reverse order (dropping an outer
-  guard first detaches the inner one, whose fires become no-ops). See
+- Ownership: assertions and reclamation run at the last owner's drop; see
   "Reclamation and ownership" below.
 
 ## FAQ
@@ -286,7 +337,8 @@ lets an async test body wait on fires without parking the executor —
 parking holds production locks, fatal on a `current_thread` runtime.
 Dispatch closures stay non-blocking (`TokioAsyncGate::fire` is); await
 milestones in the test body. Synchronous workers wait on `Gate` in the
-worker body after `invoke!`, never inside a dispatch closure.
+worker body after `invoke!`; a dispatch closure waits only as the
+deliberate freeze described in "Using it across threads", with a budget.
 
 ### Keeping shadow-point out of production builds
 
@@ -306,8 +358,10 @@ form does not transfer to a consumer's `src/` under `[dev-dependencies]`.
 
 `guard` owns the state through an `Arc`; the last owner releases it, and
 the guarded value's `Drop` runs there, after the sync-point assertions.
-`drop(guard)` while an inner guard is live gives no verdict, and the last
-owner may be the inner guard. A failed `verify()` owns the diagnostic:
+Nested guards of one sync point drop in reverse order; dropping an outer
+guard first detaches the inner one, whose fires become no-ops. `drop(guard)`
+while an inner guard is live gives no verdict, and the last owner may be
+the inner guard. A failed `verify()` owns the diagnostic:
 drop then skips the remaining assertions and the value's destructor. On a
 thread that is already unwinding the state is deliberately leaked, so a
 panicking destructor cannot abort the test binary. Captures of an `every`

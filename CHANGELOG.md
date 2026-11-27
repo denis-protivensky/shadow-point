@@ -48,15 +48,12 @@ for the full call-site map.
   production locks — the lock the head's thread could need to arrive, a
   mutual deadlock until the park timeout. Multithreaded tests give each
   worker its own private guard; `Gate` waits in the worker bodies after
-  `invoke!` order the threads. No dispatch closure may wait: `every` and
-  fire-once callbacks both run on the worker's stack inside the instrumented
-  function; they record traces and set gates only. A blocking wait inside a
-  *private* dispatch closure, including a step, remains legitimate
-  choreography only when the thread that releases it needs nothing the
-  blocked frame holds: the private dispatcher never waits on another
-  thread, but the frame still owns the instrumented function's locks, and a
-  `must_wait` budget bounds a mistake to a failing test rather than
-  removing the deadlock class.
+  `invoke!` order the threads. Dispatch closures run on the worker's stack
+  inside the instrumented function, holding its locks: they record traces
+  and set gates. A deliberate freeze — a private dispatch wait with a
+  local budget — is legitimate choreography only when the thread that
+  releases it needs nothing the blocked frame holds; the budget bounds a
+  mistake to a failing test rather than removing the deadlock class.
 - `invoke!` takes the module path (`invoke!(name, hook(args))`) and expands to
   a block expression, so it works in expression position (closure body, block
   tail, `let` initializer) in both test and production builds.
