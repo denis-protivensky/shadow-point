@@ -782,7 +782,7 @@ fn an_assertion_panic_does_not_run_the_value_destructor_mid_unwind() {
     // The drop assertions are OUR panic and fire on a clean thread, so
     // `Owner::drop` unwinds out of `assert_fires` rather than entering it
     // with `panicking()` already true. The state must be out of the implicit
-    // drop path by then: a plain local `Arc` would be freed by that unwind,
+    // drop path by then: a plain local `Rc` would be freed by that unwind,
     // running `T::drop` mid-unwind — a second panic if the destructor raises,
     // i.e. exactly the abort the assertion order exists to prevent.
     static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

@@ -74,7 +74,7 @@ reserved-name details are in the `define_sp!` rustdoc.
 - Both `fires` forms return the handle (`&Guard`), so fire-once
   registrations chain: `guard.a(f).fires(2).b(h).fires(1)`.
 - Assertions and reclamation run in one place — `Owner<T>::drop` on the last
-  `Arc<Owner<T>>` — without `unsafe` (`#![forbid(unsafe_code)]` stays).
+  `Rc<Owner<T>>` — without `unsafe` (`#![forbid(unsafe_code)]` stays).
   `State<T>` has no `Drop`; `Guard::drop` only restores TLS. `drop(guard)`
   while an inner guard is live gives no verdict and frees nothing; the last
   owner may be the inner `Guard`. The raise-or-print-on-unwind rule and the

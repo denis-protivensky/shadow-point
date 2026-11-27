@@ -155,6 +155,11 @@ threads, the recipe is one guard per firing thread:
 
 ```rust,ignore
 // `Register` and `register_sp` come from the quick start.
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
 let register = Arc::new(Register(AtomicU32::new(0)));
 let stored_1 = Arc::new(shadow_point::Gate::new());
 
@@ -351,7 +356,7 @@ form does not transfer to a consumer's `src/` under `[dev-dependencies]`.
 
 ### Reclamation and ownership
 
-`guard` owns the state through an `Arc`; the last owner releases it, and
+`guard` owns the state through an `Rc`; the last owner releases it, and
 the guarded value's `Drop` runs there, after the sync-point assertions.
 Nested guards of one sync point drop in reverse order; dropping an outer
 guard first detaches the inner one, whose fires become no-ops. The inner
