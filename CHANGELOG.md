@@ -94,6 +94,9 @@ reserved-name details are in the `define_sp!` rustdoc.
   `compile_error!` rather than a raw duplicate-definition error.
 - `SP_TRACE` prints the zero-based call index, the same value
   `current_fire()` reports (0.4.0 printed `index + 1`).
+- `Hook` no longer derives `Hash`, and `FireInfo` no longer derives
+  `PartialEq`/`Eq`: the crate had no use for them, and the 0.5.0 breaking
+  window is the time to narrow the public metadata surface.
 
 ### Removed
 - The shared mode: `Shared<T>` with its full registration (`sequence`,

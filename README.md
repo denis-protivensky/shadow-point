@@ -299,6 +299,12 @@ They *find* an interleaving you did not choose. `shadow-point` pins the one
 you already chose, in real code. Use them together: find the bad schedule
 with a model checker, then write a deterministic regression test for it here.
 
+### Why not Miri/TSan or a simulator?
+
+Miri and TSan *detect* whatever race a run happens to produce; simulators
+replace the runtime. `shadow-point` leaves both the runtime and the
+production API alone and scripts one chosen interleaving inside them.
+
 ### Why not failpoints?
 
 They overlap partly: inside a crate's own unit tests a shadow hook covers a
@@ -330,12 +336,6 @@ private to it. The hook writes the flag, the site decides what to return.
 Register with `every` when the site may fire more than once, or when the
 flag should depend on the call's arguments. Under `[dev-dependencies]`,
 wrap the block in a seam macro (see `invoke!`'s "Dev-dependency seam").
-
-### Why not Miri/TSan or a simulator?
-
-Miri and TSan *detect* whatever race a run happens to produce; simulators
-replace the runtime. `shadow-point` leaves both the runtime and the
-production API alone and scripts one chosen interleaving inside them.
 
 ### Tokio and thread-locals
 
