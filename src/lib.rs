@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 // The crate dogfoods the lint its consumers are subject to. `define_sp!`
-// emits public items (trait, guard, hook methods/constants, builders), and
+// emits public items (guard, hook enum/constants, hook methods, builders), and
 // a consumer that keeps `#![deny(missing_docs)]` fails its
 // *test* build on any of them that carries no doc comment — production
 // builds are clean because the caller gates the macro with `#[cfg(test)]`,

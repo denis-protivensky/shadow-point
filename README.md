@@ -17,8 +17,9 @@ operation under test and the interferer alternate at the hook — concurrency
 without parallelism; on several threads every firing worker installs its
 own guard and `Gate` rendezvous in the worker bodies pin the chosen order.
 Hooks receive `&T`, never `&mut T`, so the instrumented type must use
-interior mutability: both actors mutate through shared references. In
-production, hooks compile to nothing.
+interior mutability: both actors mutate through shared references.
+
+In production, hooks compile to nothing.
 
 ## Quick start
 
@@ -197,6 +198,9 @@ t1.join().unwrap();
 t2.join().unwrap();
 assert_eq!(register.0.load(Ordering::SeqCst), 2);
 ```
+
+*`#[cfg(test)]` gates omitted (quick start, step 2); runnable version:
+`examples/register_writers.rs`.*
 
 Dispatch closures (`every`, fire-once, `sequence` steps) run on the firing
 stack, inside the instrumented function, holding its locks: normally they
