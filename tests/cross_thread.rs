@@ -148,7 +148,7 @@ fn gate_level_triggered() {
 }
 
 #[test]
-fn fires_aggregates_threads() {
+fn fires_are_counted_per_guard() {
     let count = Arc::new(AtomicU32::new(0));
 
     let t1 = {
@@ -337,6 +337,7 @@ fn lost_update_is_pinned_by_a_frozen_private_step() {
     let release = Arc::new(Gate::new());
 
     let value_v = value.clone();
+    let check_v = value_v.clone();
     let in_step_v = in_step.clone();
     let release_v = release.clone();
     let victim = std::thread::spawn(move || {
@@ -344,6 +345,10 @@ fn lost_update_is_pinned_by_a_frozen_private_step() {
         g.a(move |_, _| {
             in_step_v.set();
             release_v.must_wait(GATE_TIMEOUT);
+            // The freeze is real only if the racer's distinct write has
+            // landed before the victim's stale write; a removed wait fails
+            // here or at the final value.
+            assert_eq!(check_v.load(Ordering::SeqCst), 100);
         });
         let read = value_v.load(Ordering::SeqCst);
         shadow_point::invoke!(ct::ct_sp, a(0)); // freeze between read and write
@@ -351,7 +356,7 @@ fn lost_update_is_pinned_by_a_frozen_private_step() {
     });
 
     in_step.must_wait(GATE_TIMEOUT);
-    value.store(1, Ordering::SeqCst); // the racer's write lands first
+    value.store(100, Ordering::SeqCst); // the racer's write lands first
     release.set();
 
     victim.join().unwrap();

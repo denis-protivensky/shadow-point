@@ -708,6 +708,18 @@ fn reuses_of_the_state_address_do_not_suppress_a_live_dispatch() {
 }
 
 #[test]
+#[should_panic(expected = "fired 0 time(s), expected 1")]
+fn dropping_the_outer_guard_first_detaches_the_inner() {
+    let outer = single::single_sp::guard(());
+    outer.fires(single::single_sp::a, 0);
+    let inner = single::single_sp::guard(());
+    inner.fires(single::single_sp::a, 1);
+    drop(outer);
+    shadow_point::invoke!(single::single_sp, a(0));
+    drop(inner);
+}
+
+#[test]
 fn stacked_installs_release_the_inner_and_keep_the_outer_alive() {
     // The outer state lives on through the inner guard's `old` handle: the
     // outer fires must still reach it after the inner scope closes.

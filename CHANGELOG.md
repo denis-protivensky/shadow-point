@@ -66,7 +66,7 @@ for the call-site map; the `Copy` and reserved-name details are in the
   its own signature (a postfix `.when(pred)` on the builder cannot: it would
   have to fit every hook's signature at once).
 - Both `fires` forms return the handle (`&Guard`), so fire-once
-  registrations chain: `g.a(f).fires(2).b(g).fires(1)`.
+  registrations chain: `guard.a(f).fires(2).b(h).fires(1)`.
 - Assertions and reclamation run in one place — `Owner<T>::drop` on the last
   `Arc<Owner<T>>` — without `unsafe` (`#![forbid(unsafe_code)]` stays).
   `State<T>` has no `Drop`; `Guard::drop` only restores TLS. `drop(guard)`

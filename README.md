@@ -46,10 +46,10 @@ shadow_point::define_sp! {
 ```
 
 `mod register_sp` generates a module with fixed names: the `guard`
-constructor, the private `Guard` type, a hook constant per hook, and the
-registration builders (full surface: `define_sp!` rustdoc). Distinct module
-names can share a file. A guard is thread-local; there is no central handle
-to install, clone, or share.
+constructor, the private `Guard<T>`, the `Hook` type, and a hook constant
+per hook (full surface: `define_sp!` rustdoc). Distinct module names can
+share a file. A guard is thread-local; there is no central handle to
+install, clone, or share.
 
 ### 2. Fire at the linearization point
 
@@ -183,7 +183,7 @@ let t1 = thread::spawn({
 });
 
 // Writer 2: the gate wait lives in its worker body; a dispatch wait is
-// only the deliberate freeze below, with a budget.
+// only the deliberate freeze (described below), with a budget.
 let t2 = thread::spawn({
     let register = register.clone();
     move || {
@@ -269,7 +269,7 @@ semantics are unchanged; there is one install mode, the private `Guard`.
 - Removed: `.expect(n)` → `.fires(n)`; `.expect_calls(hook, n)` →
   `fires(hook, n)`; `optional()` — every entry is mandatory, use
   `fires(hook, 0)` for "must not fire" or split the test. Both `fires`
-  forms return the handle: `g.a(f).fires(2).b(g).fires(1)`.
+  forms return the handle: `guard.a(f).fires(2).b(h).fires(1)`.
 - Hook arguments must be `Copy` (rejected at the declaration now); declare
   a reference or raw pointer when the call site keeps the value. Reserved
   hook names are the fixed surface (`sequence`, `every`, `fires`, `verify`,
@@ -285,8 +285,8 @@ semantics are unchanged; there is one install mode, the private `Guard`.
 
 The instant a concurrent operation takes effect: the store that publishes
 the value, the CAS that wins, the lookup that decides the key is free.
-The hook closure runs exactly between "the decision" and "the effect",
-without touching the production API or the runtime.
+The hook closure runs exactly between "the decision" and "the effect";
+`shadow-point` leaves the production API and the runtime alone.
 
 ### Why not loom or shuttle?
 
@@ -367,9 +367,10 @@ guard's drop then restores the outer install with no guard alive, so the
 outer's verdict lands outside the test's control (see the `Guard` rustdoc).
 `drop(guard)` while an inner guard is live gives no verdict, and the last
 owner may be the inner guard. A failed `verify()` owns the diagnostic:
-drop then skips the remaining assertions and the value's destructor. On a
-thread that is already unwinding the state is deliberately leaked, so a
-panicking destructor cannot abort the test binary. Captures of an `every`
+drop then skips the remaining assertions and, on the unwind path, the
+value's destructor. On a thread that is already unwinding the state is
+deliberately leaked, so a panicking destructor cannot abort the test
+binary. Captures of an `every`
 closure or an unfired fire-once are freed with the state; a fire-once that
 did fire is dropped when its slot is taken. A destructor assertion inside
 `T::drop` runs at the last-owner drop, so a scenario that abandoned

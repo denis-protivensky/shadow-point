@@ -1222,8 +1222,9 @@ macro_rules! define_sp {
                     /// Run the drop assertions now, at the caller's location.
                     ///
                     /// On failure the state is marked reported: drop then
-                    /// skips the remaining assertions and the guarded value's
-                    /// destructor, so this call owns the diagnostic.
+                    /// skips the remaining assertions and, on the unwind path,
+                    /// the guarded value's destructor, so this call owns the
+                    /// diagnostic.
                     #[track_caller]
                     pub fn verify(&self) {
                         assert_fires(guard_state(self), false);

@@ -18,6 +18,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+#[cfg(test)]
 shadow_point::define_sp! {
     pub(crate) mod register_sp {
         before_store(value: u32),
