@@ -1076,8 +1076,6 @@ mod free_names {
             new_owner(),
             owner_state(),
             guard_state(),
-            install_tls(),
-            attach(),
             bump_call(),
             set_expected(),
             set_expected_if_unset(),
@@ -1143,8 +1141,6 @@ fn machinery_names_are_legal_hook_names() {
         new_owner,
         owner_state,
         guard_state,
-        install_tls,
-        attach,
         bump_call,
         set_expected,
         set_expected_if_unset,
@@ -1175,6 +1171,6 @@ fn machinery_names_are_legal_hook_names() {
         calls,
         expected,
     );
-    assert_eq!(fires.get(), 43, "every machinery-named hook dispatched");
+    assert_eq!(fires.get(), 41, "every machinery-named hook dispatched");
     g.verify();
 }

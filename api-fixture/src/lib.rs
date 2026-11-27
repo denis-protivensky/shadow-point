@@ -25,7 +25,7 @@ pub fn generated_surface_names() {
     let _seq: Option<api_sp::Seq<u32>> = None;
     let _when: Option<WhenHandle<'_>> = None;
     let _every: Option<api_sp::Every<u32>> = None;
-    let _expect: Option<api_sp::Expect<'_, u32, api_sp::Guard<u32>>> = None;
+    let _expect: Option<api_sp::Expect<'_, u32>> = None;
     let _with_dyn: () = api_sp::with_dyn(|_| ());
 }
 

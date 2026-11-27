@@ -645,7 +645,7 @@ macro_rules! define_sp {
 
                 // Dispatch trait: erases the guarded value type so one
                 // thread-local slot serves any `T`.
-                pub trait Hooks: Send + Sync {
+                pub trait Hooks {
                     $(
                         fn $method(&self $( , _: $arg_ty)*) {
                             // D29: reject non-Copy hook arguments at the
@@ -1002,12 +1002,10 @@ macro_rules! define_sp {
                 // ── Owner: the single assertion/reclamation point ────
 
                 struct Owner<T: Send + Sync + 'static> {
-                    state: Option<::std::sync::Arc<State<T>>>,
+                    state: Option<State<T>>,
                 }
 
-                fn new_owner<T: Send + Sync + 'static>(
-                    state: ::std::sync::Arc<State<T>>,
-                ) -> Owner<T> {
+                fn new_owner<T: Send + Sync + 'static>(state: State<T>) -> Owner<T> {
                     Owner { state: Some(state) }
                 }
 
@@ -1147,21 +1145,20 @@ macro_rules! define_sp {
                 /// The handle returned by a fire-once registration;
                 /// `.fires(n)` pins the count and returns the registration
                 /// handle for chaining.
-                pub struct Expect<'a, T: Send + Sync + 'static, R> {
-                    reg: &'a R,
-                    state: &'a State<T>,
+                pub struct Expect<'a, T: Send + Sync + 'static> {
+                    reg: &'a Guard<T>,
                     hook: Hook,
                 }
 
-                impl<'a, T: Send + Sync + 'static, R> Expect<'a, T, R> {
-                    fn new(reg: &'a R, state: &'a State<T>, hook: Hook) -> Self {
-                        Self { reg, state, hook }
+                impl<'a, T: Send + Sync + 'static> Expect<'a, T> {
+                    fn new(reg: &'a Guard<T>, hook: Hook) -> Self {
+                        Self { reg, hook }
                     }
 
                     /// Assert the hook fires exactly `n` times; returns the
                     /// registration handle.
-                    pub fn fires(self, n: usize) -> &'a R {
-                        set_expected(self.state, self.hook, n);
+                    pub fn fires(self, n: usize) -> &'a Guard<T> {
+                        set_expected(guard_state(self.reg), self.hook, n);
                         self.reg
                     }
                 }
@@ -1200,9 +1197,9 @@ macro_rules! define_sp {
                         pub fn $method(
                             &self,
                             f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
-                        ) -> Expect<'_, T, Self> {
+                        ) -> Expect<'_, T> {
                             __sp_hooks::$method(guard_state(self), f);
-                            Expect::new(self, guard_state(self), Hook::$method)
+                            Expect::new(self, Hook::$method)
                         }
                     )+
 
@@ -1254,36 +1251,23 @@ macro_rules! define_sp {
 
                 // ── TLS attach ───────────────────────────────────────
 
-                fn install_tls<T: Send + Sync + 'static>(
-                    owner: &::std::sync::Arc<Owner<T>>,
-                ) -> Option<::std::sync::Arc<dyn Hooks>> {
-                    // `.clone()` at the binding, not `Arc::clone`: the
-                    // unsizing coercion to `Arc<dyn Hooks>` happens at the
-                    // binding.
-                    let handle: ::std::sync::Arc<dyn Hooks> = owner.clone();
-                    TL.with(|c| {
-                        let mut slot = c.borrow_mut();
-                        slot.replace(handle)
-                    })
-                }
-
-                fn attach<T: Send + Sync + 'static>(
-                    owner: ::std::sync::Arc<Owner<T>>,
-                ) -> Guard<T> {
-                    let old = install_tls(&owner);
-                    Guard { owner, old, _not_send: ::std::marker::PhantomData }
-                }
-
                 // Constructors live here, not in the public module: the
                 // parameter `value` would otherwise collide with a hook
                 // constant named `value` in the module's value namespace.
                 /// Install a private guard driving this sync point for `value`.
                 #[track_caller]
                 pub fn guard<T: Send + Sync + 'static>(value: T) -> Guard<T> {
-                    let owner = ::std::sync::Arc::new(new_owner(::std::sync::Arc::new(
-                        new_state(value, std::panic::Location::caller()),
+                    let owner = ::std::sync::Arc::new(new_owner(new_state(
+                        value,
+                        std::panic::Location::caller(),
                     )));
-                    attach(owner)
+                    // Unsize at the binding, not on the slot write.
+                    let handle: ::std::sync::Arc<dyn Hooks> = owner.clone();
+                    let old = TL.with(|c| {
+                        let mut slot = c.borrow_mut();
+                        slot.replace(handle)
+                    });
+                    Guard { owner, old, _not_send: ::std::marker::PhantomData }
                 }
             }
 
