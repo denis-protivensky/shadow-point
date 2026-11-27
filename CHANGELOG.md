@@ -18,28 +18,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.0] - Unreleased
 
 Breaking release: the namespace and types change, the 0.4.0 deprecations are
-removed, and the `paste` dependency is dropped. Counting semantics are
-unchanged from 0.4.0 — only names, types, and ownership move. See the README
-"Migrating from 0.4.x" for the full call-site map.
+removed, and the `paste` dependency is dropped. For a private guard,
+counting semantics are unchanged from 0.4.0 — names, types, and ownership
+move — and there is one install mode, the private `Guard`; shared-mode
+counts, previously totals across the shared state, become per guard. See
+the README "Migrating from 0.4.x" for the call-site map; the `Copy` and
+reserved-name details are in the `define_sp!` rustdoc.
 
 ### Changed
 - `define_sp!` now generates a **module**: `define_sp! { pub mod name { … } }`.
   The 0.4.0 generated names (`XSp`, `XSpGuard`, `XSharedSp`, `XSharedGuard`,
   `XSeqBuilder`, `EveryClosures`, `SpExpect`, `XHook`, `XSyncPoint`) are gone.
-  The user-facing surface is the `guard`/`shared` constructors, a clonable
-  `Shared<T>`, a hook-identifier constant per hook, and the `Hook` identifier
+  The user-facing surface is the `guard` constructor, the private
+  `Guard<T>`, a hook-identifier constant per hook, and the `Hook` identifier
   type; the builders (`Seq`, `When`, `Every`, `Expect`) and the `with_dyn`
   dispatch seam are `#[doc(hidden)]` internals, and the `Hooks` dispatch trait
   is private to the generated submodule (not re-exported).
   Several sync points can now share a file (distinct module names); the
   one-invocation-per-module rule is gone.
-- `install_guard`/`install_shared`/`install` → `guard`/`shared`/`shared.guard()`.
-  `shared(value)` returns `Shared<T>` (`Clone`, `Send + Sync`), not
-  `Arc<…SharedSp<T>>`; hand clones to workers.
-- The per-thread guard is one `Guard<T>` type in both modes; the registration
-  API (`Deref`, fire-once/`sequence`/`every`/`fires`/`verify`) mirrors on
-  `Guard` and `Shared`. `Guard` is `!Send` (`PhantomData<*const ()>`): moving
-  it across threads is a compile error.
+- `install_guard` → `guard`. `Guard<T>` is the only guard type: it is
+  private to the thread that installs it, keeps `Deref` and the full
+  registration API (fire-once/`sequence`/`every`/`fires`/`verify`), and is
+  `!Send` (`Rc` inside): moving one across threads is a compile error. A
+  multithreaded test gives each firing worker its own `guard`; each guard's
+  registrations and counts are that worker's own. For a production object
+  shared by threads, guard an `Arc<T>` clone per worker.
+- The private guard needs only `T: 'static`: the state and the dispatch
+  closures never leave the installing thread, so fire-once/`sequence`
+  closures and `when` predicates no longer require `Send`, and `every` no
+  longer requires `Send + Sync`. `Rc`/`RefCell` state and captures are
+  legal; a captured borrow still fails the `'static` bound.
+- **One guard per firing thread; no central shared handle.** `Shared<T>`
+  with its full registration (`sequence`, `every`, `fires`, `verify`),
+  `shared()`, and the attach path are removed: a central `sequence` parked
+  a worker inside the instrumented function, holding its production locks
+  — the lock the head's thread could need to arrive, a mutual deadlock
+  until the park timeout. Multithreaded tests give each worker its own
+  private guard; cross-thread order comes from `Gate` waits in the worker
+  bodies after `invoke!`. Dispatch closures run on the worker's stack
+  inside the instrumented function, holding its locks: they record traces
+  and set gates. A deliberate freeze — a private dispatch wait with a local
+  budget — is legitimate choreography only when the thread that releases
+  it needs nothing the blocked frame holds; the budget bounds a mistake
+  to a failing test rather than removing the deadlock class.
 - `invoke!` takes the module path (`invoke!(name, hook(args))`) and expands to
   a block expression, so it works in expression position (closure body, block
   tail, `let` initializer) in both test and production builds.
@@ -50,13 +71,13 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   for that hook's arguments, so a single-hook predicate need only satisfy
   its own signature (a postfix `.when(pred)` on the builder cannot: it would
   have to fit every hook's signature at once).
-- Both `fires` forms return the handle (`&Guard` / `&Shared`), so fire-once
-  registrations chain: `g.a(f).fires(2).b(g).fires(1)`.
+- Both `fires` forms return the handle (`&Guard`), so fire-once
+  registrations chain: `guard.a(f).fires(2).b(h).fires(1)`.
 - Assertions and reclamation run in one place — `Owner<T>::drop` on the last
-  `Arc<Owner<T>>` — for both modes, without `unsafe` (`#![forbid(unsafe_code)]`
-  stays). `State<T>` has no `Drop`; `Guard::drop` only restores TLS.
-  `drop(shared)` with a live guard gives no verdict and frees nothing; the
-  last owner may be a `Guard`. The raise-or-print-on-unwind rule and the
+  `Rc<Owner<T>>` — without `unsafe` (`#![forbid(unsafe_code)]` stays).
+  `State<T>` has no `Drop`; `Guard::drop` only restores TLS. `drop(guard)`
+  while an inner guard is live gives no verdict and frees nothing; the last
+  owner may be the inner `Guard`. The raise-or-print-on-unwind rule and the
   deliberate leak on a failing thread are unchanged.
 - Counters are a `Vec<AtomicUsize>` sized by the hook list; the `__SP_COUNT`
   associated constant and the `[T; N]: Default` (N ≤ 32) ceiling are gone.
@@ -66,25 +87,43 @@ unchanged from 0.4.0 — only names, types, and ownership move. See the README
   const check spans the declared type) instead of failing inside the
   expansion. Arguments must be `Copy`; declare a reference or raw pointer
   when the call site keeps the value.
-- The reserved-hook-name list is rebuilt for the module surface (9 arms):
-  the fixed public names (`sequence`, `every`, `fires`, `verify`, `guard`,
-  `shared`, `with_dyn`, `when`, `clone` — the last would shadow the generated
-  `Clone` impl on `Shared`). All fixed machinery lives in a private submodule,
-  with fixed fields/functions kept apart from the generated per-hook ones,
-  so any other identifier (`value`, `state`, `new`, `hook`, `f`, `NAMES`,
-  `__SP_NAMES`, `__sp_state`, `__sp_value`, …) is a legal hook name; the
-  reserved names are rejected with a friendly `compile_error!` rather than a
-  raw duplicate-definition error.
+- The reserved-hook-name list is rebuilt for the module surface (7 names,
+  plain and raw): the fixed public names (`sequence`, `every`, `fires`,
+  `verify`, `guard`, `with_dyn`, `when`) get the diagnostic as themselves
+  and as `r#sequence`-style raw identifiers. `shared` and `clone` are no longer reserved: there is
+  no `Shared` type and no generated `Clone` impl to shadow. All fixed
+  machinery lives in a private submodule; fixed fields sit in `StateFixed`
+  and the generated per-hook fields in `StateRegs`, both unnamed fields of
+  `State`, so any other identifier (`value`, `state`, `new`, `hook`, `f`,
+  `NAMES`, `__SP_NAMES`, `__sp_state`, `__sp_value`, `__sp_fixed`, …) is a
+  legal hook name; the reserved names are rejected with a friendly
+  `compile_error!` rather than a raw duplicate-definition error.
 - `SP_TRACE` prints the zero-based call index, the same value
   `current_fire()` reports (0.4.0 printed `index + 1`).
+- `Hook` no longer derives `Hash`, and `FireInfo` no longer derives
+  `PartialEq`/`Eq`: the crate had no use for them, and the 0.5.0 breaking
+  window is the time to narrow the public metadata surface.
 
 ### Removed
+- The shared mode: `Shared<T>` with its full registration (`sequence`,
+  `every`, `fires`, `verify`), `shared(value)`/`install_shared`, and the
+  attach path (0.4.x `shared.install()` / `SharedGuard`; the 0.5.0
+  module's `shared.guard()`). Migration: one private `guard` per firing
+  thread; `sequence` per worker; gates for cross-thread order.
+- The shared-park dispatch arm, the sequence condvar,
+  `park_timeout()`, `SP_PARK_TIMEOUT_MS`, and the timeout cache/resolver with
+  their tests (`tests/park_timeout_env.rs`, the resolver unit tests, the
+  32-bit `test32` CI job that existed for the cache boundary). The parking
+  mechanism had no real consumer and was the only source of timeouts inside
+  dispatch. A gate-wait budget is test policy: pass a local constant to
+  `Gate::must_wait`/`wait_timeout`.
 - `SeqBuilder::optional`, the `SeqEntry.optional` field, the shared-mode
   optional head-skip, and the `assert_fires` optional filter. Every sequence
   entry is mandatory; use `fires(hook, 0)` for "must not fire" or split the
   test.
 - The deprecated `.expect(n)`, `.expect_calls(hook, n)`, and `PARK_TIMEOUT`.
-  Use `.fires(n)`, `fires(hook, n)`, and `park_timeout()`.
+  Use `.fires(n)` and `fires(hook, n)`; `PARK_TIMEOUT`'s replacement
+  `park_timeout()` is itself removed with the parking (see above).
 - The public `SyncPoint` marker trait (the dispatch trait stays internal for
   type erasure) and the `paste` dependency — the crate now has **zero
   non-optional dependencies**.

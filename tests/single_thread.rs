@@ -134,14 +134,14 @@ fn sequence_head_consumes_the_first_fire_and_blocks_fire_once() {
 }
 
 #[test]
-fn mismatched_head_with_later_match_panics_in_private_mode() {
+fn mismatched_head_with_later_match_panics() {
     let g = single::single_sp::guard(());
     g.sequence(|s| {
         s.a(|(), _| {});
         s.b(|(), _| {});
     });
-    // Private mode never skips the head on a mismatched fire: a later
-    // matching entry still means ordering violation.
+    // The sequence never skips the head on a mismatched fire: a later
+    // matching entry still means an ordering violation.
     let r = std::panic::catch_unwind(|| shadow_point::invoke!(single::single_sp, b(1)));
     assert!(
         r.is_err(),
@@ -341,21 +341,6 @@ fn failed_verify_owns_the_unreached_mismatch() {
         !stderr.contains("hook `b`"),
         "Drop must not report the mismatch verify did not reach: {stderr}"
     );
-}
-
-#[test]
-fn shared_last_arc_assertion_does_not_abort_while_unwinding() {
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let shared = single::single_sp::shared(());
-        shared.sequence(|q| {
-            q.a(|_, _| ());
-        });
-        let _inst = shared.guard();
-        // Unwind drops `_inst` (one Arc clone) and then `shared` — the
-        // last reference — so the shared assertion fires mid-unwinding.
-        panic!("the test's own failure");
-    }));
-    assert!(outcome.is_err(), "the scenario failed as designed");
 }
 
 /// The clean-exit path keeps its teeth: a test that ends with an
@@ -723,6 +708,18 @@ fn reuses_of_the_state_address_do_not_suppress_a_live_dispatch() {
 }
 
 #[test]
+#[should_panic(expected = "fired 0 time(s), expected 1")]
+fn dropping_the_outer_guard_first_detaches_the_inner() {
+    let outer = single::single_sp::guard(());
+    outer.fires(single::single_sp::a, 0);
+    let inner = single::single_sp::guard(());
+    inner.fires(single::single_sp::a, 1);
+    drop(outer);
+    shadow_point::invoke!(single::single_sp, a(0));
+    drop(inner);
+}
+
+#[test]
 fn stacked_installs_release_the_inner_and_keep_the_outer_alive() {
     // The outer state lives on through the inner guard's `old` handle: the
     // outer fires must still reach it after the inner scope closes.
@@ -785,7 +782,7 @@ fn an_assertion_panic_does_not_run_the_value_destructor_mid_unwind() {
     // The drop assertions are OUR panic and fire on a clean thread, so
     // `Owner::drop` unwinds out of `assert_fires` rather than entering it
     // with `panicking()` already true. The state must be out of the implicit
-    // drop path by then: a plain local `Arc` would be freed by that unwind,
+    // drop path by then: a plain local `Rc` would be freed by that unwind,
     // running `T::drop` mid-unwind — a second panic if the destructor raises,
     // i.e. exactly the abort the assertion order exists to prevent.
     static DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1065,25 +1062,24 @@ fn invoke_is_an_expression() {
 }
 
 /// D26: hook names that mirror fixed machinery names stay legal. The fixed
-/// fields live in `StateFixed` behind `State::__sp_fixed`, the fixed free
-/// functions sit in `__sp_impl`, and the generated per-hook functions live
-/// in `__sp_hooks` — so a hook may carry any of those names. This sync point
-/// declares one hook per fixed internal name (fields, free functions, types,
-/// the name table); compiling it is half the assertion, firing every hook
-/// through `invoke!` and verifying the counts is the other half. The 9
-/// reserved public names are pinned by `ci/reserved-name` instead.
+/// fields live in `StateFixed`, the generated per-hook fields in `StateRegs`
+/// (both unnamed fields of `State`), the fixed free functions sit in
+/// `__sp_impl`, and the generated per-hook functions live in `__sp_hooks` —
+/// so a hook may carry any of those names. This sync point declares one hook
+/// per fixed internal name (fields, free functions, types, the name table);
+/// compiling it is half the assertion, firing every hook through `invoke!`
+/// and verifying the counts is the other half. The 7 reserved public names
+/// are pinned by `ci/reserved-name` instead.
 mod free_names {
     shadow_point::define_sp! {
         pub mod free_sp {
-            // StateFixed fields + the State wrapper's unprefixed twin.
-            // (__sp_fixed itself shares State with the per-hook fields and
-            // is not a free name; `fixed` is.)
+            // StateFixed fields and the State wrapper's own names — every
+            // one of them is a legal hook name now.
             __sp_value(),
+            __sp_fixed(),
             fixed(),
             __sp_every(),
             __sp_sequence(),
-            __sp_sequence_cv(),
-            __sp_shared(),
             __sp_installed_at(),
             __sp_calls(),
             __sp_expected(),
@@ -1093,9 +1089,6 @@ mod free_names {
             new_owner(),
             owner_state(),
             guard_state(),
-            shared_state(),
-            shared_from_owner(),
-            attach(),
             bump_call(),
             set_expected(),
             set_expected_if_unset(),
@@ -1110,7 +1103,9 @@ mod free_names {
             // fixed types and modules (type namespace vs hook constants)
             State(),
             StateFixed(),
+            StateRegs(),
             Owner(),
+            Guard(),
             Hooks(),
             Default(),
             TL(),
@@ -1149,11 +1144,10 @@ fn machinery_names_are_legal_hook_names() {
     }
     register_and_fire!(
         __sp_value,
+        __sp_fixed,
         fixed,
         __sp_every,
         __sp_sequence,
-        __sp_sequence_cv,
-        __sp_shared,
         __sp_installed_at,
         __sp_calls,
         __sp_expected,
@@ -1162,9 +1156,6 @@ fn machinery_names_are_legal_hook_names() {
         new_owner,
         owner_state,
         guard_state,
-        shared_state,
-        shared_from_owner,
-        attach,
         bump_call,
         set_expected,
         set_expected_if_unset,
@@ -1177,7 +1168,9 @@ fn machinery_names_are_legal_hook_names() {
         __sp_name,
         State,
         StateFixed,
+        StateRegs,
         Owner,
+        Guard,
         Hooks,
         Default,
         TL,
@@ -1194,6 +1187,40 @@ fn machinery_names_are_legal_hook_names() {
         calls,
         expected,
     );
-    assert_eq!(fires.get(), 45, "every machinery-named hook dispatched");
+    assert_eq!(fires.get(), 43, "every machinery-named hook dispatched");
     g.verify();
+}
+
+/// The guard never leaves its thread, so neither `T` nor the dispatch
+/// closures need `Send`/`Sync`: `Rc`/`RefCell` state and captures compile
+/// and run. (The compile-fail doctest still pins `Guard: !Send`.)
+#[test]
+fn non_send_state_and_dispatch_captures_are_legal() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let hits = Rc::new(RefCell::new([0u32; 3]));
+    let g = single::single_sp::guard(Rc::new(RefCell::new(0u32)));
+
+    let once = hits.clone();
+    g.a(move |value, _| {
+        assert_eq!(*value.borrow(), 0);
+        once.borrow_mut()[0] += 1;
+    });
+
+    let every = hits.clone();
+    g.every(move |e| {
+        e.a(move |_, _| every.borrow_mut()[1] += 1);
+    });
+
+    let seq = hits.clone();
+    g.sequence(move |s| {
+        s.b(move |_, _| seq.borrow_mut()[2] += 1);
+    });
+
+    g.fires(single::single_sp::b, 1);
+    shadow_point::invoke!(single::single_sp, a(0));
+    shadow_point::invoke!(single::single_sp, b(0));
+    g.verify();
+    assert_eq!(*hits.borrow(), [1, 1, 1]);
 }

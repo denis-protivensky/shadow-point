@@ -1,8 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 // The crate dogfoods the lint its consumers are subject to. `define_sp!`
-// emits public items (trait, hook methods, entry struct, hook enum,
-// builders), and a consumer that keeps `#![deny(missing_docs)]` fails its
+// emits public items (guard, hook enum/constants, hook methods, builders), and
+// a consumer that keeps `#![deny(missing_docs)]` fails its
 // *test* build on any of them that carries no doc comment — production
 // builds are clean because the caller gates the macro with `#[cfg(test)]`,
 // so only a test build sees the generated items. `missing_docs` is inert
@@ -14,7 +14,7 @@
 
 /// Invoke the currently installed sync-point hook.
 ///
-/// Takes the generated entry point and a plain `hook(args…)` call; dispatch
+/// Takes the sync-point module path and a plain `hook(args…)` call; dispatch
 /// prepends the guarded `&T`, so it is not written at the call site. It
 /// expands to a block expression (`{ #[cfg(test)] { … } }`): a real dispatch
 /// under `#[cfg(test)]`, an empty block otherwise. It works as a statement
@@ -52,7 +52,7 @@
 /// ```
 ///
 /// Call sites then drop the crate path entirely:
-/// `sp_invoke!(MyModuleSp, before_insert(&key))`. In production the seam
+/// `sp_invoke!(map_sp, before_insert(&key))`. In production the seam
 /// expands to a stripped statement, so the crate is never resolved; in
 /// tests it dispatches. Gating each call site with its own `#[cfg(test)]`
 /// also works and needs no seam file, but the attribute is then repeated
@@ -83,7 +83,7 @@
 ///         };
 ///     }
 ///
-///     sp_inject!(MapSp, before_alloc_node(capacity), { return Err(Full); });
+///     sp_inject!(map_sp, before_alloc_node(capacity), { return Err(Full); });
 ///     Ok(())
 /// }
 /// ```
@@ -102,7 +102,7 @@
 /// on fire milestones without parking a `current_thread` executor.
 /// `TokioAsyncGate::wait_at_least` has no timeout by design: await only a
 /// count the scenario is guaranteed to reach; a missed threshold hangs until
-/// the CI job timeout, unlike `Gate::must_wait` and sequence parking.
+/// the CI job timeout, unlike `Gate::must_wait`.
 #[macro_export]
 macro_rules! invoke {
     ($module:path, $func:ident ( $($args:expr),* $(,)? )) => {
@@ -142,19 +142,26 @@ pub fn trace_enabled() -> bool {
 ///
 /// # Completion, not just consumption
 ///
-/// `sequence` releases a waiter when its entry is popped; the step closure
+/// A private `sequence` orders when entries are *consumed*; the step closure
 /// may still be running and may still hold production locks. A gate waits
 /// for a step to actually finish: set it at the end of the step and wait on
-/// it where the next action must not start.
+/// it where the next action must not start. Waits belong in the worker body
+/// after `invoke!`, or in a private dispatch closure with a budget; a blocked
+/// dispatch blocks the worker inside the instrumented function, holding its
+/// production locks.
 ///
-/// Inside a hook or step closure use [`must_wait`](Self::must_wait), never
-/// [`wait`](Self::wait): a missed [`set`](Self::set) must fail with a
-/// diagnostic rather than hang the suite. [`wait`](Self::wait) belongs in
-/// the test body. `wait_timeout`/`must_wait` accept any duration, zero
-/// included: zero inspects the flag without waiting, and
+/// Inside a private dispatch closure that waits, use
+/// [`must_wait`](Self::must_wait), never [`wait`](Self::wait): a missed
+/// [`set`](Self::set) must fail with a diagnostic rather than hang the
+/// suite. [`wait`](Self::wait) belongs in the test body.
+/// `wait_timeout`/`must_wait` accept any duration, zero included: zero
+/// inspects the flag without waiting, and
 /// `must_wait(Duration::ZERO)` fails the test at once when the gate is
-/// unset. Shared-mode parking uses [`park_timeout()`], which honors
-/// `SP_PARK_TIMEOUT_MS` and otherwise defaults to ten seconds.
+/// unset. The budget is a hang detector, not a timing assumption: a correct
+/// test waits on an event its scenario guarantees, so load delays the wait
+/// but never fails it — a timeout means a missing release, a test bug. Pick
+/// it per test (a local constant), generous enough to never fire on a
+/// correct run.
 ///
 /// The gate is panic-safe: a poisoned lock (a panicking waiter) is
 /// transparently recovered via [`into_inner`](std::sync::PoisonError::into_inner).
@@ -225,8 +232,8 @@ impl Gate {
 
     /// Block until the gate is set, panicking with a timeout diagnostic if
     /// `timeout` elapses first. Prefer over [`wait`](Self::wait) inside
-    /// sequence-step closures: a missed [`set`](Self::set) fails the test
-    /// with a message instead of hanging it.
+    /// private sequence-step closures: a missed [`set`](Self::set) fails the
+    /// test with a message instead of hanging it.
     ///
     /// # Panics
     ///
@@ -321,13 +328,14 @@ impl TokioAsyncGate {
 ///
 /// Returned by [`current_fire`] while a hook closure runs (fire-once, a
 /// sequence step, or an `every` closure); `None` outside of any dispatch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct FireInfo {
     /// Name of the hook being dispatched.
     pub hook: &'static str,
-    /// Zero-based index of this fire on this hook (global across
-    /// threads). The closure runs on the firing thread, so
-    /// `std::thread::current()` is the thread info — no fields for it.
+    /// Zero-based index of this fire on this hook, counted per guard (and
+    /// therefore per firing thread). The closure runs on the firing
+    /// thread, so `std::thread::current()` is the thread info — no fields
+    /// for it.
     pub index: usize,
 }
 
@@ -370,141 +378,12 @@ impl Drop for CurrentFire {
     }
 }
 
-// --- Timeouts ---
-
-/// The default park budget behind [`park_timeout()`]: ten seconds. How long
-/// a thread parks in shared mode while the sequence head is a different hook.
-/// Parking is a mutual-deadlock guard, not a synchronization mechanism:
-/// threads re-check the sequence after every wake and park only as long as
-/// the head still blocks them. A timeout therefore means the test's sequence
-/// can never advance (no thread will ever fire the head hook) — failing is
-/// better than hanging.
-const DEFAULT_PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// The "not resolved yet" marker in [`park_timeout`]'s cache. A millisecond
-/// count equal to or above it can never be published, so the resolver rejects
-/// it instead of returning an implausibly large timeout. `usize`, not `u64`:
-/// the cache must compile on targets without 64-bit atomics (e.g. `armv5te`),
-/// and on 32-bit the ceiling is ~49 days.
-const UNRESOLVED_PARK_TIMEOUT: usize = usize::MAX;
-
-/// The park timeout the shared-mode sequence actually uses: ten seconds by
-/// default unless `SP_PARK_TIMEOUT_MS` names a number of milliseconds.
-///
-/// A library that silently failed to match the environment
-/// would be a worse neighbor than one that reads it once. The env is read on
-/// the first call and cached in an atomic, so the park path pays a relaxed
-/// load per wake, not a `getenv` — and `unsafe` is not needed (the crate
-/// forbids it, and MSRV 1.65 has no `OnceLock`).
-///
-/// A value that does not parse, is empty, or does not fit the internal
-/// cache (`usize::MAX` milliseconds or more — ~49 days on a 32-bit target)
-/// is ignored with one printed note: a typo in a CI env should not
-/// silently change what the suite proves, and should not fail a run
-/// either. `0` is legal and means "do not wait": the zero wait returns
-/// already timed out, the head is re-checked, and the timeout diagnostic
-/// is raised at once — so a wrong choreography fails instantly instead of
-/// parking.
-///
-/// ```text
-/// SP_PARK_TIMEOUT_MS=200 cargo test
-/// ```
-pub fn park_timeout() -> std::time::Duration {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    // The resolved value in milliseconds, `UNRESOLVED_PARK_TIMEOUT` while
-    // unresolved. A sentinel in one atomic rather than `Once` + a cell: the
-    // cache is a single integer, two racers computing the same answer is
-    // benign, and MSRV 1.65 has neither `OnceLock` nor a safe way to need
-    // one here. The resolver never produces the sentinel, which is what
-    // makes the fixed point below sound. `usize` keeps the cache compilable
-    // on targets without 64-bit atomics; the resolver rejects a value that
-    // would not fit.
-    static CACHED: AtomicUsize = AtomicUsize::new(UNRESOLVED_PARK_TIMEOUT);
-    let cached = CACHED.load(Ordering::Relaxed);
-    if cached != UNRESOLVED_PARK_TIMEOUT {
-        return std::time::Duration::from_millis(cached as u64);
-    }
-    let resolved = usize::try_from(resolve_park_timeout(std::env::var("SP_PARK_TIMEOUT_MS")))
-        .expect("the resolver keeps the value below the sentinel");
-    // Publish the winner, or adopt the value the first writer settled on, so
-    // every thread in the process waits on one and the same timeout. Note the
-    // shape of `compare_exchange`'s Ok arm: it yields the PREVIOUS value,
-    // which on success is the unresolved sentinel — `unwrap_or_else` over it
-    // would hand back the sentinel as if it were a timeout in milliseconds
-    // (an absurdly long park, caught by the end-to-end test in
-    // `tests/park_timeout_env.rs`, not by the resolver's unit tests).
-    let winner = match CACHED.compare_exchange(
-        UNRESOLVED_PARK_TIMEOUT,
-        resolved,
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-    ) {
-        Ok(_) => resolved,
-        Err(current) => current,
-    };
-    std::time::Duration::from_millis(winner as u64)
-}
-
-/// The resolution rule, as a pure function of the env lookup: one value for
-/// the whole process (see `park_timeout`'s cache), which is also why the
-/// environment can only be tested in a separate binary.
-fn resolve_park_timeout(raw: Result<String, std::env::VarError>) -> u64 {
-    match raw {
-        Err(std::env::VarError::NotPresent) => default_park_timeout_ms(),
-        Err(_) => {
-            note(format_args!(
-                "SP_PARK_TIMEOUT_MS is not valid UTF-8, using the default {DEFAULT_PARK_TIMEOUT:?}"
-            ));
-            default_park_timeout_ms()
-        }
-        Ok(raw) => match raw.trim().parse::<u64>() {
-            // The sentinel is the cache's own marker: publishing it would
-            // both hand out an implausibly large timeout and leave the cache
-            // permanently unresolved. On 32-bit a value at or above
-            // `usize::MAX` would also fail to fit the cache, so the same
-            // guard refuses it on every target.
-            Ok(ms) if ms >= UNRESOLVED_PARK_TIMEOUT as u64 => {
-                note(format_args!(
-                    "SP_PARK_TIMEOUT_MS={ms} is too large to be a \
-timeout, using the default {DEFAULT_PARK_TIMEOUT:?}"
-                ));
-                default_park_timeout_ms()
-            }
-            Ok(ms) => ms,
-            Err(_) => {
-                note(format_args!(
-                    "SP_PARK_TIMEOUT_MS={raw:?} is not a number of milliseconds, \
-using the default {DEFAULT_PARK_TIMEOUT:?}"
-                ));
-                default_park_timeout_ms()
-            }
-        },
-    }
-}
-
-/// The default park budget in the milliseconds the cache stores. The constant
-/// is ten seconds, so the conversion cannot fail; `try_from` keeps the cast
-/// out of the code (and off clippy's truncation lint).
-fn default_park_timeout_ms() -> u64 {
-    u64::try_from(DEFAULT_PARK_TIMEOUT.as_millis())
-        .expect("the default park budget, ten seconds in ms, fits in u64")
-}
-
-/// One diagnostic line on stderr, best-effort. `eprintln!` panics when the
-/// write fails, and a warning about a misconfigured env must not fail the
-/// run it is warning about — the same reason the unwind path writes through
-/// `writeln!` and ignores the result.
-fn note(msg: std::fmt::Arguments<'_>) {
-    use std::io::Write as _;
-    let _ = writeln!(std::io::stderr(), "shadow-point: {msg}");
-}
-
 // See CURRENT_FIRE: inline `const {}` blocks are experimental until 1.79.
 thread_local! {
-    // Addresses of `__Sp` instances currently dispatching a hook on this
+    // Addresses of `State<T>` instances currently dispatching a hook on this
     // thread. Per-thread: a genuinely concurrent fire from another thread is
-    // never suppressed, and `contains` still gives per-sync-point re-entry
-    // suppression that survives transitive nesting (A -> B -> A).
+    // never suppressed, and `contains` still gives per-install (guard)
+    // re-entry suppression that survives transitive nesting (A -> B -> A).
     #[allow(clippy::missing_const_for_thread_local)]
     static EXEC_STACK: std::cell::RefCell<Vec<*const ()>> =
         std::cell::RefCell::new(Vec::new());
@@ -514,10 +393,10 @@ thread_local! {
 /// duration of a hook dispatch (panic-safe). Hidden: used only from macro
 /// expansions generated by [`define_sp!`].
 ///
-/// Re-entry suppression is per-thread and per-sync-point: a nested
-/// dispatch of any hook of this sync point from the same thread is
-/// suppressed, while a genuinely concurrent fire from another thread
-/// always proceeds.
+/// Re-entry suppression is per-thread and per installed guard: a dispatch
+/// of any hook of the currently dispatching guard from the same thread is
+/// suppressed, while a new guard of the same module (its own state) and a
+/// genuinely concurrent fire from another thread both proceed.
 #[doc(hidden)]
 #[must_use]
 pub struct ExecSink(*const ());
@@ -553,19 +432,16 @@ impl Drop for ExecSink {
 /// Generate a sync-point module from a hook list.
 ///
 /// `define_sp! { $vis mod $name { hook(args), ... } }` emits a module with
-/// fixed names: two constructors (`guard`, `shared`), one `Guard` type for
-/// both modes, a clonable `Shared`, a hook-identifier constant per hook,
-/// and the hidden dispatch machinery. Several sync points with distinct
-/// module names can share a file directly.
+/// fixed names: one constructor (`guard`), a private `Guard`, a hook-identifier
+/// constant per hook, and the hidden dispatch machinery. Several sync
+/// points with distinct module names can share a file directly.
 ///
 /// # Surface
 ///
 /// | Item | Role |
 /// |---|---|
-/// | `guard(value)` | private mode: install on this thread, returns `Guard<T>` |
-/// | `shared(value)` | shared mode: returns `Shared<T>` (`Clone`, `Send + Sync`) |
+/// | `guard(value)` | install on this thread, returns `Guard<T>` |
 /// | `Guard<T>` | `Deref`, fire-once/`sequence`/`every`/`fires`/`verify`, `!Send` |
-/// | `Shared<T>` | `Deref`, `guard()` to attach a worker thread, same registration |
 /// | `Hook` | hook-identifier type; one constant per hook (`<hook>: Hook`) |
 ///
 /// # Example
@@ -602,36 +478,51 @@ impl Drop for ExecSink {
 /// - one-shot: `g.<hook>(f)` — the hook must fire exactly once; the closure
 ///   runs at most once, on the fire whose per-hook counter was 0 and whose
 ///   sequence fell through to fire-once. Chain `.fires(n)` for a different
-///   count; both `fires` forms return the registration handle (`&Guard` or
-///   `&Shared`).
-/// - ordered: `g.sequence(|s| { s.a(f).b(g); })` — entries consumed in order;
-///   a gated step is `s.when(pred).<hook>(f)`.
-/// - every fire: `g.every(|e| { e.a(f); })` — runs on every non-suppressed fire.
+///   count; both `fires` forms return the registration handle (`&Guard`).
+/// - ordered: `g.sequence(|s| { s.a(f).b(g); })` —
+///   entries consumed in order; a gated step is `s.when(pred).<hook>(f)`.
+///   A second `sequence` call replaces the whole queue. Cross-thread order
+///   comes from [`Gate`] waits in the worker bodies, after `invoke!`; a
+///   worker's `sequence` orders that worker's own protocol.
+/// - every fire: `g.every(|e| { e.a(f); })` — runs on every non-suppressed
+///   fire. A second `every` call replaces the whole registration.
 /// - count only: `g.fires(<hook>, n)` — no closure.
 ///
 /// Closure bounds: a fire-once or sequence closure is
-/// `FnOnce(&T, args…) + Send + 'static`; an `every` closure is
-/// `Fn(&T, args…) + Send + Sync + 'static`; a `when` predicate is
-/// `Fn(args…) -> bool + Send + 'static`. A captured `Rc` or borrow fails
-/// these bounds.
+/// `FnOnce(&T, args…) + 'static`; an `every` closure is
+/// `Fn(&T, args…) + 'static`; a `when` predicate is
+/// `Fn(args…) -> bool + 'static`. The guard is single-threaded, so closures
+/// may capture `Rc` and other `!Send` values; a captured borrow still fails
+/// the `'static` bound.
 ///
 /// A `when` predicate is evaluated **under the sequence lock**: it must be a
 /// pure check. A predicate that blocks (a `Gate` wait, a channel recv) holds
-/// the lock against every other firing thread in shared mode and can
-/// deadlock; calling `sequence` from it self-deadlocks. The `every` and
-/// fire-once closures run outside the lock.
+/// the lock and can deadlock the test; calling `sequence` from it
+/// self-deadlocks. The `every` and fire-once closures run outside the lock.
+///
+/// Every closure that dispatch calls runs on the caller's stack inside the
+/// instrumented function: `every`, fire-once, and sequence steps. A blocking
+/// wait inside a dispatch closure is legal choreography: the dispatcher never
+/// waits on another thread (out-of-order fires panic), so a gated freeze is
+/// deliberate. The wait is safe only when the thread that releases it needs
+/// nothing the blocked frame holds. The frame still owns the instrumented
+/// function's locks; [`Gate::must_wait`] with a budget bounds a mistake to a
+/// failing test, it does not remove the class. Record traces and set gates in
+/// dispatch closures; wait in the worker body after `invoke!` or in a private
+/// step with a local budget.
 ///
 /// # Reserved hook names
 ///
-/// `sequence`, `every`, `fires`, `verify`, `guard`, `shared`, `with_dyn`,
-/// `when`, and `clone` collide with the fixed public surface (`clone` would
-/// shadow the generated `Clone` impl on `Shared`); `define_sp!` rejects them
-/// with a `compile_error!` naming the hook. Any other identifier — including
-/// `value`, `calls`, `expected`, `state`, `new`, `hook`, `f`, `NAMES`,
-/// `__SP_NAMES`, `__sp_state`, `__sp_value` — is legal: fixed fields and
-/// functions live apart from the generated ones in a private submodule and
-/// cannot collide with a hook name. (Keywords such as `loop` are not
-/// identifiers; a raw identifier like `r#type` works.)
+/// `sequence`, `every`, `fires`, `verify`, `guard`, `with_dyn`, and `when`
+/// collide with the fixed public surface; `define_sp!` rejects them with a
+/// `compile_error!` naming the hook; the raw forms (`r#sequence`, …) get
+/// the same diagnostic. Any other identifier — including `value`, `calls`,
+/// `expected`, `state`, `new`, `hook`, `f`, `NAMES`, `__SP_NAMES`,
+/// `__sp_state`, `__sp_value`, `__sp_fixed` — is legal:
+/// fixed fields and functions live apart from the generated ones in a
+/// private submodule, and the fixed and per-hook fields sit in separate
+/// structs, so none of them can collide with a hook name. (Keywords such as
+/// `loop` are not identifiers; a raw identifier like `r#type` works.)
 ///
 /// # Hook arguments
 ///
@@ -642,10 +533,17 @@ impl Drop for ExecSink {
 ///
 /// # Threads
 ///
-/// Dispatch is per-thread: every worker that fires a hook must attach with
-/// `shared.guard()` on its own thread first. `Guard` is `!Send` — drop it on
-/// the thread that created it. See the README for the full ownership and
-/// panic/drop contract.
+/// Dispatch is per-thread: every worker that fires a hook must install the
+/// sync point on its own thread first — `guard(value)` per worker. `Guard`
+/// is `!Send` — drop it on the thread that created it. The state and the
+/// dispatch closures never leave that thread, so `T` need not be
+/// `Send`/`Sync` and the closures need not be `Send`. See the README for the
+/// full ownership and panic/drop contract.
+///
+/// A multithreaded test gives each worker its own private guard and orders
+/// that worker's protocol with `sequence`, while [`Gate`] choreographs the
+/// workers against each other. Fires from threads without an install are
+/// no-ops, so one worker's sequence never waits on another thread.
 ///
 /// Moving a guard across threads is a compile error, not a documented trap:
 ///
@@ -668,7 +566,7 @@ macro_rules! define_sp {
     ) => {
         #[doc = concat!(
             "Sync point `", stringify!($name), "`: generated by `define_sp!`. \
-             Constructors `guard`/`shared`, one `Guard` type, a hook constant \
+             Constructor `guard`, a private `Guard`, a hook constant \
              per declared hook. See the crate README for the full contract."
         )]
         #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
@@ -677,13 +575,12 @@ macro_rules! define_sp {
             //
             // A local macro (not exported): reject hook names that collide with
             // the fixed public surface — the registration methods
-            // (sequence/every/fires/verify), the module constructors
-            // (guard/shared), the dispatch fn (with_dyn), the gated-step
-            // constructor (when), and `clone` (shadows the generated `Clone`
-            // impl on `Shared`). All fixed machinery lives in a private
-            // submodule, with the generated per-hook fields and functions kept
-            // apart from its own fields and functions, so no other identifier
-            // can collide (D26; 9 arms).
+            // (sequence/every/fires/verify), the module constructor (guard),
+            // the dispatch fn (with_dyn), and the gated-step constructor
+            // (when). All fixed machinery lives in a private submodule, with
+            // the generated per-hook fields and functions kept apart from its
+            // own fields and functions, so no other identifier can collide
+            // (D26; 7 arms).
             const _: () = {
                 macro_rules! __sp_reject {
                     (@reject $n:literal, $w:literal) => {
@@ -701,14 +598,19 @@ macro_rules! define_sp {
                         "it collides with the generated `verify` method"); };
                     (guard) => { __sp_reject!(@reject "guard",
                         "it collides with the module constructor `guard` in the value namespace"); };
-                    (shared) => { __sp_reject!(@reject "shared",
-                        "it collides with the module constructor `shared` in the value namespace"); };
                     (with_dyn) => { __sp_reject!(@reject "with_dyn",
                         "it collides with the module dispatch fn `with_dyn` in the value namespace"); };
                     (when) => { __sp_reject!(@reject "when",
                         "it collides with the gated-step constructor `Seq::when`"); };
-                    (clone) => { __sp_reject!(@reject "clone",
-                        "it collides with the generated `Clone` impl on `Shared` (a hook named `clone` would shadow `Shared::clone`)"); };
+                    // A raw identifier names the same item to rustc; route it
+                    // to the plain arm so it gets the same diagnostic.
+                    (r#sequence) => { __sp_reject!(sequence); };
+                    (r#every) => { __sp_reject!(every); };
+                    (r#fires) => { __sp_reject!(fires); };
+                    (r#verify) => { __sp_reject!(verify); };
+                    (r#guard) => { __sp_reject!(guard); };
+                    (r#with_dyn) => { __sp_reject!(with_dyn); };
+                    (r#when) => { __sp_reject!(when); };
                     ($other:ident) => {};
                 }
                 $( __sp_reject!($method); )+
@@ -720,7 +622,7 @@ macro_rules! define_sp {
             /// declared hook. The type of the module's hook constants and
             /// the argument of `fires`.
             #[repr(usize)]
-            #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
             #[allow(non_camel_case_types)]
             pub enum Hook {
                 $(
@@ -759,7 +661,7 @@ macro_rules! define_sp {
 
                 // Dispatch trait: erases the guarded value type so one
                 // thread-local slot serves any `T`.
-                pub trait Hooks: Send + Sync {
+                pub trait Hooks {
                     $(
                         fn $method(&self $( , _: $arg_ty)*) {
                             // D29: reject non-Copy hook arguments at the
@@ -782,7 +684,7 @@ macro_rules! define_sp {
 
                 thread_local! {
                     static TL: ::std::cell::RefCell<
-                        Option<::std::sync::Arc<dyn Hooks>>
+                        Option<::std::rc::Rc<dyn Hooks>>
                     > = ::std::cell::RefCell::new(None);
                 }
 
@@ -805,14 +707,14 @@ macro_rules! define_sp {
 
                 // ── Sequence entries ─────────────────────────────────
 
-                pub enum SeqAction<T: Send + Sync + 'static> {
+                pub enum SeqAction<T: 'static> {
                     $( $method(
-                        Option<Box<dyn Fn($($arg_ty),*) -> bool + Send>>,
-                        Box<dyn FnOnce(&T $( , $arg_ty)*) + Send>,
+                        Option<Box<dyn Fn($($arg_ty),*) -> bool>>,
+                        Box<dyn FnOnce(&T $( , $arg_ty)*)>,
                     ), )+
                 }
 
-                impl<T: Send + Sync + 'static> SeqAction<T> {
+                impl<T: 'static> SeqAction<T> {
                     fn hook(&self) -> Hook {
                         match self {
                             $( Self::$method(..) => Hook::$method, )+
@@ -829,21 +731,21 @@ macro_rules! define_sp {
                 // ── Every-fire closures ──────────────────────────────
 
                 /// The `every` registration builder.
-                pub struct Every<T: Send + Sync + 'static> {
+                pub struct Every<T: 'static> {
                     $( $method: Option<
-                        ::std::sync::Arc<dyn Fn(&T $( , $arg_ty)*) + Send + Sync>
+                        ::std::rc::Rc<dyn Fn(&T $( , $arg_ty)*)>
                     >, )+
                 }
 
-                impl<T: Send + Sync + 'static> Every<T> {
+                impl<T: 'static> Every<T> {
                     $(
                         /// Register a closure that runs on every fire of this hook.
                         #[allow(clippy::type_complexity)]
                         pub fn $method(
                             &mut self,
-                            f: impl Fn(&T $( , $arg_ty)*) + Send + Sync + 'static,
+                            f: impl Fn(&T $( , $arg_ty)*) + 'static,
                         ) -> &mut Self {
-                            self.$method = Some(::std::sync::Arc::new(f));
+                            self.$method = Some(::std::rc::Rc::new(f));
                             self
                         }
                     )+
@@ -852,16 +754,16 @@ macro_rules! define_sp {
                 // ── Sequence builder ─────────────────────────────────
 
                 /// The `sequence` registration builder.
-                pub struct Seq<T: Send + Sync + 'static> {
+                pub struct Seq<T: 'static> {
                     seq: ::std::collections::VecDeque<SeqAction<T>>,
                 }
 
-                impl<T: Send + Sync + 'static> Seq<T> {
+                impl<T: 'static> Seq<T> {
                     $(
                         /// Push a sequence entry for this hook.
                         pub fn $method(
                             &mut self,
-                            f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
+                            f: impl FnOnce(&T $( , $arg_ty)*) + 'static,
                         ) -> &mut Self {
                             self.seq.push_back(SeqAction::$method(None, Box::new(f)));
                             self
@@ -876,22 +778,21 @@ macro_rules! define_sp {
                     ///
                     /// The predicate runs under the sequence lock and must be
                     /// a pure check: a blocking predicate (a `Gate` wait, a
-                    /// channel recv) holds the lock against other firing
-                    /// threads in shared mode and can deadlock; calling
-                    /// `sequence` from it self-deadlocks. The step closure
-                    /// runs outside the lock.
+                    /// channel recv) holds the lock and can deadlock the
+                    /// test; calling `sequence` from it self-deadlocks. The
+                    /// step closure runs outside the lock.
                     pub fn when<P>(&mut self, pred: P) -> When<'_, T, P> {
                         When { seq: self, pred }
                     }
                 }
 
                 /// The gated-step sub-builder returned by `Seq::when`.
-                pub struct When<'a, T: Send + Sync + 'static, P> {
+                pub struct When<'a, T: 'static, P> {
                     seq: &'a mut Seq<T>,
                     pred: P,
                 }
 
-                impl<'a, T: Send + Sync + 'static, P> When<'a, T, P> {
+                impl<'a, T: 'static, P> When<'a, T, P> {
                     $(
                         /// Push a predicate-gated sequence entry for this hook.
                         /// The bound on `P` is applied here, at hook
@@ -899,10 +800,10 @@ macro_rules! define_sp {
                         /// signature.
                         pub fn $method(
                             self,
-                            f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
+                            f: impl FnOnce(&T $( , $arg_ty)*) + 'static,
                         ) -> &'a mut Seq<T>
                         where
-                            P: Fn($($arg_ty),*) -> bool + Send + 'static,
+                            P: Fn($($arg_ty),*) -> bool + 'static,
                         {
                             self.seq.seq.push_back(
                                 SeqAction::$method(Some(Box::new(self.pred)), Box::new(f)),
@@ -914,40 +815,39 @@ macro_rules! define_sp {
 
                 // ── State ────────────────────────────────────────────
 
-                // Fixed fields live in their own struct: a hook generates a
-                // field on `State`, so sharing a struct with fixed fields
-                // would make every fixed name a reserved hook name.
-                struct StateFixed<T: Send + Sync + 'static> {
+                // Fixed fields and generated per-hook fields live in two
+                // structs wrapped by a tuple: no named field is shared
+                // between the fixed machinery and a hook's own field name,
+                // so every identifier is legal as a hook name (D26).
+                struct StateFixed<T: 'static> {
                     __sp_value: T,
                     __sp_every: ::std::sync::Mutex<Every<T>>,
                     __sp_sequence: ::std::sync::Mutex<
                         ::std::collections::VecDeque<SeqAction<T>>
                     >,
-                    __sp_sequence_cv: ::std::sync::Condvar,
-                    __sp_shared: bool,
                     __sp_installed_at: &'static std::panic::Location<'static>,
                     __sp_calls: ::std::vec::Vec<::std::sync::atomic::AtomicUsize>,
                     __sp_expected: ::std::sync::Mutex<::std::vec::Vec<Option<usize>>>,
                     __sp_reported: ::std::sync::atomic::AtomicBool,
                 }
 
-                struct State<T: Send + Sync + 'static> {
-                    __sp_fixed: StateFixed<T>,
+                struct StateRegs<T: 'static> {
                     $(
                         $method: ::std::sync::Mutex<
-                            Option<Box<dyn FnOnce(&T $( , $arg_ty)*) + Send>>
+                            Option<Box<dyn FnOnce(&T $( , $arg_ty)*)>>
                         >,
                     )+
                 }
 
-                fn new_state<T: Send + Sync + 'static>(
+                struct State<T: 'static>(StateFixed<T>, StateRegs<T>);
+
+                fn new_state<T: 'static>(
                     value: T,
-                    shared: bool,
                     installed_at: &'static std::panic::Location<'static>,
                 ) -> State<T> {
                     let n = [$( stringify!($method) ),+].len();
-                    State {
-                        __sp_fixed: StateFixed {
+                    State(
+                        StateFixed {
                             __sp_value: value,
                             __sp_every: ::std::sync::Mutex::new(Every {
                                 $( $method: None, )+
@@ -955,8 +855,6 @@ macro_rules! define_sp {
                             __sp_sequence: ::std::sync::Mutex::new(
                                 ::std::collections::VecDeque::new()
                             ),
-                            __sp_sequence_cv: ::std::sync::Condvar::new(),
-                            __sp_shared: shared,
                             __sp_installed_at: installed_at,
                             __sp_calls: (0..n)
                                 .map(|_| ::std::sync::atomic::AtomicUsize::new(0))
@@ -966,8 +864,8 @@ macro_rules! define_sp {
                             ),
                             __sp_reported: ::std::sync::atomic::AtomicBool::new(false),
                         },
-                        $( $method: ::std::sync::Mutex::new(None), )+
-                    }
+                        StateRegs { $( $method: ::std::sync::Mutex::new(None), )+ },
+                    )
                 }
 
                 // Generated per-hook functions live in their own module: a
@@ -977,11 +875,11 @@ macro_rules! define_sp {
                     use super::*;
 
                     $(
-                        pub(super) fn $method<T: Send + Sync + 'static>(
+                        pub(super) fn $method<T: 'static>(
                             st: &State<T>,
-                            f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
+                            f: impl FnOnce(&T $( , $arg_ty)*) + 'static,
                         ) {
-                            *st.$method.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            *st.1.$method.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(Box::new(f));
                             super::set_expected_if_unset(st, Hook::$method, 1);
                         }
@@ -990,28 +888,28 @@ macro_rules! define_sp {
 
                 // ── Per-hook operations (free functions) ─────────────
 
-                fn bump_call<T: Send + Sync + 'static>(
+                fn bump_call<T: 'static>(
                     st: &State<T>, h: Hook,
                 ) -> usize {
-                    st.__sp_fixed.__sp_calls[h as usize].fetch_add(
+                    st.0.__sp_calls[h as usize].fetch_add(
                         1, ::std::sync::atomic::Ordering::SeqCst,
                     )
                 }
 
-                fn set_expected<T: Send + Sync + 'static>(
+                fn set_expected<T: 'static>(
                     st: &State<T>, h: Hook, n: usize,
                 ) {
-                    st.__sp_fixed.__sp_expected
+                    st.0.__sp_expected
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         [h as usize] = Some(n);
                 }
 
-                fn set_expected_if_unset<T: Send + Sync + 'static>(
+                fn set_expected_if_unset<T: 'static>(
                     st: &State<T>, h: Hook, n: usize,
                 ) {
                     let mut expected = st
-                        .__sp_fixed.__sp_expected
+                        .0.__sp_expected
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let slot = &mut expected[h as usize];
@@ -1020,23 +918,23 @@ macro_rules! define_sp {
                     }
                 }
 
-                fn build_sequence<T: Send + Sync + 'static>(
+                fn build_sequence<T: 'static>(
                     st: &State<T>, f: impl FnOnce(&mut Seq<T>),
                 ) {
                     let mut builder = Seq {
                         seq: ::std::collections::VecDeque::new(),
                     };
                     f(&mut builder);
-                    *st.__sp_fixed.__sp_sequence.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    *st.0.__sp_sequence.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
                         builder.seq;
                 }
 
-                fn set_every<T: Send + Sync + 'static>(
+                fn set_every<T: 'static>(
                     st: &State<T>, f: impl FnOnce(&mut Every<T>),
                 ) {
                     let mut every = Every { $( $method: None, )+ };
                     f(&mut every);
-                    *st.__sp_fixed.__sp_every.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = every;
+                    *st.0.__sp_every.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = every;
                 }
 
                 fn report_while_unwinding(message: &str) {
@@ -1051,13 +949,13 @@ macro_rules! define_sp {
                 /// while unwinding). Shared by both `assert_fires` paths; the
                 /// caller supplies the panic form so the count path keeps its
                 /// `assert_eq!` payload shape.
-                fn report_mismatch<T: Send + Sync + 'static>(
+                fn report_mismatch<T: 'static>(
                     st: &State<T>,
                     unwinding: bool,
                     message: &str,
                     raise: impl FnOnce(),
                 ) {
-                    st.__sp_fixed.__sp_reported.store(true, ::std::sync::atomic::Ordering::SeqCst);
+                    st.0.__sp_reported.store(true, ::std::sync::atomic::Ordering::SeqCst);
                     if unwinding {
                         report_while_unwinding(message);
                     } else {
@@ -1066,32 +964,30 @@ macro_rules! define_sp {
                 }
 
                 #[track_caller]
-                fn assert_fires<T: Send + Sync + 'static>(
+                fn assert_fires<T: 'static>(
                     st: &State<T>, from_drop: bool,
                 ) {
                     if from_drop
-                        && st.__sp_fixed.__sp_reported.load(::std::sync::atomic::Ordering::SeqCst)
+                        && st.0.__sp_reported.load(::std::sync::atomic::Ordering::SeqCst)
                     {
                         return;
                     }
                     let unwinding = std::thread::panicking();
-                    let shared = st.__sp_fixed.__sp_shared;
                     let seq = st
-                        .__sp_fixed.__sp_sequence
+                        .0.__sp_sequence
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if !seq.is_empty() {
                         let message = format!(
                             "sync point sequence not fully consumed: \
-                             {} entr{} remaining [{}] ({}installed at {})",
+                             {} entr{} remaining [{}] (installed at {})",
                             seq.len(),
                             if seq.len() == 1 { "y" } else { "ies" },
                             seq.iter()
                                 .map(|e| e.name())
                                 .collect::<Vec<_>>()
                                 .join(", "),
-                            if shared { "shared, " } else { "" },
-                            st.__sp_fixed.__sp_installed_at,
+                            st.0.__sp_installed_at,
                         );
                         drop(seq);
                         report_mismatch(st, unwinding, &message, || panic!("{message}"));
@@ -1099,22 +995,21 @@ macro_rules! define_sp {
                         drop(seq);
                     }
                     let expected = st
-                        .__sp_fixed.__sp_expected
+                        .0.__sp_expected
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     for (i, expected) in expected.iter().enumerate() {
                         let Some(expected) = expected else { continue };
-                        let actual = st.__sp_fixed.__sp_calls[i]
+                        let actual = st.0.__sp_calls[i]
                             .load(::std::sync::atomic::Ordering::SeqCst);
                         if actual == *expected {
                             continue;
                         }
                         let message = format!(
                             "sync point hook `{}` fired {actual} \
-                             time(s), expected {expected} ({}installed at {})",
+                             time(s), expected {expected} (installed at {})",
                             __SP_NAMES[i],
-                            if shared { "shared, " } else { "" },
-                            st.__sp_fixed.__sp_installed_at,
+                            st.0.__sp_installed_at,
                         );
                         report_mismatch(st, unwinding, &message, || {
                             assert_eq!(actual, *expected, "{message}");
@@ -1124,23 +1019,21 @@ macro_rules! define_sp {
 
                 // ── Owner: the single assertion/reclamation point ────
 
-                struct Owner<T: Send + Sync + 'static> {
-                    state: Option<::std::sync::Arc<State<T>>>,
+                struct Owner<T: 'static> {
+                    state: Option<State<T>>,
                 }
 
-                fn new_owner<T: Send + Sync + 'static>(
-                    state: ::std::sync::Arc<State<T>>,
-                ) -> Owner<T> {
+                fn new_owner<T: 'static>(state: State<T>) -> Owner<T> {
                     Owner { state: Some(state) }
                 }
 
-                fn owner_state<T: Send + Sync + 'static>(owner: &Owner<T>) -> &State<T> {
+                fn owner_state<T: 'static>(owner: &Owner<T>) -> &State<T> {
                     owner.state
                         .as_ref()
                         .expect("shadow-point: owner used after drop")
                 }
 
-                impl<T: Send + Sync + 'static> Hooks for Owner<T> {
+                impl<T: 'static> Hooks for Owner<T> {
                     $(
                         fn $method(&self $( , $arg: $arg_ty)*) {
                             let st = owner_state(self);
@@ -1166,85 +1059,62 @@ macro_rules! define_sp {
                             });
                             let every = {
                                 let guard = st
-                                    .__sp_fixed.__sp_every
+                                    .0.__sp_every
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                                 guard.$method.clone()
                             };
                             if let Some(f) = every {
-                                f(&st.__sp_fixed.__sp_value $( , $arg)*);
+                                f(&st.0.__sp_value $( , $arg)*);
                             }
                             let (head_expects, consumed) = {
                                 let mut seq = st
-                                    .__sp_fixed.__sp_sequence
+                                    .0.__sp_sequence
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                let mut timed_out_last = false;
-                                loop {
-                                    match seq.front() {
-                                        None => break (false, None),
-                                        Some(front) if front.matches(h) => {
-                                            let pass = match front {
-                                                SeqAction::$method(Some(pred), _) => {
-                                                    pred($($arg),*)
-                                                }
-                                                SeqAction::$method(None, _) => true,
-                                                // front.matches(h) guarantees this variant.
-                                                _ => unreachable!(
-                                                    "shadow-point: sequence head matched a \
-                                                     different hook variant"
-                                                ),
-                                            };
-                                            if pass {
-                                                let entry = seq.pop_front();
-                                                st.__sp_fixed.__sp_sequence_cv.notify_all();
-                                                break (true, entry);
+                                match seq.front() {
+                                    None => (false, None),
+                                    Some(front) if front.matches(h) => {
+                                        let pass = match front {
+                                            SeqAction::$method(Some(pred), _) => {
+                                                pred($($arg),*)
                                             }
-                                            break (true, None);
+                                            SeqAction::$method(None, _) => true,
+                                            // front.matches(h) guarantees this variant.
+                                            _ => unreachable!(
+                                                "shadow-point: sequence head matched a \
+                                                 different hook variant"
+                                            ),
+                                        };
+                                        if pass {
+                                            (true, seq.pop_front())
+                                        } else {
+                                            (true, None)
                                         }
-                                        Some(front) => {
-                                            let has_more =
-                                                seq.iter().any(|e| e.matches(h));
-                                            if !has_more {
-                                                break (false, None);
-                                            }
-                                            if st.__sp_fixed.__sp_shared {
-                                                if timed_out_last {
-                                                    panic!(
-                                                        "shadow-point: sequence park \
-                                                         timeout ({:?}): thread waiting \
-                                                         for `{}`, head is `{}` \
-                                                         (installed at {})",
-                                                        $crate::park_timeout(),
-                                                        __sp_name(h),
-                                                        front.name(),
-                                                        st.__sp_fixed.__sp_installed_at,
-                                                    );
-                                                }
-                                                let (g, w) = st
-                                                    .__sp_fixed.__sp_sequence_cv
-                                                    .wait_timeout(
-                                                        seq,
-                                                        $crate::park_timeout(),
-                                                    )
-                                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                                seq = g;
-                                                timed_out_last = w.timed_out();
-                                                continue;
-                                            }
+                                    }
+                                    Some(front) => {
+                                        let has_more =
+                                            seq.iter().any(|e| e.matches(h));
+                                        if !has_more {
+                                            (false, None)
+                                        } else {
+                                            // A guard owns its own
+                                            // sequence, so an out-of-order
+                                            // fire is a one-thread ordering
+                                            // violation — panic, never park.
                                             panic!(
                                                 "sync point ordering violation: \
                                                  expected `{}` next but `{}` fired",
                                                 front.name(),
                                                 __sp_name(h)
-                                            );
+                                            )
                                         }
                                     }
                                 }
                             };
                             match consumed {
                                 Some(SeqAction::$method(_, f)) => {
-                                    f(&st.__sp_fixed.__sp_value $( , $arg)*);
+                                    f(&st.0.__sp_value $( , $arg)*);
                                 }
                                 Some(_) => unreachable!(
                                     "shadow-point: consumed a non-matching sequence entry"
@@ -1253,13 +1123,14 @@ macro_rules! define_sp {
                                     if idx == 0 && !head_expects {
                                         let fire_once = {
                                             let mut slot = st
+                                                .1
                                                 .$method
                                                 .lock()
                                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                                             slot.take()
                                         };
                                         if let Some(f) = fire_once {
-                                            f(&st.__sp_fixed.__sp_value $( , $arg)*);
+                                            f(&st.0.__sp_value $( , $arg)*);
                                         }
                                     }
                                 }
@@ -1268,7 +1139,7 @@ macro_rules! define_sp {
                     )+
                 }
 
-                impl<T: Send + Sync + 'static> Drop for Owner<T> {
+                impl<T: 'static> Drop for Owner<T> {
                     fn drop(&mut self) {
                         // The single assertion/reclamation point (D24). Take
                         // the state into a ManuallyDrop so a panic out of the
@@ -1292,56 +1163,60 @@ macro_rules! define_sp {
                 /// The handle returned by a fire-once registration;
                 /// `.fires(n)` pins the count and returns the registration
                 /// handle for chaining.
-                pub struct Expect<'a, T: Send + Sync + 'static, R> {
-                    reg: &'a R,
-                    state: &'a State<T>,
+                pub struct Expect<'a, T: 'static> {
+                    reg: &'a Guard<T>,
                     hook: Hook,
                 }
 
-                impl<'a, T: Send + Sync + 'static, R> Expect<'a, T, R> {
-                    fn new(reg: &'a R, state: &'a State<T>, hook: Hook) -> Self {
-                        Self { reg, state, hook }
+                impl<'a, T: 'static> Expect<'a, T> {
+                    fn new(reg: &'a Guard<T>, hook: Hook) -> Self {
+                        Self { reg, hook }
                     }
 
                     /// Assert the hook fires exactly `n` times; returns the
                     /// registration handle.
-                    pub fn fires(self, n: usize) -> &'a R {
-                        set_expected(self.state, self.hook, n);
+                    pub fn fires(self, n: usize) -> &'a Guard<T> {
+                        set_expected(guard_state(self.reg), self.hook, n);
                         self.reg
                     }
                 }
 
                 // ── Guard ────────────────────────────────────────────
 
-                /// The sync-point guard for both private and shared mode.
-                /// Derefs to the guarded value; drop asserts counts and
-                /// sequence. `!Send`: drop it on the thread that created it.
+                /// The sync-point guard. Derefs to the guarded
+                /// value; drop restores the TLS install and the last owner
+                /// asserts counts and sequence. `!Send`: drop it on the
+                /// thread that created it.
                 /// Nested guards of the same sync point save and restore the
-                /// TLS install, so drop them in reverse order: dropping an
-                /// outer guard first detaches the inner one, whose fires then
-                /// become no-ops and whose assertions fail.
+                /// TLS install, so drop them in reverse order. Dropping an
+                /// outer guard first detaches the inner one: the inner guard's
+                /// fires become no-ops, so any count it still expects fails
+                /// at its drop. The inner guard's drop then restores the
+                /// *outer* install, leaving the outer sync point attached
+                /// with no guard alive — its verdict runs only when that
+                /// install is replaced or the thread ends, beyond the
+                /// test's control.
                 #[clippy::has_significant_drop]
                 #[must_use]
-                pub struct Guard<T: Send + Sync + 'static> {
-                    owner: ::std::sync::Arc<Owner<T>>,
-                    old: Option<::std::sync::Arc<dyn Hooks>>,
-                    _not_send: ::std::marker::PhantomData<*const ()>,
+                pub struct Guard<T: 'static> {
+                    owner: ::std::rc::Rc<Owner<T>>,
+                    old: Option<::std::rc::Rc<dyn Hooks>>,
                 }
 
-                fn guard_state<T: Send + Sync + 'static>(g: &Guard<T>) -> &State<T> {
+                fn guard_state<T: 'static>(g: &Guard<T>) -> &State<T> {
                     owner_state(&g.owner)
                 }
 
-                impl<T: Send + Sync + 'static> Guard<T> {
+                impl<T: 'static> Guard<T> {
                     $(
                         /// Register a fire-once closure for this hook; chain
                         /// `.fires(n)` for a different count.
                         pub fn $method(
                             &self,
-                            f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
-                        ) -> Expect<'_, T, Self> {
+                            f: impl FnOnce(&T $( , $arg_ty)*) + 'static,
+                        ) -> Expect<'_, T> {
                             __sp_hooks::$method(guard_state(self), f);
-                            Expect::new(self, guard_state(self), Hook::$method)
+                            Expect::new(self, Hook::$method)
                         }
                     )+
 
@@ -1364,25 +1239,26 @@ macro_rules! define_sp {
                     /// Run the drop assertions now, at the caller's location.
                     ///
                     /// On failure the state is marked reported: drop then
-                    /// skips the remaining assertions and the guarded value's
-                    /// destructor, so this call owns the diagnostic.
+                    /// skips the remaining assertions and, on the unwind path,
+                    /// the guarded value's destructor, so this call owns the
+                    /// diagnostic.
                     #[track_caller]
                     pub fn verify(&self) {
                         assert_fires(guard_state(self), false);
                     }
                 }
 
-                impl<T: Send + Sync + 'static> std::ops::Deref for Guard<T> {
+                impl<T: 'static> std::ops::Deref for Guard<T> {
                     type Target = T;
                     fn deref(&self) -> &T {
-                        &guard_state(self).__sp_fixed.__sp_value
+                        &guard_state(self).0.__sp_value
                     }
                 }
 
-                impl<T: Send + Sync + 'static> Drop for Guard<T> {
+                impl<T: 'static> Drop for Guard<T> {
                     fn drop(&mut self) {
                         // Restore TLS first, with the borrow dropped before
-                        // the Arc<Owner> field releases — the assertion (in
+                        // the Rc<Owner> field releases — the assertion (in
                         // Owner::drop) then runs after every TLS install is
                         // gone.
                         TL.with(|c| {
@@ -1391,134 +1267,32 @@ macro_rules! define_sp {
                     }
                 }
 
-                // ── Shared ───────────────────────────────────────────
-
-                /// A sync point shared across threads. `Clone` gives each
-                /// worker its own handle; `guard()` attaches the calling
-                /// thread.
-                #[clippy::has_significant_drop]
-                #[must_use]
-                pub struct Shared<T: Send + Sync + 'static> {
-                    owner: ::std::sync::Arc<Owner<T>>,
-                }
-
-                impl<T: Send + Sync + 'static> Clone for Shared<T> {
-                    fn clone(&self) -> Self {
-                        Self { owner: ::std::sync::Arc::clone(&self.owner) }
-                    }
-                }
-
-                fn shared_from_owner<T: Send + Sync + 'static>(
-                    owner: ::std::sync::Arc<Owner<T>>,
-                ) -> Shared<T> {
-                    Shared { owner }
-                }
-
-                fn shared_state<T: Send + Sync + 'static>(s: &Shared<T>) -> &State<T> {
-                    owner_state(&s.owner)
-                }
-
-                impl<T: Send + Sync + 'static> Shared<T> {
-                    /// Attach this sync point to the calling thread,
-                    /// returning a guard that restores the previous install
-                    /// on drop. Nested guards of the same sync point must be
-                    /// dropped in reverse order: dropping an outer guard first
-                    /// clears the inner install, so its fires become no-ops.
-                    pub fn guard(&self) -> Guard<T> {
-                        attach(::std::sync::Arc::clone(&self.owner))
-                    }
-
-                    $(
-                        /// Register a fire-once closure for this hook; chain
-                        /// `.fires(n)` for a different count.
-                        pub fn $method(
-                            &self,
-                            f: impl FnOnce(&T $( , $arg_ty)*) + Send + 'static,
-                        ) -> Expect<'_, T, Self> {
-                            __sp_hooks::$method(shared_state(self), f);
-                            Expect::new(self, shared_state(self), Hook::$method)
-                        }
-                    )+
-
-                    /// Register an ordered sequence of hook fires across threads.
-                    pub fn sequence(&self, f: impl FnOnce(&mut Seq<T>)) {
-                        build_sequence(shared_state(self), f);
-                    }
-
-                    /// Register closures that fire on every invocation.
-                    pub fn every(&self, f: impl FnOnce(&mut Every<T>)) {
-                        set_every(shared_state(self), f);
-                    }
-
-                    /// Assert that `hook` fires exactly `n` times in total.
-                    pub fn fires(&self, hook: Hook, n: usize) -> &Self {
-                        set_expected(shared_state(self), hook, n);
-                        self
-                    }
-
-                    /// Run the drop assertions now (after joining workers).
-                    ///
-                    /// On failure the state is marked reported: drop then
-                    /// skips the remaining assertions and the guarded value's
-                    /// destructor, so this call owns the diagnostic.
-                    #[track_caller]
-                    pub fn verify(&self) {
-                        assert_fires(shared_state(self), false);
-                    }
-                }
-
-                impl<T: Send + Sync + 'static> std::ops::Deref for Shared<T> {
-                    type Target = T;
-                    fn deref(&self) -> &T {
-                        &shared_state(self).__sp_fixed.__sp_value
-                    }
-                }
-
-                // ── TLS attach (shared by both constructors) ─────────
-
-                fn attach<T: Send + Sync + 'static>(
-                    owner: ::std::sync::Arc<Owner<T>>,
-                ) -> Guard<T> {
-                    // `.clone()` at the binding, not `Arc::clone`: the
-                    // unsizing coercion to `Arc<dyn Hooks>` happens at the
-                    // binding.
-                    let handle: ::std::sync::Arc<dyn Hooks> = owner.clone();
-                    let old = TL.with(|c| {
-                        let mut slot = c.borrow_mut();
-                        slot.replace(handle)
-                    });
-                    Guard { owner, old, _not_send: ::std::marker::PhantomData }
-                }
+                // ── TLS attach ───────────────────────────────────────
 
                 // Constructors live here, not in the public module: the
                 // parameter `value` would otherwise collide with a hook
                 // constant named `value` in the module's value namespace.
                 /// Install a private guard driving this sync point for `value`.
                 #[track_caller]
-                pub fn guard<T: Send + Sync + 'static>(value: T) -> Guard<T> {
-                    let owner = ::std::sync::Arc::new(new_owner(::std::sync::Arc::new(
-                        new_state(value, false, std::panic::Location::caller()),
+                pub fn guard<T: 'static>(value: T) -> Guard<T> {
+                    let owner = ::std::rc::Rc::new(new_owner(new_state(
+                        value,
+                        std::panic::Location::caller(),
                     )));
-                    attach(owner)
-                }
-
-                /// Create a sync point shared across threads.
-                #[track_caller]
-                pub fn shared<T: Send + Sync + 'static>(value: T) -> Shared<T> {
-                    shared_from_owner(::std::sync::Arc::new(new_owner(
-                        ::std::sync::Arc::new(new_state(
-                            value,
-                            true,
-                            std::panic::Location::caller(),
-                        )),
-                    )))
+                    // Unsize at the binding, not on the slot write.
+                    let handle: ::std::rc::Rc<dyn Hooks> = owner.clone();
+                    let old = TL.with(|c| {
+                        let mut slot = c.borrow_mut();
+                        slot.replace(handle)
+                    });
+                    Guard { owner, old }
                 }
             }
 
             // ── Public surface (re-exports + constructors) ───────────
 
             #[doc(inline)]
-            pub use __sp_impl::{guard, shared, Guard, Shared};
+            pub use __sp_impl::{guard, Guard};
             #[doc(hidden)]
             pub use __sp_impl::{with_dyn, Every, Expect, Seq, When};
         }
@@ -1540,111 +1314,5 @@ pub mod sp_docs {
             before_probe(key: &u32),
             after_probe(len: usize),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[test]
-    fn park_timeout_defaults_to_the_constant() {
-        assert_eq!(
-            Duration::from_millis(resolve_park_timeout(Err(std::env::VarError::NotPresent))),
-            DEFAULT_PARK_TIMEOUT
-        );
-    }
-
-    #[test]
-    fn park_timeout_takes_the_env_value() {
-        assert_eq!(resolve_park_timeout(Ok("250".into())), 250);
-        assert_eq!(resolve_park_timeout(Ok(" 250 ".into())), 250);
-        assert_eq!(resolve_park_timeout(Ok("0".into())), 0);
-    }
-
-    /// The cached accessor, pinned separately from the resolution rule: the
-    /// value that comes out of `park_timeout` is what a park waits on, and
-    /// the first version of the cache returned its own "unresolved" sentinel
-    /// as a timeout (~584 million years). The pure resolver cannot see that
-    /// bug; only a test on the cached path can.
-    ///
-    /// The bound mirrors the env this process started with, so a legitimate
-    /// `SP_PARK_TIMEOUT_MS` on the runner is honored, not flagged — the same
-    /// rule `the_cache_honors_what_the_process_started_with` pins from the
-    /// other side. Only a value the resolver could not have produced (the
-    /// sentinel, wrapped, or not a number of milliseconds this process
-    /// parsed) is a cache bug.
-    #[test]
-    fn park_timeout_never_returns_the_unresolved_sentinel() {
-        let expected = match std::env::var("SP_PARK_TIMEOUT_MS") {
-            Ok(raw) => match raw.trim().parse::<u64>() {
-                Ok(ms) if ms < UNRESOLVED_PARK_TIMEOUT as u64 => Duration::from_millis(ms),
-                // The sentinel is refused, so the cache must hold the default.
-                _ => DEFAULT_PARK_TIMEOUT,
-            },
-            Err(_) => DEFAULT_PARK_TIMEOUT,
-        };
-        let t = park_timeout();
-        assert_eq!(
-            t, expected,
-            "the cache resolved to something the env does not describe"
-        );
-        assert_eq!(park_timeout(), t, "resolved once, and stable");
-    }
-
-    /// The same sentinel, reached through the front door instead of through
-    /// the cache: an env value equal to the marker must not be published as
-    /// a timeout (the cache would then never resolve at all).
-    #[test]
-    fn a_value_colliding_with_the_unresolved_sentinel_falls_back() {
-        assert_eq!(
-            Duration::from_millis(resolve_park_timeout(
-                Ok(UNRESOLVED_PARK_TIMEOUT.to_string())
-            )),
-            DEFAULT_PARK_TIMEOUT,
-            "the cache's marker is never a timeout"
-        );
-    }
-
-    /// The cache's boundary is exclusive, and the value just below it is
-    /// still a legal timeout. The upper half is reachable only where
-    /// `usize` is narrower than `u64` (the 32-bit `test32` CI job); on a
-    /// 64-bit host `checked_add` returns `None` and only the lower half
-    /// runs. This is the test that distinguishes `>=` from `==` at the
-    /// boundary: the exact-sentinel test above cannot.
-    #[test]
-    fn the_cache_boundary_is_exclusive() {
-        let below = UNRESOLVED_PARK_TIMEOUT - 1;
-        assert_eq!(
-            resolve_park_timeout(Ok(below.to_string())),
-            below as u64,
-            "the value just below the cache's capacity must be accepted"
-        );
-        if let Some(above) = (UNRESOLVED_PARK_TIMEOUT as u64).checked_add(1) {
-            assert_eq!(
-                Duration::from_millis(resolve_park_timeout(Ok(above.to_string()))),
-                DEFAULT_PARK_TIMEOUT,
-                "a value above the cache's capacity must not be published"
-            );
-        }
-    }
-
-    #[test]
-    fn a_value_that_does_not_parse_falls_back_to_the_default() {
-        // A typo in a CI env must not silently change what the suite proves.
-        for bad in ["", "abc", "-5", "10.5", "1_000"] {
-            assert_eq!(
-                Duration::from_millis(resolve_park_timeout(Ok(bad.into()))),
-                DEFAULT_PARK_TIMEOUT,
-                "{bad:?} is not a number of milliseconds"
-            );
-        }
-        assert_eq!(
-            Duration::from_millis(resolve_park_timeout(Err(std::env::VarError::NotUnicode(
-                "not utf8".into()
-            )))),
-            DEFAULT_PARK_TIMEOUT
-        );
     }
 }
