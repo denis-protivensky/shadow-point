@@ -68,7 +68,7 @@ impl Register {
 
 `invoke!` takes the module and a plain `hook(args…)` call with exactly the
 declared arguments (dispatch prepends the guarded `&T`). It expands to a
-block expression — statement or expression position — and compiles to an
+block expression (statement or expression position) and compiles to an
 empty block outside tests. Under `[dev-dependencies]` each call site needs
 its own `#[cfg(test)]` (a production build fails with `E0433` otherwise);
 past a few sites, hide the attribute in a local `macro_rules!` seam (FAQ
