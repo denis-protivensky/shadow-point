@@ -1111,6 +1111,7 @@ mod free_names {
             Guard(),
             Hooks(),
             PredicateBusy(),
+            Head(),
             Default(),
             TL(),
             DEFAULT(),
@@ -1399,20 +1400,28 @@ fn replaced_every_is_dropped_outside_the_borrow() {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    struct ReenterOnDrop(Rc<RefCell<Option<single::single_sp::Guard<()>>>>);
+    struct ReenterOnDrop {
+        slot: Rc<RefCell<Option<single::single_sp::Guard<()>>>>,
+        hits: C,
+    }
     impl Drop for ReenterOnDrop {
         fn drop(&mut self) {
-            if let Some(g) = self.0.borrow().as_ref() {
+            if let Some(g) = self.slot.borrow().as_ref() {
+                let hits = self.hits.clone();
                 g.every(|e| {
-                    e.c(|(), _| ());
+                    e.c(move |(), _| hits.inc());
                 });
             }
         }
     }
 
+    let hits = C::new();
     let slot: Rc<RefCell<Option<single::single_sp::Guard<()>>>> = Rc::new(RefCell::new(None));
     let g = single::single_sp::guard(());
-    let marker = ReenterOnDrop(slot.clone());
+    let marker = ReenterOnDrop {
+        slot: slot.clone(),
+        hits: hits.clone(),
+    };
     g.every(|e| {
         e.a(move |(), _| {
             let _ = &marker;
@@ -1430,6 +1439,11 @@ fn replaced_every_is_dropped_outside_the_borrow() {
         });
 
     shadow_point::invoke!(single::single_sp, c(0));
+    assert_eq!(
+        hits.get(),
+        1,
+        "the every registration made from Drop must be the live one"
+    );
     slot.borrow()
         .as_ref()
         .expect("the guard is in the slot")

@@ -930,8 +930,8 @@ macro_rules! define_sp {
                 /// for a reentrant `sequence`/`verify` from it, so the panic
                 /// names the install site and the rule instead of surfacing a
                 /// bare `BorrowMutError`. The plain `borrow_mut` is an
-                /// internal invariant: no user code runs while the queue is
-                /// borrowed.
+                /// internal invariant: no user callback or destructor runs
+                /// while the queue is borrowed.
                 fn borrow_sequence<T: 'static>(
                     st: &State<T>,
                 ) -> ::std::cell::RefMut<
@@ -969,6 +969,17 @@ macro_rules! define_sp {
                     fn drop(&mut self) {
                         self.0.set(false);
                     }
+                }
+
+                /// The phase-1 result of inspecting the sequence head.
+                enum Head<P> {
+                    /// No head match: the fire falls through to fire-once.
+                    Fallthrough,
+                    /// A plain head entry: pop it.
+                    Consume,
+                    /// A predicate-gated head entry: evaluate the predicate
+                    /// outside the borrow, then pop it on `true`.
+                    Gated(P),
                 }
 
                 fn build_sequence<T: 'static>(
@@ -1115,22 +1126,21 @@ macro_rules! define_sp {
                             if let Some(f) = every {
                                 f(&st.0.__sp_value $( , $arg)*);
                             }
-                            // Phase 1: inspect the head under the sequence
-                            // borrow. A gated head only clones its predicate
-                            // out here; the borrow is released before the
-                            // predicate runs, so no user code executes under
-                            // a state borrow.
-                            let gated: Option<
-                                Option<::std::rc::Rc<dyn Fn($($arg_ty),*) -> bool>>,
-                            > = {
+                            // Phase 1: inspect the head under a short borrow.
+                            // A gated head only clones its predicate out
+                            // here. An ordering violation formats its message
+                            // under the borrow but panics after the release,
+                            // so even a user panic hook never sees the queue
+                            // borrowed.
+                            let head: Result<Head<_>, String> = {
                                 let seq = borrow_sequence(st);
                                 match seq.front() {
-                                    None => None,
+                                    None => Ok(Head::Fallthrough),
                                     Some(front) if front.matches(h) => match front {
                                         SeqAction::$method(Some(pred), _) => {
-                                            Some(Some(::std::rc::Rc::clone(pred)))
+                                            Ok(Head::Gated(::std::rc::Rc::clone(pred)))
                                         }
-                                        SeqAction::$method(None, _) => Some(None),
+                                        SeqAction::$method(None, _) => Ok(Head::Consume),
                                         // front.matches(h) guarantees this variant.
                                         _ => unreachable!(
                                             "shadow-point: sequence head matched a \
@@ -1138,33 +1148,35 @@ macro_rules! define_sp {
                                         ),
                                     },
                                     Some(front) => {
-                                        let has_more =
-                                            seq.iter().any(|e| e.matches(h));
-                                        if !has_more {
-                                            None
-                                        } else {
-                                            // A guard owns its own
-                                            // sequence, so an out-of-order
-                                            // fire is a one-thread ordering
-                                            // violation — panic, never park.
-                                            panic!(
+                                        if seq.iter().any(|e| e.matches(h)) {
+                                            // A guard owns its own sequence,
+                                            // so an out-of-order fire is a
+                                            // one-thread ordering violation —
+                                            // panic, never park.
+                                            Err(format!(
                                                 "sync point ordering violation: \
                                                  expected `{}` next but `{}` fired",
                                                 front.name(),
-                                                __sp_name(h)
-                                            )
+                                                __sp_name(h),
+                                            ))
+                                        } else {
+                                            Ok(Head::Fallthrough)
                                         }
                                     }
                                 }
                             };
+                            let head = match head {
+                                Ok(head) => head,
+                                Err(message) => panic!("{message}"),
+                            };
                             // Phase 2: evaluate a gated head outside the
                             // borrow. `PredicateBusy` makes a reentrant
-                            // `sequence`/`verify` a diagnosed panic; the
-                            // queue cannot change otherwise.
-                            let (head_expects, consumed) = match gated {
-                                None => (false, None),
-                                Some(None) => (true, borrow_sequence(st).pop_front()),
-                                Some(Some(pred)) => {
+                            // `sequence`/`verify` a diagnosed panic; the queue
+                            // cannot change otherwise.
+                            let (head_expects, consumed) = match head {
+                                Head::Fallthrough => (false, None),
+                                Head::Consume => (true, borrow_sequence(st).pop_front()),
+                                Head::Gated(pred) => {
                                     let pass = {
                                         let _busy = PredicateBusy::enter(
                                             &st.0.__sp_predicate_busy,
