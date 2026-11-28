@@ -1084,6 +1084,7 @@ mod free_names {
             __sp_calls(),
             __sp_expected(),
             __sp_reported(),
+            __sp_predicate_busy(),
             // fixed free functions and constructors
             new_state(),
             new_owner(),
@@ -1093,10 +1094,12 @@ mod free_names {
             set_expected(),
             set_expected_if_unset(),
             build_sequence(),
+            borrow_sequence(),
             set_every(),
             assert_fires(),
             report_mismatch(),
             report_while_unwinding(),
+            predicate_reentry_panic(),
             // the name table and its accessor
             __SP_NAMES(),
             __sp_name(),
@@ -1107,6 +1110,8 @@ mod free_names {
             Owner(),
             Guard(),
             Hooks(),
+            PredicateBusy(),
+            Head(),
             Default(),
             TL(),
             DEFAULT(),
@@ -1223,4 +1228,226 @@ fn non_send_state_and_dispatch_captures_are_legal() {
     shadow_point::invoke!(single::single_sp, b(0));
     g.verify();
     assert_eq!(*hits.borrow(), [1, 1, 1]);
+}
+
+/// A `when` predicate must not touch the guard's sequence. Re-entering
+/// `sequence` from it must produce the domain diagnostic (install site + the
+/// purity rule), not a bare `BorrowMutError` or a deadlock.
+#[test]
+fn when_predicate_reentering_sequence_panics_with_domain_message() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    // The predicate is `'static`, so it reaches the guard through a slot.
+    let slot: Rc<RefCell<Option<single::single_sp::Guard<()>>>> = Rc::new(RefCell::new(None));
+    let g = single::single_sp::guard(());
+    let site = line!() - 1;
+    let registered = slot.clone();
+    g.sequence(move |s| {
+        s.when(move |_: u32| {
+            registered
+                .borrow()
+                .as_ref()
+                .expect("the guard is in the slot")
+                .sequence(|s| {
+                    s.c(|(), _| ());
+                });
+            true
+        })
+        .a(|(), _| ());
+    });
+    *slot.borrow_mut() = Some(g);
+
+    let r = std::panic::catch_unwind(|| shadow_point::invoke!(single::single_sp, a(0)));
+    let msg = panic_message(&r);
+    assert!(msg.contains("shadow-point:"), "{msg}");
+    assert!(msg.contains("inside a `when` predicate"), "{msg}");
+    assert!(msg.contains("pure check"), "{msg}");
+    assert!(
+        msg.contains(&format!("installed at tests/single_thread.rs:{site}")),
+        "want the guard(...) site {site}: {msg}"
+    );
+    assert!(
+        !msg.contains("BorrowMutError"),
+        "a bare RefCell panic leaked: {msg}"
+    );
+
+    // Recover the guard and replace the queue: that drops the predicate and
+    // breaks the Rc cycle predicate -> slot -> Guard -> state -> sequence.
+    let g = slot.borrow_mut().take().expect("the guard is in the slot");
+    g.sequence(|s| {
+        s.a(|(), _| ());
+    });
+    shadow_point::invoke!(single::single_sp, a(0));
+    g.verify();
+    drop(g);
+}
+
+/// `verify` from a `when` predicate reaches the same helper through
+/// `assert_fires`, so it gets the same domain diagnostic.
+#[test]
+fn when_predicate_reentering_verify_panics_with_domain_message() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let slot: Rc<RefCell<Option<single::single_sp::Guard<()>>>> = Rc::new(RefCell::new(None));
+    let g = single::single_sp::guard(());
+    let site = line!() - 1;
+    let registered = slot.clone();
+    g.sequence(move |s| {
+        s.when(move |_: u32| {
+            registered
+                .borrow()
+                .as_ref()
+                .expect("the guard is in the slot")
+                .verify();
+            true
+        })
+        .a(|(), _| ());
+    });
+    *slot.borrow_mut() = Some(g);
+
+    let r = std::panic::catch_unwind(|| shadow_point::invoke!(single::single_sp, a(0)));
+    let msg = panic_message(&r);
+    assert!(msg.contains("shadow-point:"), "{msg}");
+    assert!(msg.contains("inside a `when` predicate"), "{msg}");
+    assert!(msg.contains("pure check"), "{msg}");
+    assert!(
+        msg.contains(&format!("installed at tests/single_thread.rs:{site}")),
+        "want the guard(...) site {site}: {msg}"
+    );
+    assert!(
+        !msg.contains("BorrowMutError"),
+        "a bare RefCell panic leaked: {msg}"
+    );
+
+    let g = slot.borrow_mut().take().expect("the guard is in the slot");
+    g.sequence(|s| {
+        s.a(|(), _| ());
+    });
+    shadow_point::invoke!(single::single_sp, a(0));
+    g.verify();
+    drop(g);
+}
+
+/// A predicate panic unwinds out of dispatch; the gated entry stays at the
+/// head, and a later clean drop reports it rather than a borrow error.
+#[test]
+fn panicking_when_predicate_leaves_the_sequence_trail() {
+    let g = single::single_sp::guard(());
+    g.sequence(|s| {
+        s.when(|_: u32| -> bool { panic!("predicate boom") })
+            .a(|(), _| ());
+    });
+    let r = std::panic::catch_unwind(|| shadow_point::invoke!(single::single_sp, a(0)));
+    assert_eq!(panic_message(&r), "predicate boom");
+
+    let d = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(g)));
+    let msg = panic_message(&d);
+    assert!(msg.contains("sequence not fully consumed"), "{msg}");
+    assert!(!msg.contains("inside a `when` predicate"), "{msg}");
+}
+
+/// Replacing a sequence destroys the old queue after the borrow is released:
+/// a captured value whose `Drop` re-enters `sequence` must not see a borrow
+/// conflict, and its registration is the one that stays installed.
+#[test]
+fn replaced_sequence_is_dropped_outside_the_borrow() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct ReenterOnDrop(Rc<RefCell<Option<single::single_sp::Guard<()>>>>);
+    impl Drop for ReenterOnDrop {
+        fn drop(&mut self) {
+            if let Some(g) = self.0.borrow().as_ref() {
+                g.sequence(|s| {
+                    s.c(|(), _| ());
+                });
+            }
+        }
+    }
+
+    let slot: Rc<RefCell<Option<single::single_sp::Guard<()>>>> = Rc::new(RefCell::new(None));
+    let g = single::single_sp::guard(());
+    let marker = ReenterOnDrop(slot.clone());
+    g.sequence(|s| {
+        s.a(move |(), _| drop(marker));
+    });
+    *slot.borrow_mut() = Some(g);
+
+    // The replacement drops the old queue; the marker's `Drop` registers `c`,
+    // replacing the `b` registration made by this call.
+    slot.borrow()
+        .as_ref()
+        .expect("the guard is in the slot")
+        .sequence(|s| {
+            s.b(|(), _| ());
+        });
+
+    shadow_point::invoke!(single::single_sp, c(0));
+    slot.borrow()
+        .as_ref()
+        .expect("the guard is in the slot")
+        .verify();
+    let g = slot.borrow_mut().take().expect("the guard is in the slot");
+    drop(g);
+}
+
+/// The same drop-outside-the-borrow rule for `every`: the old registration's
+/// captured destructor may re-enter `every`, and its registration wins.
+#[test]
+fn replaced_every_is_dropped_outside_the_borrow() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct ReenterOnDrop {
+        slot: Rc<RefCell<Option<single::single_sp::Guard<()>>>>,
+        hits: C,
+    }
+    impl Drop for ReenterOnDrop {
+        fn drop(&mut self) {
+            if let Some(g) = self.slot.borrow().as_ref() {
+                let hits = self.hits.clone();
+                g.every(|e| {
+                    e.c(move |(), _| hits.inc());
+                });
+            }
+        }
+    }
+
+    let hits = C::new();
+    let slot: Rc<RefCell<Option<single::single_sp::Guard<()>>>> = Rc::new(RefCell::new(None));
+    let g = single::single_sp::guard(());
+    let marker = ReenterOnDrop {
+        slot: slot.clone(),
+        hits: hits.clone(),
+    };
+    g.every(|e| {
+        e.a(move |(), _| {
+            let _ = &marker;
+        });
+    });
+    *slot.borrow_mut() = Some(g);
+
+    // The replacement drops the old `Every`; the marker's `Drop` registers
+    // `c`, replacing the `b` registration made by this call.
+    slot.borrow()
+        .as_ref()
+        .expect("the guard is in the slot")
+        .every(|e| {
+            e.b(|(), _| ());
+        });
+
+    shadow_point::invoke!(single::single_sp, c(0));
+    assert_eq!(
+        hits.get(),
+        1,
+        "the every registration made from Drop must be the live one"
+    );
+    slot.borrow()
+        .as_ref()
+        .expect("the guard is in the slot")
+        .verify();
+    let g = slot.borrow_mut().take().expect("the guard is in the slot");
+    drop(g);
 }

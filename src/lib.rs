@@ -495,10 +495,13 @@ impl Drop for ExecSink {
 /// may capture `Rc` and other `!Send` values; a captured borrow still fails
 /// the `'static` bound.
 ///
-/// A `when` predicate is evaluated **under the sequence lock**: it must be a
-/// pure check. A predicate that blocks (a `Gate` wait, a channel recv) holds
-/// the lock and can deadlock the test; calling `sequence` from it
-/// self-deadlocks. The `every` and fire-once closures run outside the lock.
+/// A `when` predicate is evaluated on every matching fire, before the step; it
+/// must be a pure check. Calling `sequence` or `verify` on the same guard from
+/// it panics with a `shadow-point:` diagnostic naming the guard's install
+/// site. A blocking predicate parks the firing thread inside the instrumented
+/// function, like any dispatch closure, so a `Gate` wait there needs the same
+/// budget reasoning. Nothing else is enforced: `fires`, `every`, and
+/// registration from a predicate are allowed.
 ///
 /// Every closure that dispatch calls runs on the caller's stack inside the
 /// instrumented function: `every`, fire-once, and sequence steps. A blocking
@@ -709,7 +712,7 @@ macro_rules! define_sp {
 
                 pub enum SeqAction<T: 'static> {
                     $( $method(
-                        Option<Box<dyn Fn($($arg_ty),*) -> bool>>,
+                        Option<::std::rc::Rc<dyn Fn($($arg_ty),*) -> bool>>,
                         Box<dyn FnOnce(&T $( , $arg_ty)*)>,
                     ), )+
                 }
@@ -776,11 +779,15 @@ macro_rules! define_sp {
                     /// arguments, so a single-hook predicate need only
                     /// satisfy its own signature.
                     ///
-                    /// The predicate runs under the sequence lock and must be
-                    /// a pure check: a blocking predicate (a `Gate` wait, a
-                    /// channel recv) holds the lock and can deadlock the
-                    /// test; calling `sequence` from it self-deadlocks. The
-                    /// step closure runs outside the lock.
+                    /// The predicate runs on every matching fire, before the
+                    /// step; it must be a pure check. Calling `sequence` or
+                    /// `verify` on the same guard from it panics with a
+                    /// `shadow-point:` diagnostic. A blocking predicate parks
+                    /// the firing thread inside the instrumented function, like
+                    /// any dispatch closure. Only those two calls are
+                    /// diagnosed; `fires`, `every`, and registration are not.
+                    /// The step closure runs after the predicate returns
+                    /// `true`.
                     pub fn when<P>(&mut self, pred: P) -> When<'_, T, P> {
                         When { seq: self, pred }
                     }
@@ -806,7 +813,10 @@ macro_rules! define_sp {
                             P: Fn($($arg_ty),*) -> bool + 'static,
                         {
                             self.seq.seq.push_back(
-                                SeqAction::$method(Some(Box::new(self.pred)), Box::new(f)),
+                                SeqAction::$method(
+                                    Some(::std::rc::Rc::new(self.pred)),
+                                    Box::new(f),
+                                ),
                             );
                             self.seq
                         }
@@ -821,19 +831,20 @@ macro_rules! define_sp {
                 // so every identifier is legal as a hook name (D26).
                 struct StateFixed<T: 'static> {
                     __sp_value: T,
-                    __sp_every: ::std::sync::Mutex<Every<T>>,
-                    __sp_sequence: ::std::sync::Mutex<
+                    __sp_every: ::std::cell::RefCell<Every<T>>,
+                    __sp_sequence: ::std::cell::RefCell<
                         ::std::collections::VecDeque<SeqAction<T>>
                     >,
                     __sp_installed_at: &'static std::panic::Location<'static>,
-                    __sp_calls: ::std::vec::Vec<::std::sync::atomic::AtomicUsize>,
-                    __sp_expected: ::std::sync::Mutex<::std::vec::Vec<Option<usize>>>,
-                    __sp_reported: ::std::sync::atomic::AtomicBool,
+                    __sp_calls: ::std::vec::Vec<::std::cell::Cell<usize>>,
+                    __sp_expected: ::std::vec::Vec<::std::cell::Cell<Option<usize>>>,
+                    __sp_reported: ::std::cell::Cell<bool>,
+                    __sp_predicate_busy: ::std::cell::Cell<bool>,
                 }
 
                 struct StateRegs<T: 'static> {
                     $(
-                        $method: ::std::sync::Mutex<
+                        $method: ::std::cell::Cell<
                             Option<Box<dyn FnOnce(&T $( , $arg_ty)*)>>
                         >,
                     )+
@@ -849,22 +860,23 @@ macro_rules! define_sp {
                     State(
                         StateFixed {
                             __sp_value: value,
-                            __sp_every: ::std::sync::Mutex::new(Every {
+                            __sp_every: ::std::cell::RefCell::new(Every {
                                 $( $method: None, )+
                             }),
-                            __sp_sequence: ::std::sync::Mutex::new(
+                            __sp_sequence: ::std::cell::RefCell::new(
                                 ::std::collections::VecDeque::new()
                             ),
                             __sp_installed_at: installed_at,
                             __sp_calls: (0..n)
-                                .map(|_| ::std::sync::atomic::AtomicUsize::new(0))
+                                .map(|_| ::std::cell::Cell::new(0))
                                 .collect(),
-                            __sp_expected: ::std::sync::Mutex::new(
-                                (0..n).map(|_| None).collect()
-                            ),
-                            __sp_reported: ::std::sync::atomic::AtomicBool::new(false),
+                            __sp_expected: (0..n)
+                                .map(|_| ::std::cell::Cell::new(None))
+                                .collect(),
+                            __sp_reported: ::std::cell::Cell::new(false),
+                            __sp_predicate_busy: ::std::cell::Cell::new(false),
                         },
-                        StateRegs { $( $method: ::std::sync::Mutex::new(None), )+ },
+                        StateRegs { $( $method: ::std::cell::Cell::new(None), )+ },
                     )
                 }
 
@@ -879,8 +891,7 @@ macro_rules! define_sp {
                             st: &State<T>,
                             f: impl FnOnce(&T $( , $arg_ty)*) + 'static,
                         ) {
-                            *st.1.$method.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(Box::new(f));
+                            st.1.$method.set(Some(Box::new(f)));
                             super::set_expected_if_unset(st, Hook::$method, 1);
                         }
                     )+
@@ -891,31 +902,84 @@ macro_rules! define_sp {
                 fn bump_call<T: 'static>(
                     st: &State<T>, h: Hook,
                 ) -> usize {
-                    st.0.__sp_calls[h as usize].fetch_add(
-                        1, ::std::sync::atomic::Ordering::SeqCst,
-                    )
+                    let cell = &st.0.__sp_calls[h as usize];
+                    let previous = cell.get();
+                    cell.set(previous.wrapping_add(1));
+                    previous
                 }
 
                 fn set_expected<T: 'static>(
                     st: &State<T>, h: Hook, n: usize,
                 ) {
-                    st.0.__sp_expected
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        [h as usize] = Some(n);
+                    st.0.__sp_expected[h as usize].set(Some(n));
                 }
 
                 fn set_expected_if_unset<T: 'static>(
                     st: &State<T>, h: Hook, n: usize,
                 ) {
-                    let mut expected = st
-                        .0.__sp_expected
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let slot = &mut expected[h as usize];
-                    if slot.is_none() {
-                        *slot = Some(n);
+                    let slot = &st.0.__sp_expected[h as usize];
+                    if slot.get().is_none() {
+                        slot.set(Some(n));
                     }
+                }
+
+                /// The single access point to the sequence queue.
+                ///
+                /// Every read and write goes through here. A predicate runs
+                /// outside the borrow; `__sp_predicate_busy` is the tripwire
+                /// for a reentrant `sequence`/`verify` from it, so the panic
+                /// names the install site and the rule instead of surfacing a
+                /// bare `BorrowMutError`. The plain `borrow_mut` is an
+                /// internal invariant: no user callback or destructor runs
+                /// while the queue is borrowed.
+                fn borrow_sequence<T: 'static>(
+                    st: &State<T>,
+                ) -> ::std::cell::RefMut<
+                    '_,
+                    ::std::collections::VecDeque<SeqAction<T>>,
+                > {
+                    if st.0.__sp_predicate_busy.get() {
+                        predicate_reentry_panic(st);
+                    }
+                    st.0.__sp_sequence.borrow_mut()
+                }
+
+                #[cold]
+                fn predicate_reentry_panic<T: 'static>(st: &State<T>) -> ! {
+                    panic!(
+                        "shadow-point: the guard installed at {} is inside a \
+                         `when` predicate: calling `sequence`/`verify` from it \
+                         is not allowed; predicates must be pure checks",
+                        st.0.__sp_installed_at,
+                    )
+                }
+
+                /// Sets the predicate-busy flag for the duration of the call
+                /// and clears it on normal return and on unwind.
+                struct PredicateBusy<'a>(&'a ::std::cell::Cell<bool>);
+
+                impl<'a> PredicateBusy<'a> {
+                    fn enter(flag: &'a ::std::cell::Cell<bool>) -> Self {
+                        flag.set(true);
+                        Self(flag)
+                    }
+                }
+
+                impl Drop for PredicateBusy<'_> {
+                    fn drop(&mut self) {
+                        self.0.set(false);
+                    }
+                }
+
+                /// The phase-1 result of inspecting the sequence head.
+                enum Head<P> {
+                    /// No head match: the fire falls through to fire-once.
+                    Fallthrough,
+                    /// A plain head entry: pop it.
+                    Consume,
+                    /// A predicate-gated head entry: evaluate the predicate
+                    /// outside the borrow, then pop it on `true`.
+                    Gated(P),
                 }
 
                 fn build_sequence<T: 'static>(
@@ -925,8 +989,14 @@ macro_rules! define_sp {
                         seq: ::std::collections::VecDeque::new(),
                     };
                     f(&mut builder);
-                    *st.0.__sp_sequence.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        builder.seq;
+                    // Replace under the borrow; destroy the old queue only
+                    // after it is released — its closures may capture values
+                    // whose `Drop` re-enters `sequence`.
+                    let replaced = {
+                        let mut seq = borrow_sequence(st);
+                        ::std::mem::replace(&mut *seq, builder.seq)
+                    };
+                    drop(replaced);
                 }
 
                 fn set_every<T: 'static>(
@@ -934,7 +1004,9 @@ macro_rules! define_sp {
                 ) {
                     let mut every = Every { $( $method: None, )+ };
                     f(&mut every);
-                    *st.0.__sp_every.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = every;
+                    // Same rule as `build_sequence`: `replace` hands the old
+                    // registration back for destruction after the borrow.
+                    drop(st.0.__sp_every.replace(every));
                 }
 
                 fn report_while_unwinding(message: &str) {
@@ -955,7 +1027,7 @@ macro_rules! define_sp {
                     message: &str,
                     raise: impl FnOnce(),
                 ) {
-                    st.0.__sp_reported.store(true, ::std::sync::atomic::Ordering::SeqCst);
+                    st.0.__sp_reported.set(true);
                     if unwinding {
                         report_while_unwinding(message);
                     } else {
@@ -967,16 +1039,11 @@ macro_rules! define_sp {
                 fn assert_fires<T: 'static>(
                     st: &State<T>, from_drop: bool,
                 ) {
-                    if from_drop
-                        && st.0.__sp_reported.load(::std::sync::atomic::Ordering::SeqCst)
-                    {
+                    if from_drop && st.0.__sp_reported.get() {
                         return;
                     }
                     let unwinding = std::thread::panicking();
-                    let seq = st
-                        .0.__sp_sequence
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let seq = borrow_sequence(st);
                     if !seq.is_empty() {
                         let message = format!(
                             "sync point sequence not fully consumed: \
@@ -994,15 +1061,10 @@ macro_rules! define_sp {
                     } else {
                         drop(seq);
                     }
-                    let expected = st
-                        .0.__sp_expected
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    for (i, expected) in expected.iter().enumerate() {
-                        let Some(expected) = expected else { continue };
-                        let actual = st.0.__sp_calls[i]
-                            .load(::std::sync::atomic::Ordering::SeqCst);
-                        if actual == *expected {
+                    for (i, expected) in st.0.__sp_expected.iter().enumerate() {
+                        let Some(expected) = expected.get() else { continue };
+                        let actual = st.0.__sp_calls[i].get();
+                        if actual == expected {
                             continue;
                         }
                         let message = format!(
@@ -1012,7 +1074,7 @@ macro_rules! define_sp {
                             st.0.__sp_installed_at,
                         );
                         report_mismatch(st, unwinding, &message, || {
-                            assert_eq!(actual, *expected, "{message}");
+                            assert_eq!(actual, expected, "{message}");
                         });
                     }
                 }
@@ -1058,57 +1120,82 @@ macro_rules! define_sp {
                                 index: idx,
                             });
                             let every = {
-                                let guard = st
-                                    .0.__sp_every
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                let guard = st.0.__sp_every.borrow();
                                 guard.$method.clone()
                             };
                             if let Some(f) = every {
                                 f(&st.0.__sp_value $( , $arg)*);
                             }
-                            let (head_expects, consumed) = {
-                                let mut seq = st
-                                    .0.__sp_sequence
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            // Phase 1: inspect the head under a short borrow.
+                            // A gated head only clones its predicate out
+                            // here. An ordering violation formats its message
+                            // under the borrow but panics after the release,
+                            // so even a user panic hook never sees the queue
+                            // borrowed.
+                            let head: Result<Head<_>, String> = {
+                                let seq = borrow_sequence(st);
                                 match seq.front() {
-                                    None => (false, None),
-                                    Some(front) if front.matches(h) => {
-                                        let pass = match front {
-                                            SeqAction::$method(Some(pred), _) => {
-                                                pred($($arg),*)
-                                            }
-                                            SeqAction::$method(None, _) => true,
-                                            // front.matches(h) guarantees this variant.
-                                            _ => unreachable!(
-                                                "shadow-point: sequence head matched a \
-                                                 different hook variant"
-                                            ),
-                                        };
-                                        if pass {
-                                            (true, seq.pop_front())
-                                        } else {
-                                            (true, None)
+                                    None => Ok(Head::Fallthrough),
+                                    Some(front) if front.matches(h) => match front {
+                                        SeqAction::$method(Some(pred), _) => {
+                                            Ok(Head::Gated(::std::rc::Rc::clone(pred)))
                                         }
-                                    }
+                                        SeqAction::$method(None, _) => Ok(Head::Consume),
+                                        // front.matches(h) guarantees this variant.
+                                        _ => unreachable!(
+                                            "shadow-point: sequence head matched a \
+                                             different hook variant"
+                                        ),
+                                    },
                                     Some(front) => {
-                                        let has_more =
-                                            seq.iter().any(|e| e.matches(h));
-                                        if !has_more {
-                                            (false, None)
-                                        } else {
-                                            // A guard owns its own
-                                            // sequence, so an out-of-order
-                                            // fire is a one-thread ordering
-                                            // violation — panic, never park.
-                                            panic!(
+                                        if seq.iter().any(|e| e.matches(h)) {
+                                            // A guard owns its own sequence,
+                                            // so an out-of-order fire is a
+                                            // one-thread ordering violation —
+                                            // panic, never park.
+                                            Err(format!(
                                                 "sync point ordering violation: \
                                                  expected `{}` next but `{}` fired",
                                                 front.name(),
-                                                __sp_name(h)
-                                            )
+                                                __sp_name(h),
+                                            ))
+                                        } else {
+                                            Ok(Head::Fallthrough)
                                         }
+                                    }
+                                }
+                            };
+                            let head = match head {
+                                Ok(head) => head,
+                                Err(message) => panic!("{message}"),
+                            };
+                            // Phase 2: evaluate a gated head outside the
+                            // borrow. `PredicateBusy` makes a reentrant
+                            // `sequence`/`verify` a diagnosed panic; the queue
+                            // cannot change otherwise.
+                            let (head_expects, consumed) = match head {
+                                Head::Fallthrough => (false, None),
+                                Head::Consume => (true, borrow_sequence(st).pop_front()),
+                                Head::Gated(pred) => {
+                                    let pass = {
+                                        let _busy = PredicateBusy::enter(
+                                            &st.0.__sp_predicate_busy,
+                                        );
+                                        pred($($arg),*)
+                                    };
+                                    if pass {
+                                        let consumed = borrow_sequence(st).pop_front();
+                                        debug_assert!(
+                                            matches!(
+                                                consumed,
+                                                Some(SeqAction::$method(..))
+                                            ),
+                                            "shadow-point: the sequence head changed \
+                                             under a `when` predicate"
+                                        );
+                                        (true, consumed)
+                                    } else {
+                                        (true, None)
                                     }
                                 }
                             };
@@ -1121,14 +1208,7 @@ macro_rules! define_sp {
                                 ),
                                 None => {
                                     if idx == 0 && !head_expects {
-                                        let fire_once = {
-                                            let mut slot = st
-                                                .1
-                                                .$method
-                                                .lock()
-                                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                            slot.take()
-                                        };
+                                        let fire_once = st.1.$method.take();
                                         if let Some(f) = fire_once {
                                             f(&st.0.__sp_value $( , $arg)*);
                                         }

@@ -79,10 +79,20 @@ reserved-name details are in the `define_sp!` rustdoc.
   while an inner guard is live gives no verdict and frees nothing; the last
   owner may be the inner `Guard`. The raise-or-print-on-unwind rule and the
   deliberate leak on a failing thread are unchanged.
-- Counters are a `Vec<AtomicUsize>` sized by the hook list; the `__SP_COUNT`
+- Counters are a `Vec<Cell<usize>>` sized by the hook list; the `__SP_COUNT`
   associated constant and the `[T; N]: Default` (N ≤ 32) ceiling are gone.
   The diagnostics name table lives on as a private `__SP_NAMES` in the
   generated machinery.
+- The generated state of a private guard is single-threaded: `RefCell` for
+  `every`/`sequence` and `Cell` for counters, expected counts, the reported
+  flag, fire-once slots, and the predicate-busy flag. Poison recovery and
+  `SeqCst` are gone from that state, and no user callback or destructor runs
+  under a state borrow (the `when` predicate included). Observable change: calling
+  `sequence` or `verify` on a guard from its own `when` predicate now panics
+  with a `shadow-point:` diagnostic naming the guard's install site instead of
+  self-deadlocking; a blocking predicate parks the firing thread inside the
+  instrumented frame like any dispatch closure and can hang, bounded only by
+  `Gate::must_wait`/`wait_timeout`.
 - Non-`Copy` hook arguments are rejected at the declaration (a nested-fn
   const check spans the declared type) instead of failing inside the
   expansion. Arguments must be `Copy`; declare a reference or raw pointer
