@@ -113,7 +113,7 @@ of the same module is a separate install and is not suppressed.
 | assert now | `guard.verify()` — same checks as drop, at the call site |
 | every fire | `guard.every(\|e\| { e.<name>(f); })` |
 | ordered (per worker) | `guard.sequence(\|s\| { s.a(f).b(g); })` — a fire of a hook that a later pending step expects, while an earlier step is unfired, panics; a hook with no pending entry falls through |
-| conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires the first time `pred` passes. `pred` runs under the sequence lock: keep it a pure check (a blocking predicate can deadlock the test) |
+| conditional step | `s.when(pred).<name>(f)` — only inside `sequence`; the step fires the first time `pred` passes. `pred` runs under the sequence borrow: keep it a pure check (a blocking predicate can hang the test; `sequence`/`verify` from it panics with a `shadow-point:` diagnostic) |
 | cross-thread order | `Gate` in the worker bodies after `invoke!`; dispatch closures record and set gates — a wait there is only the deliberate freeze (see "Using guards across threads"), always with a budget |
 
 `<name>` is a hook declared in `define_sp!`. `.fires(n)` counts hook fires,
