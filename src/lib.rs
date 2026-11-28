@@ -785,8 +785,10 @@ macro_rules! define_sp {
                     /// channel recv) holds the borrow for as long as it waits
                     /// and can hang the test; calling `sequence` or `verify` on
                     /// the same guard from it panics with a `shadow-point:`
-                    /// diagnostic instead of self-deadlocking. The step closure
-                    /// runs outside the borrow.
+                    /// diagnostic instead of self-deadlocking. Only `sequence`
+                    /// and `verify` are diagnosed; `fires`, `every`, and
+                    /// registration are not. The step closure runs outside the
+                    /// borrow.
                     pub fn when<P>(&mut self, pred: P) -> When<'_, T, P> {
                         When { seq: self, pred }
                     }

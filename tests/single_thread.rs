@@ -1388,3 +1388,49 @@ fn replaced_sequence_is_dropped_outside_the_borrow() {
     let g = slot.borrow_mut().take().expect("the guard is in the slot");
     drop(g);
 }
+
+/// The same drop-outside-the-borrow rule for `every`: the old registration's
+/// captured destructor may re-enter `every`, and its registration wins.
+#[test]
+fn replaced_every_is_dropped_outside_the_borrow() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct ReenterOnDrop(Rc<RefCell<Option<single::single_sp::Guard<()>>>>);
+    impl Drop for ReenterOnDrop {
+        fn drop(&mut self) {
+            if let Some(g) = self.0.borrow().as_ref() {
+                g.every(|e| {
+                    e.c(|(), _| ());
+                });
+            }
+        }
+    }
+
+    let slot: Rc<RefCell<Option<single::single_sp::Guard<()>>>> = Rc::new(RefCell::new(None));
+    let g = single::single_sp::guard(());
+    let marker = ReenterOnDrop(slot.clone());
+    g.every(|e| {
+        e.a(move |(), _| {
+            let _ = &marker;
+        });
+    });
+    *slot.borrow_mut() = Some(g);
+
+    // The replacement drops the old `Every`; the marker's `Drop` registers
+    // `c`, replacing the `b` registration made by this call.
+    slot.borrow()
+        .as_ref()
+        .expect("the guard is in the slot")
+        .every(|e| {
+            e.b(|(), _| ());
+        });
+
+    shadow_point::invoke!(single::single_sp, c(0));
+    slot.borrow()
+        .as_ref()
+        .expect("the guard is in the slot")
+        .verify();
+    let g = slot.borrow_mut().take().expect("the guard is in the slot");
+    drop(g);
+}
