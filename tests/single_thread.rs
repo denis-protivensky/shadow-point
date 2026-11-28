@@ -1084,6 +1084,7 @@ mod free_names {
             __sp_calls(),
             __sp_expected(),
             __sp_reported(),
+            __sp_predicate_busy(),
             // fixed free functions and constructors
             new_state(),
             new_owner(),
@@ -1098,6 +1099,7 @@ mod free_names {
             assert_fires(),
             report_mismatch(),
             report_while_unwinding(),
+            predicate_reentry_panic(),
             // the name table and its accessor
             __SP_NAMES(),
             __sp_name(),
@@ -1108,6 +1110,7 @@ mod free_names {
             Owner(),
             Guard(),
             Hooks(),
+            PredicateBusy(),
             Default(),
             TL(),
             DEFAULT(),
@@ -1226,9 +1229,9 @@ fn non_send_state_and_dispatch_captures_are_legal() {
     assert_eq!(*hits.borrow(), [1, 1, 1]);
 }
 
-/// A `when` predicate is the only place user code runs under the sequence
-/// borrow. Re-entering `sequence` from it must produce the domain diagnostic
-/// (install site + the purity rule), not a bare `BorrowMutError`.
+/// A `when` predicate must not touch the guard's sequence. Re-entering
+/// `sequence` from it must produce the domain diagnostic (install site + the
+/// purity rule), not a bare `BorrowMutError` or a deadlock.
 #[test]
 fn when_predicate_reentering_sequence_panics_with_domain_message() {
     use std::cell::RefCell;
@@ -1257,7 +1260,7 @@ fn when_predicate_reentering_sequence_panics_with_domain_message() {
     let r = std::panic::catch_unwind(|| shadow_point::invoke!(single::single_sp, a(0)));
     let msg = panic_message(&r);
     assert!(msg.contains("shadow-point:"), "{msg}");
-    assert!(msg.contains("already borrowed"), "{msg}");
+    assert!(msg.contains("inside a `when` predicate"), "{msg}");
     assert!(msg.contains("pure check"), "{msg}");
     assert!(
         msg.contains(&format!("installed at tests/single_thread.rs:{site}")),
@@ -1306,7 +1309,7 @@ fn when_predicate_reentering_verify_panics_with_domain_message() {
     let r = std::panic::catch_unwind(|| shadow_point::invoke!(single::single_sp, a(0)));
     let msg = panic_message(&r);
     assert!(msg.contains("shadow-point:"), "{msg}");
-    assert!(msg.contains("already borrowed"), "{msg}");
+    assert!(msg.contains("inside a `when` predicate"), "{msg}");
     assert!(msg.contains("pure check"), "{msg}");
     assert!(
         msg.contains(&format!("installed at tests/single_thread.rs:{site}")),
@@ -1326,8 +1329,8 @@ fn when_predicate_reentering_verify_panics_with_domain_message() {
     drop(g);
 }
 
-/// A predicate panic unwinds through the borrow; the borrow is released, and
-/// a later clean drop reports the unconsumed entry rather than a borrow error.
+/// A predicate panic unwinds out of dispatch; the gated entry stays at the
+/// head, and a later clean drop reports it rather than a borrow error.
 #[test]
 fn panicking_when_predicate_leaves_the_sequence_trail() {
     let g = single::single_sp::guard(());
@@ -1341,7 +1344,7 @@ fn panicking_when_predicate_leaves_the_sequence_trail() {
     let d = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(g)));
     let msg = panic_message(&d);
     assert!(msg.contains("sequence not fully consumed"), "{msg}");
-    assert!(!msg.contains("already borrowed"), "{msg}");
+    assert!(!msg.contains("inside a `when` predicate"), "{msg}");
 }
 
 /// Replacing a sequence destroys the old queue after the borrow is released:

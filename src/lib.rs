@@ -495,14 +495,13 @@ impl Drop for ExecSink {
 /// may capture `Rc` and other `!Send` values; a captured borrow still fails
 /// the `'static` bound.
 ///
-/// A `when` predicate is evaluated **under the sequence borrow**: it must be a
-/// pure check. A predicate that blocks (a `Gate` wait, a channel recv) holds
-/// the borrow for as long as it waits and can still hang the test; calling
-/// `sequence` or `verify` on the same guard from it panics with a
-/// `shadow-point:` diagnostic naming the guard's install site instead of
-/// self-deadlocking. The `every` and fire-once closures run outside the
-/// borrow. Nothing else is enforced: `fires`, `every`, and registration from a
-/// predicate are not diagnosed.
+/// A `when` predicate is evaluated on every matching fire, before the step; it
+/// must be a pure check. Calling `sequence` or `verify` on the same guard from
+/// it panics with a `shadow-point:` diagnostic naming the guard's install
+/// site. A blocking predicate parks the firing thread inside the instrumented
+/// function, like any dispatch closure, so a `Gate` wait there needs the same
+/// budget reasoning. Nothing else is enforced: `fires`, `every`, and
+/// registration from a predicate are allowed.
 ///
 /// Every closure that dispatch calls runs on the caller's stack inside the
 /// instrumented function: `every`, fire-once, and sequence steps. A blocking
@@ -713,7 +712,7 @@ macro_rules! define_sp {
 
                 pub enum SeqAction<T: 'static> {
                     $( $method(
-                        Option<Box<dyn Fn($($arg_ty),*) -> bool>>,
+                        Option<::std::rc::Rc<dyn Fn($($arg_ty),*) -> bool>>,
                         Box<dyn FnOnce(&T $( , $arg_ty)*)>,
                     ), )+
                 }
@@ -780,15 +779,15 @@ macro_rules! define_sp {
                     /// arguments, so a single-hook predicate need only
                     /// satisfy its own signature.
                     ///
-                    /// The predicate runs under the sequence borrow and must
-                    /// be a pure check: a blocking predicate (a `Gate` wait, a
-                    /// channel recv) holds the borrow for as long as it waits
-                    /// and can hang the test; calling `sequence` or `verify` on
-                    /// the same guard from it panics with a `shadow-point:`
-                    /// diagnostic instead of self-deadlocking. Only `sequence`
-                    /// and `verify` are diagnosed; `fires`, `every`, and
-                    /// registration are not. The step closure runs outside the
-                    /// borrow.
+                    /// The predicate runs on every matching fire, before the
+                    /// step; it must be a pure check. Calling `sequence` or
+                    /// `verify` on the same guard from it panics with a
+                    /// `shadow-point:` diagnostic. A blocking predicate parks
+                    /// the firing thread inside the instrumented function, like
+                    /// any dispatch closure. Only those two calls are
+                    /// diagnosed; `fires`, `every`, and registration are not.
+                    /// The step closure runs after the predicate returns
+                    /// `true`.
                     pub fn when<P>(&mut self, pred: P) -> When<'_, T, P> {
                         When { seq: self, pred }
                     }
@@ -814,7 +813,10 @@ macro_rules! define_sp {
                             P: Fn($($arg_ty),*) -> bool + 'static,
                         {
                             self.seq.seq.push_back(
-                                SeqAction::$method(Some(Box::new(self.pred)), Box::new(f)),
+                                SeqAction::$method(
+                                    Some(::std::rc::Rc::new(self.pred)),
+                                    Box::new(f),
+                                ),
                             );
                             self.seq
                         }
@@ -837,6 +839,7 @@ macro_rules! define_sp {
                     __sp_calls: ::std::vec::Vec<::std::cell::Cell<usize>>,
                     __sp_expected: ::std::vec::Vec<::std::cell::Cell<Option<usize>>>,
                     __sp_reported: ::std::cell::Cell<bool>,
+                    __sp_predicate_busy: ::std::cell::Cell<bool>,
                 }
 
                 struct StateRegs<T: 'static> {
@@ -871,6 +874,7 @@ macro_rules! define_sp {
                                 .map(|_| ::std::cell::Cell::new(None))
                                 .collect(),
                             __sp_reported: ::std::cell::Cell::new(false),
+                            __sp_predicate_busy: ::std::cell::Cell::new(false),
                         },
                         StateRegs { $( $method: ::std::cell::Cell::new(None), )+ },
                     )
@@ -919,28 +923,51 @@ macro_rules! define_sp {
                     }
                 }
 
-                /// The single exclusive access point to the sequence queue.
+                /// The single access point to the sequence queue.
                 ///
-                /// Every read and write goes through here. A reentrant
-                /// `sequence`/`verify` from a `when` predicate — the one place
-                /// user code runs under the borrow — then fails with a domain
-                /// diagnostic instead of a bare `BorrowMutError`, which would
-                /// carry neither the install site nor the rule.
+                /// Every read and write goes through here. A predicate runs
+                /// outside the borrow; `__sp_predicate_busy` is the tripwire
+                /// for a reentrant `sequence`/`verify` from it, so the panic
+                /// names the install site and the rule instead of surfacing a
+                /// bare `BorrowMutError`. The plain `borrow_mut` is an
+                /// internal invariant: no user code runs while the queue is
+                /// borrowed.
                 fn borrow_sequence<T: 'static>(
                     st: &State<T>,
                 ) -> ::std::cell::RefMut<
                     '_,
                     ::std::collections::VecDeque<SeqAction<T>>,
                 > {
-                    match st.0.__sp_sequence.try_borrow_mut() {
-                        Ok(seq) => seq,
-                        Err(_) => panic!(
-                            "shadow-point: the sequence of the guard installed at {} \
-                             is already borrowed: re-entering `sequence`/`verify` \
-                             from a `when` predicate is not allowed; predicates \
-                             must be pure checks",
-                            st.0.__sp_installed_at,
-                        ),
+                    if st.0.__sp_predicate_busy.get() {
+                        predicate_reentry_panic(st);
+                    }
+                    st.0.__sp_sequence.borrow_mut()
+                }
+
+                #[cold]
+                fn predicate_reentry_panic<T: 'static>(st: &State<T>) -> ! {
+                    panic!(
+                        "shadow-point: the guard installed at {} is inside a \
+                         `when` predicate: calling `sequence`/`verify` from it \
+                         is not allowed; predicates must be pure checks",
+                        st.0.__sp_installed_at,
+                    )
+                }
+
+                /// Sets the predicate-busy flag for the duration of the call
+                /// and clears it on normal return and on unwind.
+                struct PredicateBusy<'a>(&'a ::std::cell::Cell<bool>);
+
+                impl<'a> PredicateBusy<'a> {
+                    fn enter(flag: &'a ::std::cell::Cell<bool>) -> Self {
+                        flag.set(true);
+                        Self(flag)
+                    }
+                }
+
+                impl Drop for PredicateBusy<'_> {
+                    fn drop(&mut self) {
+                        self.0.set(false);
                     }
                 }
 
@@ -1088,33 +1115,33 @@ macro_rules! define_sp {
                             if let Some(f) = every {
                                 f(&st.0.__sp_value $( , $arg)*);
                             }
-                            let (head_expects, consumed) = {
-                                let mut seq = borrow_sequence(st);
+                            // Phase 1: inspect the head under the sequence
+                            // borrow. A gated head only clones its predicate
+                            // out here; the borrow is released before the
+                            // predicate runs, so no user code executes under
+                            // a state borrow.
+                            let gated: Option<
+                                Option<::std::rc::Rc<dyn Fn($($arg_ty),*) -> bool>>,
+                            > = {
+                                let seq = borrow_sequence(st);
                                 match seq.front() {
-                                    None => (false, None),
-                                    Some(front) if front.matches(h) => {
-                                        let pass = match front {
-                                            SeqAction::$method(Some(pred), _) => {
-                                                pred($($arg),*)
-                                            }
-                                            SeqAction::$method(None, _) => true,
-                                            // front.matches(h) guarantees this variant.
-                                            _ => unreachable!(
-                                                "shadow-point: sequence head matched a \
-                                                 different hook variant"
-                                            ),
-                                        };
-                                        if pass {
-                                            (true, seq.pop_front())
-                                        } else {
-                                            (true, None)
+                                    None => None,
+                                    Some(front) if front.matches(h) => match front {
+                                        SeqAction::$method(Some(pred), _) => {
+                                            Some(Some(::std::rc::Rc::clone(pred)))
                                         }
-                                    }
+                                        SeqAction::$method(None, _) => Some(None),
+                                        // front.matches(h) guarantees this variant.
+                                        _ => unreachable!(
+                                            "shadow-point: sequence head matched a \
+                                             different hook variant"
+                                        ),
+                                    },
                                     Some(front) => {
                                         let has_more =
                                             seq.iter().any(|e| e.matches(h));
                                         if !has_more {
-                                            (false, None)
+                                            None
                                         } else {
                                             // A guard owns its own
                                             // sequence, so an out-of-order
@@ -1127,6 +1154,36 @@ macro_rules! define_sp {
                                                 __sp_name(h)
                                             )
                                         }
+                                    }
+                                }
+                            };
+                            // Phase 2: evaluate a gated head outside the
+                            // borrow. `PredicateBusy` makes a reentrant
+                            // `sequence`/`verify` a diagnosed panic; the
+                            // queue cannot change otherwise.
+                            let (head_expects, consumed) = match gated {
+                                None => (false, None),
+                                Some(None) => (true, borrow_sequence(st).pop_front()),
+                                Some(Some(pred)) => {
+                                    let pass = {
+                                        let _busy = PredicateBusy::enter(
+                                            &st.0.__sp_predicate_busy,
+                                        );
+                                        pred($($arg),*)
+                                    };
+                                    if pass {
+                                        let consumed = borrow_sequence(st).pop_front();
+                                        debug_assert!(
+                                            matches!(
+                                                consumed,
+                                                Some(SeqAction::$method(..))
+                                            ),
+                                            "shadow-point: the sequence head changed \
+                                             under a `when` predicate"
+                                        );
+                                        (true, consumed)
+                                    } else {
+                                        (true, None)
                                     }
                                 }
                             };

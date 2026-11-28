@@ -85,11 +85,13 @@ reserved-name details are in the `define_sp!` rustdoc.
   generated machinery.
 - The generated state of a private guard is single-threaded: `RefCell` for
   `every`/`sequence` and `Cell` for counters, expected counts, the reported
-  flag, and fire-once slots. Poison recovery and `SeqCst` are gone from that
-  state. Observable change: calling `sequence` or `verify` on a guard from its
-  own `when` predicate now panics with a `shadow-point:` diagnostic naming
-  the guard's install site instead of self-deadlocking; a blocking predicate
-  still holds the sequence borrow and can hang, bounded only by
+  flag, fire-once slots, and the predicate-busy flag. Poison recovery and
+  `SeqCst` are gone from that state, and no user code runs under a state
+  borrow (the `when` predicate included). Observable change: calling
+  `sequence` or `verify` on a guard from its own `when` predicate now panics
+  with a `shadow-point:` diagnostic naming the guard's install site instead of
+  self-deadlocking; a blocking predicate parks the firing thread inside the
+  instrumented frame like any dispatch closure and can hang, bounded only by
   `Gate::must_wait`/`wait_timeout`.
 - Non-`Copy` hook arguments are rejected at the declaration (a nested-fn
   const check spans the declared type) instead of failing inside the
